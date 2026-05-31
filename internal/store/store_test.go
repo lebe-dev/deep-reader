@@ -24,7 +24,7 @@ func openStore(t *testing.T) *store.SQLite {
 	if err != nil {
 		t.Fatalf("NewSQLite: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -259,6 +259,19 @@ func TestEnrichmentRoundtrip(t *testing.T) {
 		t.Errorf("glossary: got %d, want 1", len(payload.Enrichment.Glossary))
 	}
 
+	// The single token [0,0] is covered by the sentence [0,0], so coverage is
+	// full both on the payload and on the library metadata projection.
+	if payload.EnrichmentCoverage != 1.0 {
+		t.Errorf("payload coverage: got %v, want 1.0", payload.EnrichmentCoverage)
+	}
+	metas, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta: %v", err)
+	}
+	if len(metas) != 1 || metas[0].EnrichmentCoverage != 1.0 {
+		t.Errorf("meta coverage: got %+v, want one row at 1.0", metas)
+	}
+
 	// Verify enriched_at via GetArticle.
 	got, err := s.GetArticle(ctx, a.ID)
 	if err != nil {
@@ -266,6 +279,91 @@ func TestEnrichmentRoundtrip(t *testing.T) {
 	}
 	if !got.EnrichedAt.Equal(enrichedAt) {
 		t.Errorf("enriched_at: got %v, want %v", got.EnrichedAt, enrichedAt)
+	}
+}
+
+// TestSaveEnrichment_PartialCoverage verifies that the sentence-coverage signal
+// reflects a lazy/truncated LLM response: when the sentences only span the first
+// half of the tokens, coverage is the covered fraction, not 1.0.
+func TestSaveEnrichment_PartialCoverage(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/partial")
+	// Four tokens; only the first two are covered by a sentence.
+	a.Tokens = []model.Token{
+		{Index: 0, Text: "a", Start: 0, End: 1},
+		{Index: 1, Text: "b", Start: 1, End: 2},
+		{Index: 2, Text: "c", Start: 2, End: 3},
+		{Index: 3, Text: "d", Start: 3, End: 4},
+	}
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	enrichment := model.Enrichment{
+		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 1, Translation: "ab"}},
+	}
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.EnrichmentCoverage != 0.5 {
+		t.Errorf("coverage: got %v, want 0.5", payload.EnrichmentCoverage)
+	}
+}
+
+// TestSaveEnrichment_CoverageEdgeCases exercises the clamping and de-duplication
+// logic of the coverage computation through the public SaveEnrichment path: the
+// LLM emits out-of-range, overlapping, or inverted token ranges, and the signal
+// must stay in [0,1] and count each token at most once. All articles have four
+// tokens.
+func TestSaveEnrichment_CoverageEdgeCases(t *testing.T) {
+	cases := []struct {
+		name      string
+		sentences []model.Sentence
+		want      float64
+	}{
+		{"no sentences", nil, 0},
+		{"out-of-range clamps to full", []model.Sentence{{StartIndex: -5, EndIndex: 100}}, 1.0},
+		{"negative start clamps", []model.Sentence{{StartIndex: -2, EndIndex: 1}}, 0.5},
+		{"end overflow clamps", []model.Sentence{{StartIndex: 2, EndIndex: 99}}, 0.5},
+		{"overlap counted once", []model.Sentence{{StartIndex: 0, EndIndex: 1}, {StartIndex: 1, EndIndex: 2}}, 0.75},
+		{"inverted range ignored", []model.Sentence{{StartIndex: 3, EndIndex: 1}}, 0},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openStore(t)
+			ctx := context.Background()
+
+			a := makeArticle(fmt.Sprintf("https://example.com/edge-%d", i))
+			a.Tokens = []model.Token{
+				{Index: 0, Text: "a", Start: 0, End: 1},
+				{Index: 1, Text: "b", Start: 1, End: 2},
+				{Index: 2, Text: "c", Start: 2, End: 3},
+				{Index: 3, Text: "d", Start: 3, End: 4},
+			}
+			if err := s.CreateArticle(ctx, a); err != nil {
+				t.Fatalf("CreateArticle: %v", err)
+			}
+
+			if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{Sentences: tc.sentences}, time.Now().UTC()); err != nil {
+				t.Fatalf("SaveEnrichment: %v", err)
+			}
+
+			payload, err := s.GetArticlePayload(ctx, a.ID)
+			if err != nil {
+				t.Fatalf("GetArticlePayload: %v", err)
+			}
+			if payload.EnrichmentCoverage != tc.want {
+				t.Errorf("coverage: got %v, want %v", payload.EnrichmentCoverage, tc.want)
+			}
+		})
 	}
 }
 

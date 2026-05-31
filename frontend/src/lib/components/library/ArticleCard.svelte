@@ -5,6 +5,7 @@
 	import { Progress } from '$lib/components/ui/progress';
 	import type { ArticleMeta, Progress as ProgressType } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
+	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { enqueueRetry } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
@@ -135,6 +136,9 @@
 			<div class="flex shrink-0 items-center gap-1">
 				{#if isNew}
 					<Badge variant="outline" class="border-primary text-primary rounded-md">New</Badge>
+				{/if}
+				{#if article.status === 'enriched'}
+					<CoverageBadge coverage={article.enrichment_coverage} />
 				{/if}
 				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
 			</div>

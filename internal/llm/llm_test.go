@@ -147,7 +147,7 @@ func TestEnrich_RequestShape(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -183,7 +183,7 @@ func TestEnrich_DecodesEnrichment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -256,7 +256,7 @@ func TestEnrich_AuthHeader(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -339,11 +339,11 @@ func TestEnrich_SettingsModelOverride(t *testing.T) {
 			Model string `json:"model"`
 		}
 		data, _ := io.ReadAll(r.Body)
-		json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &body)
 		capturedModel = body.Model
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -373,7 +373,7 @@ func TestEnrich_PromptContainsTokens(t *testing.T) {
 			} `json:"messages"`
 		}
 		data, _ := io.ReadAll(r.Body)
-		json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &body)
 		for _, m := range body.Messages {
 			switch m.Role {
 			case "system":
@@ -384,7 +384,7 @@ func TestEnrich_PromptContainsTokens(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -425,7 +425,7 @@ func TestEnrich_FallbackToJSONObject(t *testing.T) {
 			} `json:"response_format"`
 		}
 		data, _ := io.ReadAll(r.Body)
-		json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &body)
 
 		if body.ResponseFormat.Type == "json_schema" {
 			// Simulate a provider that does not support json_schema.
@@ -435,7 +435,7 @@ func TestEnrich_FallbackToJSONObject(t *testing.T) {
 		// Second call with json_object succeeds.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -466,7 +466,7 @@ func TestEnrich_FallbackOn404NoEndpoints(t *testing.T) {
 			} `json:"response_format"`
 		}
 		data, _ := io.ReadAll(r.Body)
-		json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &body)
 
 		if body.ResponseFormat.Type == "json_schema" {
 			// Mirror OpenRouter's 404 when no endpoint matches the
@@ -477,7 +477,7 @@ func TestEnrich_FallbackOn404NoEndpoints(t *testing.T) {
 		// Second call with json_object succeeds.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
@@ -513,7 +513,7 @@ func TestEnrich_UsageZeroWhenAbsent(t *testing.T) {
 		b, _ := json.Marshal(r2)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer srv.Close()
 
@@ -543,7 +543,7 @@ func TestEnrich_EnrichmentVersionInPrompt(t *testing.T) {
 			} `json:"messages"`
 		}
 		data, _ := io.ReadAll(r.Body)
-		json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &body)
 		for _, m := range body.Messages {
 			if m.Role == "system" {
 				capturedPrompts[call] = m.Content
@@ -552,13 +552,13 @@ func TestEnrich_EnrichmentVersionInPrompt(t *testing.T) {
 		call++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(buildCannedResponse(t))
+		_, _ = w.Write(buildCannedResponse(t))
 	}))
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	client.Enrich(context.Background(), testArticle(), testSettings(), 1)
-	client.Enrich(context.Background(), testArticle(), testSettings(), 2)
+	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), 2)
 
 	if capturedPrompts[0] == capturedPrompts[1] {
 		t.Error("system prompts for version 1 and version 2 are identical; expected them to differ")

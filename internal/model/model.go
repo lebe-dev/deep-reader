@@ -194,6 +194,11 @@ type ArticleMeta struct {
 	EnrichedAt        time.Time `json:"enriched_at,omitzero"`
 	EnrichmentVersion int       `json:"enrichment_version"`
 	TokenCount        int       `json:"token_count"`
+	// EnrichmentCoverage is the fraction [0,1] of tokens covered by at least one
+	// sentence translation — the completeness signal the UI shows so the reader
+	// can tell when the LLM stopped annotating partway through. Zero until the
+	// article is enriched. See store.sentenceCoverage for the definition.
+	EnrichmentCoverage float64 `json:"enrichment_coverage"`
 }
 
 // ArticlePayload is the full enriched-article response from
@@ -210,6 +215,9 @@ type ArticlePayload struct {
 	Tokens            []Token     `json:"tokens"`
 	Enrichment        *Enrichment `json:"enrichment,omitempty"`
 	EnrichmentVersion int         `json:"enrichment_version"`
+	// EnrichmentCoverage mirrors ArticleMeta.EnrichmentCoverage so the reader
+	// page header can show completeness without a separate library lookup.
+	EnrichmentCoverage float64 `json:"enrichment_coverage"`
 }
 
 // ServerInfo holds the non-secret deployment configuration sent to the client

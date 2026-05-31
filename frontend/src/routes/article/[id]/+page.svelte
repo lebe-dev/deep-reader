@@ -20,6 +20,7 @@
 	import type { PopoverContent, SentenceSheetContent } from '$lib/components/reader/reader-utils';
 	import { debounce } from '$lib/components/reader/reader-utils';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
+	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Skeleton } from '$lib/components/ui/skeleton';
@@ -52,6 +53,10 @@
 	const safeSourceUrl = $derived(
 		meta?.source_url && /^https?:\/\//i.test(meta.source_url) ? meta.source_url : null
 	);
+
+	// Enrichment completeness for the header indicator. The payload is the
+	// authoritative source on this page (meta may be absent on a cold network load).
+	const coverage = $derived(payload?.enrichment_coverage ?? null);
 
 	// Popover / sheet state.
 	let wordContent: PopoverContent | null = $state(null);
@@ -283,6 +288,9 @@
 					{meta.source_domain}
 					<ExternalLinkIcon class="size-3" />
 				</a>
+			{/if}
+			{#if coverage !== null}
+				<CoverageBadge {coverage} showLabel />
 			{/if}
 			{#if progress?.is_read}
 				<Badge variant="secondary" class="ml-auto text-xs">Read</Badge>

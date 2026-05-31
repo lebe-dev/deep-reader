@@ -26,7 +26,7 @@ func TestLoadDotEnv(t *testing.T) {
 
 	for _, k := range []string{"HTTP_PORT", "AUTH_TOKEN", "DATABASE_PATH", "LLM_API_KEY", "LLM_MODEL", "LLM_API_BASE_URL", "EMPTY"} {
 		t.Setenv(k, "") // register for cleanup
-		os.Unsetenv(k)
+		_ = os.Unsetenv(k)
 	}
 
 	if err := loadDotEnv(path); err != nil {

@@ -169,7 +169,7 @@ export function resolveClickContent(
 			kind: 'phrase',
 			original: sliceText(tokens, phrase.start_index, phrase.end_index, originalText),
 			phraseType: phrase.type,
-			translationOrDefinition: phrase.translation_or_definition,
+			translationOrDefinition: phrase.translation,
 			startIndex: phrase.start_index,
 			endIndex: phrase.end_index
 		};

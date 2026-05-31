@@ -5,6 +5,29 @@ import tsParser from '@typescript-eslint/parser';
 import svelteParser from 'svelte-eslint-parser';
 import globals from 'globals';
 
+// Svelte 5 runes are compiler-provided globals; declare them so `no-undef`
+// does not flag `.svelte.ts`/`.svelte.js` modules (the .svelte parser injects
+// them for component files, but plain rune modules are parsed as TS).
+const runes = {
+	$state: 'readonly',
+	$derived: 'readonly',
+	$effect: 'readonly',
+	$props: 'readonly',
+	$bindable: 'readonly',
+	$inspect: 'readonly',
+	$host: 'readonly'
+};
+
+// Shared no-unused-vars config: defer to the type-aware rule and let `_`-prefixed
+// names mark deliberately-unused params/vars (e.g. `(_event) => …`, `{#each … as _, i}`).
+const unusedVars = {
+	'no-unused-vars': 'off',
+	'@typescript-eslint/no-unused-vars': [
+		'error',
+		{ argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }
+	]
+};
+
 /** @type {import('eslint').Linter.Config[]} */
 export default [
 	{
@@ -20,14 +43,25 @@ export default [
 			},
 			globals: {
 				...globals.browser,
-				...globals.node
+				...globals.node,
+				...runes
 			}
 		},
 		plugins: {
 			'@typescript-eslint': tseslint
 		},
 		rules: {
-			...tseslint.configs.recommended.rules
+			...tseslint.configs.recommended.rules,
+			...unusedVars
+		}
+	},
+	{
+		// The service worker runs in a worker scope, not a window/document one.
+		files: ['src/service-worker.ts'],
+		languageOptions: {
+			globals: {
+				...globals.serviceworker
+			}
 		}
 	},
 	{
@@ -38,7 +72,8 @@ export default [
 				parser: tsParser
 			},
 			globals: {
-				...globals.browser
+				...globals.browser,
+				...runes
 			}
 		},
 		plugins: {
@@ -46,7 +81,8 @@ export default [
 			'@typescript-eslint': tseslint
 		},
 		rules: {
-			...svelte.configs.recommended.rules
+			...svelte.configs.recommended.rules,
+			...unusedVars
 		}
 	}
 ];

@@ -17,8 +17,29 @@
 
 	let { content, anchorEl, onclose }: Props = $props();
 
-	// Recompute position whenever anchor or content changes.
+	// A tick bumped on scroll/resize so the position recomputes and the panel
+	// stays glued to its token. Without it, the panel keeps its initial fixed
+	// viewport coordinates while the text scrolls underneath, so the tooltip
+	// "drifts away" from the word it describes.
+	let reflowTick = $state(0);
+
+	$effect(() => {
+		if (!content || !anchorEl) return;
+		function reflow() {
+			reflowTick++;
+		}
+		// `true` to catch scrolling inside any nested scroll container too.
+		window.addEventListener('scroll', reflow, true);
+		window.addEventListener('resize', reflow);
+		return () => {
+			window.removeEventListener('scroll', reflow, true);
+			window.removeEventListener('resize', reflow);
+		};
+	});
+
+	// Recompute position whenever anchor, content, or the reflow tick changes.
 	let rect = $derived.by(() => {
+		reflowTick; // track for recomputation on scroll/resize
 		if (!anchorEl || !content) return null;
 		return anchorEl.getBoundingClientRect();
 	});

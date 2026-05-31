@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,34 +59,34 @@ func NewSQLite(ctx context.Context, cfg *config.Config) (*SQLite, error) {
 		return nil, fmt.Errorf("store: open read pool: %w", err)
 	}
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: ping read pool: %w", err)
 	}
 
 	// Write connection — single writer.
 	wdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: open write conn: %w", err)
 	}
 	wdb.SetMaxOpenConns(1)
 	wdb.SetMaxIdleConns(1)
 	if err := wdb.PingContext(ctx); err != nil {
-		db.Close()
-		wdb.Close()
+		_ = db.Close()
+		_ = wdb.Close()
 		return nil, fmt.Errorf("store: ping write conn: %w", err)
 	}
 
 	// Run goose migrations from the embedded FS.
 	goose.SetBaseFS(migrationsFS)
 	if err := goose.SetDialect("sqlite3"); err != nil {
-		db.Close()
-		wdb.Close()
+		_ = db.Close()
+		_ = wdb.Close()
 		return nil, fmt.Errorf("store: goose set dialect: %w", err)
 	}
 	if err := goose.Up(wdb, "migrations"); err != nil {
-		db.Close()
-		wdb.Close()
+		_ = db.Close()
+		_ = wdb.Close()
 		return nil, fmt.Errorf("store: goose up: %w", err)
 	}
 
@@ -278,26 +279,27 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	)
 	if since.IsZero() {
 		const q = `SELECT id, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens)
+                          json_array_length(tokens), enrichment_coverage
                    FROM articles ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q)
 	} else {
 		const q = `SELECT id, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens)
+                          json_array_length(tokens), enrichment_coverage
                    FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: ListArticleMeta: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var metas []model.ArticleMeta
 	for rows.Next() {
 		var m model.ArticleMeta
 		var createdAtStr, enrichedAtStr string
 		if err := rows.Scan(&m.ID, &m.Title, &m.Author, &m.SourceDomain,
-			&m.Status, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount); err != nil {
+			&m.Status, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
+			&m.EnrichmentCoverage); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
 		}
 		if m.CreatedAt, err = parseTime(createdAtStr); err != nil {
@@ -338,7 +340,7 @@ func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, err
 // Enrichment is nil when the article has no enrichment row.
 func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.ArticlePayload, error) {
 	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.tokens,
-                      a.status, a.enrichment_version, e.enrichment
+                      a.status, a.enrichment_version, a.enrichment_coverage, e.enrichment
                FROM articles a
                LEFT JOIN enrichments e ON e.article_id = a.id
                WHERE a.id = ?`
@@ -348,7 +350,7 @@ func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.Artic
 	var tokJSON string
 	var enrichJSON sql.NullString
 	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText,
-		&tokJSON, &p.Status, &p.EnrichmentVersion, &enrichJSON); err != nil {
+		&tokJSON, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &enrichJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
 		}
@@ -408,8 +410,32 @@ func (s *SQLite) SetStatus(ctx context.Context, id, status, errMsg string) error
 	return nil
 }
 
+// sentenceCoverage returns the fraction [0,1] of tokens in [0,tokenCount) that
+// fall within at least one sentence range in e. It is the completeness signal
+// shown in the UI: a low value means the LLM stopped translating partway and
+// left the tail of the article unannotated. Returns 0 when tokenCount is 0.
+func sentenceCoverage(e model.Enrichment, tokenCount int) float64 {
+	if tokenCount <= 0 {
+		return 0
+	}
+	covered := make([]bool, tokenCount)
+	n := 0
+	for _, sentence := range e.Sentences {
+		start := max(sentence.StartIndex, 0)
+		end := min(sentence.EndIndex, tokenCount-1)
+		for i := start; i <= end; i++ {
+			if !covered[i] {
+				covered[i] = true
+				n++
+			}
+		}
+	}
+	return float64(n) / float64(tokenCount)
+}
+
 // SaveEnrichment persists the enrichment blob, sets status=enriched, records
-// enriched_at, and stamps updated_at. The operation is atomic.
+// enriched_at, computes the sentence-coverage completeness signal, and stamps
+// updated_at. The operation is atomic.
 func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time) error {
 	eJSON, err := json.Marshal(e)
 	if err != nil {
@@ -425,6 +451,17 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// Read the token count in-tx to compute coverage against the article the
+	// enrichment belongs to. A missing row means the article was deleted.
+	var tokenCount int
+	if err := tx.QueryRowContext(ctx, `SELECT json_array_length(tokens) FROM articles WHERE id=?`, id).Scan(&tokenCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ports.ErrNotFound
+		}
+		return fmt.Errorf("store: SaveEnrichment token count: %w", err)
+	}
+	coverage := sentenceCoverage(e, tokenCount)
+
 	const upsertEnrich = `INSERT INTO enrichments (article_id, enrichment)
                           VALUES (?,?)
                           ON CONFLICT(article_id) DO UPDATE SET enrichment=excluded.enrichment`
@@ -438,8 +475,8 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 		return fmt.Errorf("store: SaveEnrichment upsert enrichment: %w", err)
 	}
 
-	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=? WHERE id=?`
-	res, err := tx.ExecContext(ctx, updArticle, fmtTime(enrichedAt), fmtTime(now()), id)
+	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=?, enrichment_coverage=? WHERE id=?`
+	res, err := tx.ExecContext(ctx, updArticle, fmtTime(enrichedAt), fmtTime(now()), coverage, id)
 	if err != nil {
 		return fmt.Errorf("store: SaveEnrichment update article: %w", err)
 	}
@@ -470,7 +507,7 @@ func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, erro
 	if err != nil {
 		return nil, fmt.Errorf("store: ListWork: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var arts []model.Article
 	for rows.Next() {
@@ -708,7 +745,7 @@ func (s *SQLite) ListProgress(ctx context.Context, since time.Time) ([]model.Pro
 	if err != nil {
 		return nil, fmt.Errorf("store: ListProgress: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var progs []model.Progress
 	for rows.Next() {
@@ -790,19 +827,9 @@ func isSQLiteUnique(err error) bool {
 	if err == nil {
 		return false
 	}
-	// modernc.org/sqlite wraps errors; the message contains "UNIQUE constraint failed"
-	type sqliteErr interface {
-		Code() int
-	}
-	// SQLite error code 2067 = SQLITE_CONSTRAINT_UNIQUE (primary: 19, extended: 2067)
-	// Check both the error text and the underlying code.
-	msg := err.Error()
-	for i := 0; i < len(msg)-6; i++ {
-		if msg[i:i+6] == "UNIQUE" {
-			return true
-		}
-	}
-	return false
+	// modernc.org/sqlite wraps errors; the message contains "UNIQUE constraint
+	// failed" (extended code 2067 = SQLITE_CONSTRAINT_UNIQUE).
+	return strings.Contains(err.Error(), "UNIQUE")
 }
 
 // isSQLiteForeignKey returns true when err represents a FOREIGN KEY constraint
@@ -813,14 +840,7 @@ func isSQLiteForeignKey(err error) bool {
 	if err == nil {
 		return false
 	}
-	const needle = "FOREIGN KEY"
-	msg := err.Error()
-	for i := 0; i+len(needle) <= len(msg); i++ {
-		if msg[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(err.Error(), "FOREIGN KEY")
 }
 
 // NewID is exported so sibling packages (e.g. ingest) can generate IDs with

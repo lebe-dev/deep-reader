@@ -151,7 +151,7 @@ func TestExtractHappyPath(t *testing.T) {
 	// Start a test HTTP server serving our article HTML.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, testArticleHTML)
+		_, _ = fmt.Fprint(w, testArticleHTML)
 	}))
 	defer srv.Close()
 

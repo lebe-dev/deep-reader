@@ -8,8 +8,7 @@ import {
 	enqueueOutbox,
 	getSyncState,
 	updateSyncState,
-	type OutboxEntry,
-	type OutboxKind
+	type OutboxEntry
 } from '$lib/db';
 import {
 	addArticle as apiAddArticle,

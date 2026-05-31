@@ -174,7 +174,7 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*ports.ExtractR
 		slog.Warn("extract: fetch failed", "url", rawURL, "err", err)
 		return nil, fmt.Errorf("extract: fetch %q: %w", rawURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	slog.Debug("extract: response received",
 		"url", rawURL,
 		"status", resp.StatusCode,

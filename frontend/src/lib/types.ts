@@ -76,7 +76,8 @@ export interface Phrase {
 	start_index: number;
 	end_index: number;
 	type: PhraseType;
-	translation_or_definition: string;
+	/** Contextual translation or definition (backend wire field: `translation`). */
+	translation: string;
 }
 
 /** A full-sentence translation spanning a token range. */
@@ -124,6 +125,12 @@ export interface ArticleMeta {
 	updated_at: string;
 	/** Number of tokens in the article; used to compute reading progress percentage. */
 	token_count: number;
+	/**
+	 * Fraction [0,1] of tokens covered by at least one sentence translation —
+	 * the enrichment-completeness signal. A value below 1 means the LLM left
+	 * part of the article unannotated. Zero until enriched.
+	 */
+	enrichment_coverage: number;
 }
 
 /**
@@ -137,6 +144,8 @@ export interface ArticlePayload {
 	enrichment: Enrichment;
 	enrichment_version: number;
 	status: Status;
+	/** Fraction [0,1] of tokens covered by sentence translations. See ArticleMeta. */
+	enrichment_coverage: number;
 }
 
 /** Convenience type: full server-side article (meta + payload + original). */

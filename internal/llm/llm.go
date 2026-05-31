@@ -301,7 +301,7 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 	if err != nil {
 		return nil, ports.Usage{}, fmt.Errorf("llm: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

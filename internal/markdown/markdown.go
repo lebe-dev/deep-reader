@@ -119,7 +119,7 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (*ports.ExtractResu
 	if err != nil {
 		return nil, fmt.Errorf("markdown: request %q: %w", rawURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 	if err != nil {

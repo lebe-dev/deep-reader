@@ -51,9 +51,10 @@
 		// Detect iOS Safari in non-standalone mode.
 		const ua = navigator.userAgent;
 		const isIos = /iphone|ipad|ipod/i.test(ua);
-		// @ts-ignore — navigator.standalone is non-standard iOS API
+		// navigator.standalone is a non-standard iOS-only flag, absent from the DOM types.
+		const iosNavigator = navigator as Navigator & { standalone?: boolean };
 		const isStandalone =
-			navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+			iosNavigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
 		showIosHint = isIos && !isStandalone;
 	});
 
