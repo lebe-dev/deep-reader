@@ -52,7 +52,7 @@ test-backend name="":
     fi
 
 test-frontend:
-    cd frontend && npm run check
+    cd frontend && npm run check && npm run test
 
 test: test-backend && test-frontend
 
