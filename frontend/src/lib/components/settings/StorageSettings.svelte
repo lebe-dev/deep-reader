@@ -88,7 +88,9 @@
 			if (granted) {
 				toast('Persistent storage granted');
 			} else {
-				toast('Persistent storage not granted by the browser. Try adding the app to your Home Screen.');
+				toast(
+					'Persistent storage not granted by the browser. Try adding the app to your Home Screen.'
+				);
 			}
 		} finally {
 			isRequesting = false;

@@ -67,6 +67,11 @@
 		return Math.min(100, Math.round((pos / total) * 100));
 	});
 
+	// only allow http(s) source links to avoid javascript:/data: href injection
+	const safeSourceUrl = $derived(
+		article.source_url && /^https?:\/\//i.test(article.source_url) ? article.source_url : null
+	);
+
 	function formatDate(iso: string): string {
 		return new Date(iso).toLocaleDateString(undefined, {
 			month: 'short',
@@ -138,10 +143,21 @@
 
 	<Card.Content class="pb-3">
 		<div class="text-muted-foreground mb-3 flex items-center gap-2 text-xs">
-			{#if article.source_domain}
-				<span class="flex items-center gap-1 truncate">
-					<ExternalLinkIcon class="size-3 shrink-0" />
+			{#if article.source_domain && safeSourceUrl}
+				<a
+					href={safeSourceUrl}
+					target="_blank"
+					rel="noopener noreferrer"
+					onclick={(e) => e.stopPropagation()}
+					class="hover:text-foreground flex items-center gap-1 truncate transition-colors"
+				>
 					{article.source_domain}
+					<ExternalLinkIcon class="size-3 shrink-0" />
+				</a>
+			{:else if article.source_domain}
+				<span class="flex items-center gap-1 truncate">
+					{article.source_domain}
+					<ExternalLinkIcon class="size-3 shrink-0" />
 				</span>
 			{/if}
 			<span class="shrink-0">{formatDate(article.created_at)}</span>

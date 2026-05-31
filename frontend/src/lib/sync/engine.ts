@@ -186,8 +186,23 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 // sync — combined entry point (idempotent)
 // ---------------------------------------------------------------------------
 
-/** Flush outbox then pull from server. Idempotent; safe to call concurrently. */
-export async function sync(): Promise<void> {
+// Serialise sync runs. The enqueue* helpers and the sync-status store all call
+// sync() directly, so two runs can overlap. Because the cursor is a full-list
+// snapshot, pull() reconciles deletions by removing local articles absent from
+// the server response. If an earlier pull holding a pre-add snapshot commits
+// its transaction *after* a newer pull inserted the just-added article, that
+// stale snapshot deletes the new article — the "added article doesn't appear
+// until reload" bug. Chaining makes each flush+pull atomic w.r.t. other runs,
+// so no pull ever commits against a stale snapshot.
+let syncChain: Promise<void> = Promise.resolve();
+
+/** Flush outbox then pull from server. Concurrent calls are serialised. */
+export function sync(): Promise<void> {
+	syncChain = syncChain.then(runSyncOnce, runSyncOnce);
+	return syncChain;
+}
+
+async function runSyncOnce(): Promise<void> {
 	await flushOutbox();
 	await pull();
 }

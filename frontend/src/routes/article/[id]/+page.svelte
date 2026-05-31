@@ -48,6 +48,11 @@
 	let payload: ArticlePayload | undefined = $state();
 	let progress: Progress | undefined = $state();
 
+	// only allow http(s) source links to avoid javascript:/data: href injection
+	const safeSourceUrl = $derived(
+		meta?.source_url && /^https?:\/\//i.test(meta.source_url) ? meta.source_url : null
+	);
+
 	// Popover / sheet state.
 	let wordContent: PopoverContent | null = $state(null);
 	let wordAnchor: HTMLElement | null = $state(null);
@@ -268,9 +273,9 @@
 				<span>{meta.author}</span>
 				<span aria-hidden="true">·</span>
 			{/if}
-			{#if meta?.source_domain}
+			{#if meta?.source_domain && safeSourceUrl}
 				<a
-					href={meta.source_url}
+					href={safeSourceUrl}
 					target="_blank"
 					rel="noopener noreferrer"
 					class="hover:text-foreground inline-flex items-center gap-1 transition-colors"
