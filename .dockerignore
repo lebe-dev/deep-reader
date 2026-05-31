@@ -16,6 +16,8 @@ data/
 *.db-shm
 *.db-wal
 
+.playwright-mcp
+
 # Compiled backend binaries
 bin/
 
