@@ -20,7 +20,7 @@ import {
 	ApiError,
 	patchSettings,
 	putProgress,
-	reenrichArticle as apiReenrichArticle
+	retryArticle as apiRetryArticle
 } from '$lib/api';
 import type { Progress, ProgressUpdate, SettingsPatch } from '$lib/types';
 
@@ -163,9 +163,9 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 			await apiDeleteArticle(id);
 			return;
 		}
-		case 'reenrich': {
+		case 'retry': {
 			const { id } = entry.payload as { id: string };
-			await apiReenrichArticle(id);
+			await apiRetryArticle(id);
 			return;
 		}
 		default: {
@@ -249,15 +249,21 @@ export async function enqueueDelete(id: string): Promise<void> {
 	if (isOnline()) sync().catch(console.warn);
 }
 
-/** Enqueue re-enrichment and optimistically set local status to 'pending'. */
-export async function enqueueReenrich(id: string): Promise<void> {
+/**
+ * Enqueue a stage-aware retry and optimistically reset the local status to the
+ * queue state for the failed stage: enrich_failed re-enriches from `fetched`
+ * (content is kept), everything else re-fetches from `queued`. The authoritative
+ * status is reconciled on the next sync.
+ */
+export async function enqueueRetry(id: string): Promise<void> {
 	// Optimistic status update.
 	const meta = await db.articles_meta.get(id);
 	if (meta) {
-		await db.articles_meta.put({ ...meta, status: 'pending' });
+		const status = meta.status === 'enrich_failed' ? 'fetched' : 'queued';
+		await db.articles_meta.put({ ...meta, status });
 	}
 
-	await enqueueOutbox('reenrich', { id });
+	await enqueueOutbox('retry', { id });
 
 	if (isOnline()) sync().catch(console.warn);
 }

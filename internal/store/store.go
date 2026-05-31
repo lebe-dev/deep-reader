@@ -455,16 +455,20 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 	return nil
 }
 
-// ListPending returns up to limit articles in status=pending, oldest first.
-func (s *SQLite) ListPending(ctx context.Context, limit int) ([]model.Article, error) {
+// ListWork returns up to limit articles awaiting pipeline work — those in any
+// of model.WorkStatuses (queued/fetching need fetch, fetched/enriching need
+// enrich) — oldest first. The in-flight states are included so an article
+// stuck by a crash mid-stage is re-selected and re-processed.
+func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at
-               FROM articles WHERE status='pending'
+               FROM articles
+               WHERE status IN ('queued','fetching','fetched','enriching')
                ORDER BY created_at ASC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, limit)
 	if err != nil {
-		return nil, fmt.Errorf("store: ListPending: %w", err)
+		return nil, fmt.Errorf("store: ListWork: %w", err)
 	}
 	defer rows.Close()
 
@@ -477,27 +481,74 @@ func (s *SQLite) ListPending(ctx context.Context, limit int) ([]model.Article, e
 		arts = append(arts, *a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: ListPending rows: %w", err)
+		return nil, fmt.Errorf("store: ListWork rows: %w", err)
 	}
 	return arts, nil
 }
 
-// RequeueArticle resets an article to status=pending, clearing error and
-// enriched_at, and bumps updated_at. Returns [ports.ErrNotFound] if absent.
-func (s *SQLite) RequeueArticle(ctx context.Context, id string) error {
+// SaveContent persists the fetched/extracted content for an article and
+// advances its status to fetched (clearing any prior error). The token slice is
+// JSON-encoded. Returns [ports.ErrNotFound] if the article was deleted while the
+// fetch was in flight.
+func (s *SQLite) SaveContent(ctx context.Context, id string, c ports.ContentUpdate) error {
+	tokJSON, err := json.Marshal(c.Tokens)
+	if err != nil {
+		return fmt.Errorf("store: SaveContent marshal tokens: %w", err)
+	}
+
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
-	const q = `UPDATE articles SET status='pending', error='', enriched_at='', updated_at=? WHERE id=?`
-	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
+	const q = `UPDATE articles
+	           SET source_url=?, title=?, author=?, source_domain=?, lang=?,
+	               original_text=?, tokens=?, status='fetched', error='', updated_at=?
+	           WHERE id=?`
+	res, err := s.write.ExecContext(ctx, q,
+		c.SourceURL, c.Title, c.Author, c.SourceDomain, c.Lang,
+		c.Text, string(tokJSON), fmtTime(now()), id,
+	)
 	if err != nil {
-		return fmt.Errorf("store: RequeueArticle: %w", err)
+		return fmt.Errorf("store: SaveContent: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ports.ErrNotFound
 	}
-	slog.Debug("store: article requeued to pending", "article_id", id)
+	slog.Debug("store: article content saved", "article_id", id, "token_count", len(c.Tokens))
+	return nil
+}
+
+// RetryArticle resets a failed article to the queue state for the stage that
+// failed, clearing the error and bumping updated_at: a fetch_failed article
+// goes back to queued (re-fetch), an enrich_failed article goes back to fetched
+// (re-enrich only — its content is preserved). For any other (non-terminal-fail)
+// status it is a no-op reset to a sensible queue state so a manual retry is
+// always safe. Returns [ports.ErrNotFound] if the article does not exist.
+func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	// Route to the right queue state based on the current status. enrich_failed
+	// (and the in-flight enriching) keep the fetched content; everything else
+	// restarts from fetch.
+	const q = `UPDATE articles
+	           SET status = CASE
+	                   WHEN status IN ('enrich_failed','enriching','fetched','enriched') THEN 'fetched'
+	                   ELSE 'queued'
+	               END,
+	               error = '',
+	               enriched_at = '',
+	               updated_at = ?
+	           WHERE id = ?`
+	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: RetryArticle: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article queued for retry", "article_id", id)
 	return nil
 }
 

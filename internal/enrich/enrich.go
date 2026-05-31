@@ -1,14 +1,18 @@
-// Package enrich implements the enrichment worker pool that drains pending
-// articles from the store, calls the LLM client, validates the returned
-// enrichment, and persists the result.
+// Package enrich implements the worker pool that drives the two-stage article
+// pipeline: it drains articles awaiting work from the store, runs the fetch
+// stage (extract + tokenize → SaveContent) and the enrich stage (LLM call →
+// validate → SaveEnrichment), and records per-stage failures so the UI can show
+// which stage failed and offer a stage-aware retry.
 //
-// Constructor: NewPool(cfg, store, llm) *Pool — satisfies ports.EnrichmentWorker.
+// Constructor: NewPool(cfg, store, ex, llm) *Pool — satisfies
+// ports.EnrichmentWorker.
 package enrich
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"math"
 	"time"
@@ -16,6 +20,7 @@ import (
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
+	"deep-reader/internal/tokenize"
 )
 
 const (
@@ -35,21 +40,24 @@ const (
 	maxBackoff = 60 * time.Second
 )
 
-// Pool is a fixed-size worker pool that enriches pending articles.
-// Construct it with NewPool; run Start in its own goroutine.
+// Pool is a fixed-size worker pool that drives the fetch→enrich pipeline for
+// articles awaiting work. Construct it with NewPool; run Start in its own
+// goroutine.
 type Pool struct {
 	cfg    *config.Config
 	store  ports.Store
+	ex     ports.Extractor
 	llm    ports.LLMClient
 	notify chan struct{}
 }
 
 // NewPool creates a new Pool. It satisfies ports.EnrichmentWorker via *Pool.
 // Start(ctx) must be called to launch the workers.
-func NewPool(cfg *config.Config, st ports.Store, client ports.LLMClient) *Pool {
+func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient) *Pool {
 	return &Pool{
 		cfg:    cfg,
 		store:  st,
+		ex:     ex,
 		llm:    client,
 		notify: make(chan struct{}, 1),
 	}
@@ -120,9 +128,9 @@ func (p *Pool) drain(ctx context.Context, workerID int) {
 			return
 		}
 
-		articles, err := p.store.ListPending(ctx, batchSize)
+		articles, err := p.store.ListWork(ctx, batchSize)
 		if err != nil {
-			slog.Error("enrich: list pending failed", "worker", workerID, "err", err)
+			slog.Error("enrich: list work failed", "worker", workerID, "err", err)
 			return
 		}
 		if len(articles) == 0 {
@@ -143,69 +151,149 @@ func (p *Pool) drain(ctx context.Context, workerID int) {
 	}
 }
 
-// processArticle enriches a single article with exponential back-off retries.
-// On terminal failure it marks the article as failed.
+// processArticle drives one article through whichever pipeline stages it still
+// needs. Articles in queued/fetching run the fetch stage first; once fetched
+// (either just now or on a prior run) they run the enrich stage. Each stage
+// retries with exponential back-off and, on terminal failure, records the
+// stage-specific failed status so the UI can show where it broke.
 func (p *Pool) processArticle(ctx context.Context, workerID int, a *model.Article) {
 	log := slog.With("worker", workerID, "article_id", a.ID)
-	maxRetries := p.cfg.LLMMaxRetries
 
+	if a.Status == model.StatusQueued || a.Status == model.StatusFetching {
+		if !p.runFetch(ctx, log, a) {
+			return // fetch failed, article deleted, or ctx cancelled
+		}
+	}
+
+	p.runEnrich(ctx, log, a)
+}
+
+// runFetch performs the fetch/extract stage: it flips the article to
+// status=fetching, extracts and tokenizes the content with retries, and on
+// success persists it (status=fetched), updating a in place so the enrich stage
+// can proceed. It returns true when the content was saved and enrichment should
+// continue, false on terminal failure, deletion, or cancellation.
+func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article) bool {
+	p.setStatus(ctx, log, a.ID, model.StatusFetching, "")
+
+	maxRetries := p.cfg.LLMMaxRetries
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return false
+		}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return false
+		}
+
+		result, err := p.ex.Extract(ctx, a.SourceURL)
+		if err != nil {
+			lastErr = err
+			if isRetryable(err) {
+				log.Warn("enrich: transient fetch error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
+				continue
+			}
+			log.Error("enrich: permanent fetch error", "err", err)
+			p.setFailed(ctx, a.ID, model.StatusFetchFailed, err)
+			return false
+		}
+
+		// Decode HTML entities before tokenizing so token byte offsets stay
+		// consistent with the stored OriginalText.
+		text := html.UnescapeString(result.Text)
+		tokens := tokenize.Tokenize(text)
+
+		update := ports.ContentUpdate{
+			SourceURL:    result.CanonicalURL,
+			Title:        html.UnescapeString(result.Title),
+			Author:       html.UnescapeString(result.Author),
+			SourceDomain: result.Domain,
+			Lang:         result.Lang,
+			Text:         text,
+			Tokens:       tokens,
+		}
+		if err := p.store.SaveContent(ctx, a.ID, update); err != nil {
+			if errors.Is(err, ports.ErrNotFound) {
+				log.Info("enrich: article deleted during fetch, skipping")
+				return false
+			}
+			lastErr = err
+			log.Error("enrich: save content failed", "err", err)
+			if isRetryable(err) {
+				continue
+			}
+			p.setFailed(ctx, a.ID, model.StatusFetchFailed, err)
+			return false
+		}
+
+		// Reflect the saved content into the in-memory article for the enrich
+		// stage (token count drives enrichment validation).
+		a.SourceURL = update.SourceURL
+		a.Title = update.Title
+		a.Author = update.Author
+		a.SourceDomain = update.SourceDomain
+		a.Lang = update.Lang
+		a.OriginalText = update.Text
+		a.Tokens = update.Tokens
+		a.Status = model.StatusFetched
+
+		log.Info("enrich: content fetched", "domain", update.SourceDomain, "token_count", len(tokens))
+		return true
+	}
+
+	log.Error("enrich: fetch retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
+	if lastErr != nil {
+		p.setFailed(ctx, a.ID, model.StatusFetchFailed, lastErr)
+	}
+	return false
+}
+
+// runEnrich performs the enrichment stage: it flips the article to
+// status=enriching, calls the LLM with retries, validates the result, and
+// persists it (status=enriched). On terminal failure it records
+// status=enrich_failed.
+func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article) {
 	settings, err := p.store.GetSettings(ctx)
 	if err != nil {
 		log.Error("enrich: get settings failed", "err", err)
 		return
 	}
 
+	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
+
+	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return
 		}
-
-		if attempt > 0 {
-			wait := backoffDuration(attempt, baseBackoff, maxBackoff)
-			log.Info("enrich: backing off before retry",
-				"attempt", attempt,
-				"wait_ms", wait.Milliseconds(),
-			)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return
 		}
 
 		enrichment, usage, err := p.llm.Enrich(ctx, a, settings, p.cfg.EnrichmentVersion)
 		if err != nil {
 			lastErr = err
 			if isRetryable(err) {
-				log.Warn("enrich: transient error, will retry",
-					"attempt", attempt,
-					"max_retries", maxRetries,
-					"err", err,
-				)
+				log.Warn("enrich: transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
 				continue
 			}
-			// Non-retryable error — mark failed immediately.
 			log.Error("enrich: permanent error", "err", err)
-			p.markFailed(ctx, a.ID, err)
+			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
 			return
 		}
 
 		// Validate the enrichment before persisting.
 		if valErr := validateEnrichment(enrichment, len(a.Tokens)); valErr != nil {
 			lastErr = valErr
-			log.Warn("enrich: validation failed, will retry",
-				"attempt", attempt,
-				"max_retries", maxRetries,
-				"err", valErr,
-			)
+			log.Warn("enrich: validation failed, will retry", "attempt", attempt, "max_retries", maxRetries, "err", valErr)
 			continue
 		}
 
 		// Persist.
 		enrichedAt := time.Now().UTC()
 		if err := p.store.SaveEnrichment(ctx, a.ID, *enrichment, enrichedAt); err != nil {
-			// The article was deleted between ListPending and this save (e.g. the
+			// The article was deleted between ListWork and this save (e.g. the
 			// user removed it while enrichment was in flight). Nothing to persist
 			// and nothing to fail — drop it silently.
 			if errors.Is(err, ports.ErrNotFound) {
@@ -218,7 +306,7 @@ func (p *Pool) processArticle(ctx context.Context, workerID int, a *model.Articl
 			if isRetryable(err) {
 				continue
 			}
-			p.markFailed(ctx, a.ID, err)
+			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
 			return
 		}
 
@@ -233,15 +321,41 @@ func (p *Pool) processArticle(ctx context.Context, workerID int, a *model.Articl
 	// Exhausted retries.
 	log.Error("enrich: retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
 	if lastErr != nil {
-		p.markFailed(ctx, a.ID, lastErr)
+		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
 	}
 }
 
-// markFailed sets the article status to failed with the given error message.
-func (p *Pool) markFailed(ctx context.Context, id string, err error) {
-	if setErr := p.store.SetStatus(ctx, id, model.StatusFailed, err.Error()); setErr != nil {
-		slog.Error("enrich: failed to set status=failed",
+// backoff sleeps for the attempt's exponential back-off, returning false if ctx
+// is cancelled during the wait.
+func (p *Pool) backoff(ctx context.Context, log *slog.Logger, attempt int) bool {
+	wait := backoffDuration(attempt, baseBackoff, maxBackoff)
+	log.Info("enrich: backing off before retry", "attempt", attempt, "wait_ms", wait.Milliseconds())
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+		return true
+	}
+}
+
+// setStatus updates the article's status (best-effort; logs on failure). Used
+// for the in-flight states (fetching/enriching) where a failure to flip the UI
+// state must not abort the pipeline.
+func (p *Pool) setStatus(ctx context.Context, log *slog.Logger, id, status, errMsg string) {
+	if err := p.store.SetStatus(ctx, id, status, errMsg); err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return // article deleted; the next store call handles it
+		}
+		log.Warn("enrich: set status failed", "status", status, "err", err)
+	}
+}
+
+// setFailed records a terminal stage failure with its error message.
+func (p *Pool) setFailed(ctx context.Context, id, status string, err error) {
+	if setErr := p.store.SetStatus(ctx, id, status, err.Error()); setErr != nil {
+		slog.Error("enrich: failed to set failed status",
 			"article_id", id,
+			"status", status,
 			"set_err", setErr,
 			"original_err", err,
 		)

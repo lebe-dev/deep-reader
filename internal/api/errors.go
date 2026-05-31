@@ -6,7 +6,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"deep-reader/internal/extract"
 	"deep-reader/internal/ports"
 )
 
@@ -24,19 +23,12 @@ func sendError(c fiber.Ctx, status int, msg string) error {
 
 // mapAddError translates an ingest.Add error into an HTTP status + message.
 //
-// SSRF / unparseable / too-large / malformed-URL conditions are client errors
-// (4xx): the user supplied a URL we will not or cannot ingest. Everything else
-// is treated as a server-side failure (5xx). The boolean reports whether the
-// error was recognised as a client error; callers may log 5xx cases.
+// Add no longer fetches content (that happens asynchronously in the worker, so
+// fetch failures surface as the fetch_failed stage on the article rather than
+// here). The only client error Add can return is a malformed URL; everything
+// else is a server-side failure (5xx).
 func mapAddError(err error) (status int, msg string) {
-	switch {
-	case errors.Is(err, extract.ErrBlockedHost):
-		return fiber.StatusUnprocessableEntity, "URL host is not allowed"
-	case errors.Is(err, extract.ErrUnparseable):
-		return fiber.StatusUnprocessableEntity, "could not extract article content from URL"
-	case errors.Is(err, extract.ErrTooLarge):
-		return fiber.StatusUnprocessableEntity, "article content is too large"
-	case errors.Is(err, ports.ErrNotFound):
+	if errors.Is(err, ports.ErrNotFound) {
 		return fiber.StatusNotFound, "not found"
 	}
 	// NormalizeURL failures (empty URL, no host, parse error) are wrapped with
@@ -45,7 +37,7 @@ func mapAddError(err error) (status int, msg string) {
 	if isBadURL(err) {
 		return fiber.StatusBadRequest, "invalid URL"
 	}
-	return fiber.StatusBadGateway, "failed to fetch or extract the article"
+	return fiber.StatusInternalServerError, "failed to add the article"
 }
 
 // isBadURL reports whether err looks like a URL-normalisation failure from the

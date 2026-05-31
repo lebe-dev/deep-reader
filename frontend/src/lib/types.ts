@@ -7,8 +7,26 @@
 // Enums / unions
 // ---------------------------------------------------------------------------
 
-/** Enrichment / processing status of an article (spec §8 `articles.status`). */
-export type Status = 'pending' | 'enriched' | 'failed';
+/**
+ * Processing status of an article — an explicit two-stage pipeline (fetch then
+ * enrich) so the UI can show which stage it is in and which stage failed.
+ *
+ * - `queued`        — created, waiting to fetch original content
+ * - `fetching`      — fetch/extract in flight
+ * - `fetched`       — original content received, waiting for processing
+ * - `enriching`     — sent for processing (LLM) in flight
+ * - `enriched`      — ready (terminal success)
+ * - `fetch_failed`  — fetch stage failed (retry re-fetches)
+ * - `enrich_failed` — processing stage failed (retry re-enriches; content kept)
+ */
+export type Status =
+	| 'queued'
+	| 'fetching'
+	| 'fetched'
+	| 'enriching'
+	| 'enriched'
+	| 'fetch_failed'
+	| 'enrich_failed';
 
 /** CEFR proficiency levels (spec §8 `settings.cefr_level`). */
 export type CefrLevel = 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
@@ -99,7 +117,7 @@ export interface ArticleMeta {
 	lang: string;
 	status: Status;
 	enrichment_version: number;
-	/** Present when `status === 'failed'`. */
+	/** Present when `status` is `fetch_failed` or `enrich_failed`. */
 	error?: string;
 	created_at: string;
 	enriched_at?: string;
@@ -195,7 +213,7 @@ export interface ConfigResponse {
 	cursor?: string;
 }
 
-/** `POST /api/articles` and `POST /api/articles/:id/reenrich` response. */
+/** `POST /api/articles` and `POST /api/articles/:id/retry` response. */
 export interface AddArticleResponse {
 	id: string;
 	status: Status;

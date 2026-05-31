@@ -148,20 +148,28 @@ func (s *Server) deleteArticle(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// reenrichArticle handles POST /api/articles/:id/reenrich, requeuing the
-// article to pending so the worker re-enriches it. Unknown ids return 404.
-func (s *Server) reenrichArticle(c fiber.Ctx) error {
+// retryArticle handles POST /api/articles/:id/retry, resuming a failed article
+// from the stage that failed (re-fetch or re-enrich). It returns the article's
+// resulting status. Unknown ids return 404.
+func (s *Server) retryArticle(c fiber.Ctx) error {
 	id := c.Params("id")
 
-	if err := s.ingest.Reenrich(c.Context(), id); err != nil {
+	if err := s.ingest.Retry(c.Context(), id); err != nil {
 		if errors.Is(err, ports.ErrNotFound) {
 			return sendError(c, fiber.StatusNotFound, "article not found")
 		}
-		return s.serverError(c, "reenrich article", err)
+		return s.serverError(c, "retry article", err)
+	}
+
+	// Reflect the post-retry status (queued for a re-fetch, fetched for a
+	// re-enrich) so the client can update its optimistic state.
+	status := model.StatusQueued
+	if a, err := s.store.GetArticle(c.Context(), id); err == nil {
+		status = a.Status
 	}
 	return c.Status(fiber.StatusAccepted).JSON(model.AddArticleResponse{
 		ID:     id,
-		Status: model.StatusPending,
+		Status: status,
 	})
 }
 
@@ -213,8 +221,9 @@ func (s *Server) patchSettings(c fiber.Ctx) error {
 	return c.JSON(settings)
 }
 
-// getStats handles GET /api/stats — light counters over the library (total,
-// pending, failed). It lists all article metadata once and tallies by status.
+// getStats handles GET /api/stats — light counters over the library. It lists
+// all article metadata once and tallies by pipeline stage: in-progress (queued
+// through enriching), ready (enriched), and failed (either stage).
 func (s *Server) getStats(c fiber.Ctx) error {
 	metas, err := s.store.ListArticleMeta(c.Context(), time.Time{})
 	if err != nil {
@@ -224,12 +233,13 @@ func (s *Server) getStats(c fiber.Ctx) error {
 	stats := statsResponse{Total: len(metas)}
 	for i := range metas {
 		switch metas[i].Status {
-		case model.StatusPending:
-			stats.Pending++
 		case model.StatusEnriched:
-			stats.Enriched++
-		case model.StatusFailed:
+			stats.Ready++
+		case model.StatusFetchFailed, model.StatusEnrichFailed:
 			stats.Failed++
+		default:
+			// queued, fetching, fetched, enriching
+			stats.InProgress++
 		}
 	}
 	return c.JSON(stats)
@@ -254,12 +264,14 @@ type progressResponse struct {
 	Applied bool `json:"applied"`
 }
 
-// statsResponse is the GET /api/stats body.
+// statsResponse is the GET /api/stats body. InProgress counts articles in any
+// non-terminal pipeline stage (queued/fetching/fetched/enriching), Ready counts
+// enriched articles, and Failed counts either-stage failures.
 type statsResponse struct {
-	Total    int `json:"total"`
-	Pending  int `json:"pending"`
-	Enriched int `json:"enriched"`
-	Failed   int `json:"failed"`
+	Total      int `json:"total"`
+	InProgress int `json:"in_progress"`
+	Ready      int `json:"ready"`
+	Failed     int `json:"failed"`
 }
 
 // parseSince parses the optional ?since query value as RFC3339. An empty value

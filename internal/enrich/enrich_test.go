@@ -24,15 +24,15 @@ type fakeStore struct {
 	enrichments map[string]model.Enrichment
 	// settings is returned by GetSettings.
 	settings model.Settings
-	// setStatusCalls counts SetStatus invocations per article id.
-	setStatusCalls map[string]int
+	// failedCalls counts SetStatus invocations that set a *_failed status.
+	failedCalls map[string]int
 }
 
 func newFakeStore(articles ...*model.Article) *fakeStore {
 	s := &fakeStore{
-		articles:       make(map[string]*model.Article),
-		enrichments:    make(map[string]model.Enrichment),
-		setStatusCalls: make(map[string]int),
+		articles:    make(map[string]*model.Article),
+		enrichments: make(map[string]model.Enrichment),
+		failedCalls: make(map[string]int),
 		settings: model.Settings{
 			CEFRLevel:                model.CEFRA2,
 			TargetLanguage:           model.DefaultTargetLanguage,
@@ -101,13 +101,34 @@ func (f *fakeStore) DeleteArticle(_ context.Context, id string) error {
 func (f *fakeStore) SetStatus(_ context.Context, id, status, errMsg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.setStatusCalls[id]++
+	if status == model.StatusFetchFailed || status == model.StatusEnrichFailed {
+		f.failedCalls[id]++
+	}
 	a, ok := f.articles[id]
 	if !ok {
 		return ports.ErrNotFound
 	}
 	a.Status = status
 	a.Error = errMsg
+	return nil
+}
+
+func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpdate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.SourceURL = c.SourceURL
+	a.Title = c.Title
+	a.Author = c.Author
+	a.SourceDomain = c.SourceDomain
+	a.Lang = c.Lang
+	a.OriginalText = c.Text
+	a.Tokens = c.Tokens
+	a.Status = model.StatusFetched
+	a.Error = ""
 	return nil
 }
 
@@ -124,15 +145,16 @@ func (f *fakeStore) SaveEnrichment(_ context.Context, id string, e model.Enrichm
 	return nil
 }
 
-func (f *fakeStore) ListPending(_ context.Context, limit int) ([]model.Article, error) {
+func (f *fakeStore) ListWork(_ context.Context, limit int) ([]model.Article, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []model.Article
 	for _, a := range f.articles {
-		if a.Status == model.StatusPending {
+		switch a.Status {
+		case model.StatusQueued, model.StatusFetching, model.StatusFetched, model.StatusEnriching:
 			out = append(out, *a)
 			if len(out) >= limit {
-				break
+				return out, nil
 			}
 		}
 	}
@@ -147,14 +169,18 @@ func (f *fakeStore) ListProgress(_ context.Context, _ time.Time) ([]model.Progre
 	return nil, nil
 }
 
-func (f *fakeStore) RequeueArticle(_ context.Context, id string) error {
+func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	a, ok := f.articles[id]
 	if !ok {
 		return ports.ErrNotFound
 	}
-	a.Status = model.StatusPending
+	if a.Status == model.StatusEnrichFailed {
+		a.Status = model.StatusFetched
+	} else {
+		a.Status = model.StatusQueued
+	}
 	a.Error = ""
 	return nil
 }
@@ -193,19 +219,69 @@ func (f *fakeStore) savedEnrichment(id string) (model.Enrichment, bool) {
 	return e, ok
 }
 
-// setStatusCount returns how many times SetStatus was called for id.
-func (f *fakeStore) setStatusCount(id string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.setStatusCalls[id]
-}
-
 // exists reports whether the article id is still present.
 func (f *fakeStore) exists(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, ok := f.articles[id]
 	return ok
+}
+
+// failedCount returns how many times a *_failed status was set for id.
+func (f *fakeStore) failedCount(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.failedCalls[id]
+}
+
+// originalText returns the stored original text for id.
+func (f *fakeStore) originalText(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.articles[id]; ok {
+		return a.OriginalText
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Fake extractor
+// ---------------------------------------------------------------------------
+
+// fakeExtractor is a configurable fake of ports.Extractor. The zero value
+// returns a canned two-token result; set result or err to override. It records
+// the number of Extract calls.
+type fakeExtractor struct {
+	mu     sync.Mutex
+	calls  int
+	result *ports.ExtractResult
+	err    error
+}
+
+func (f *fakeExtractor) Extract(_ context.Context, rawURL string) (*ports.ExtractResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &ports.ExtractResult{
+		CanonicalURL: rawURL,
+		Title:        "Test Article",
+		Author:       "Author",
+		Domain:       "example.com",
+		Lang:         "en",
+		Text:         "Hello world",
+	}, nil
+}
+
+func (f *fakeExtractor) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +366,7 @@ func makeArticle(id string, tokenCount int) *model.Article {
 	return &model.Article{
 		ID:     id,
 		Title:  "Test Article",
-		Status: model.StatusPending,
+		Status: model.StatusFetched,
 		Tokens: tokens,
 	}
 }
@@ -355,7 +431,7 @@ func TestSuccess(t *testing.T) {
 	llm := &fakeLLM{
 		result: goodEnrichment(5),
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-1") == model.StatusEnriched
@@ -387,7 +463,7 @@ func TestTransientErrorRetriesThenSucceeds(t *testing.T) {
 		failErr: &fakeError{msg: "rate limit", retryable: true},
 		result:  goodEnrichment(3),
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-2") == model.StatusEnriched
@@ -410,10 +486,10 @@ func TestPermanentErrorMarksFailed(t *testing.T) {
 		failN:   100, // always fail
 		failErr: &fakeError{msg: "bad request", retryable: false},
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
-		return st.status("article-3") == model.StatusFailed
+		return st.status("article-3") == model.StatusEnrichFailed
 	})
 
 	if !ok {
@@ -439,10 +515,10 @@ func TestExhaustedRetriesMarksFailed(t *testing.T) {
 		failErr: &fakeError{msg: "server error", retryable: true},
 		result:  goodEnrichment(3),
 	}
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, llm)
+	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-4") == model.StatusFailed
+		return st.status("article-4") == model.StatusEnrichFailed
 	})
 
 	if !ok {
@@ -471,10 +547,10 @@ func TestInvalidIndicesRejected(t *testing.T) {
 		result: badEnrichment,
 	}
 	maxRetries := 2
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, llm)
+	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-5") == model.StatusFailed
+		return st.status("article-5") == model.StatusEnrichFailed
 	})
 
 	if !ok {
@@ -502,10 +578,10 @@ func TestPhraseBoundsValidation(t *testing.T) {
 		result: badEnrichment,
 	}
 	maxRetries := 1
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, llm)
+	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-6") == model.StatusFailed
+		return st.status("article-6") == model.StatusEnrichFailed
 	})
 
 	if !ok {
@@ -525,10 +601,10 @@ func TestSentenceBoundsValidation(t *testing.T) {
 		},
 	}
 	llm := &fakeLLM{result: badEnrichment}
-	pool := enrich.NewPool(testCfg(1, 1), st, llm)
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-7") == model.StatusFailed
+		return st.status("article-7") == model.StatusEnrichFailed
 	})
 
 	if !ok {
@@ -549,7 +625,7 @@ func TestArticleDeletedDuringEnrichment(t *testing.T) {
 		// SaveEnrichment hits a missing parent row (FK / not found).
 		onEnrich: func() { _ = st.DeleteArticle(context.Background(), "article-deleted") },
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return llm.calls() >= 1 && !st.exists("article-deleted")
@@ -566,9 +642,10 @@ func TestArticleDeletedDuringEnrichment(t *testing.T) {
 	if llm.calls() != 1 {
 		t.Errorf("expected exactly 1 LLM call, got %d", llm.calls())
 	}
-	// markFailed must NOT be attempted for a deleted article.
-	if n := st.setStatusCount("article-deleted"); n != 0 {
-		t.Errorf("expected SetStatus not to be called for deleted article, got %d calls", n)
+	// A failed status must NOT be recorded for a deleted article (the in-flight
+	// enriching flip may happen, but the missing article is a benign condition).
+	if n := st.failedCount("article-deleted"); n != 0 {
+		t.Errorf("expected no failed status for deleted article, got %d", n)
 	}
 	// No enrichment should have been persisted.
 	if _, saved := st.savedEnrichment("article-deleted"); saved {
@@ -582,7 +659,7 @@ func TestNotifyWakesWorker(t *testing.T) {
 	// Start with an empty store.
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 3), st, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -623,7 +700,7 @@ func TestNotifyWakesWorker(t *testing.T) {
 func TestContextCancellationStopsWorkers(t *testing.T) {
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(2, 3), st, llm)
+	pool := enrich.NewPool(testCfg(2, 3), st, &fakeExtractor{}, llm)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -646,7 +723,7 @@ func TestContextCancellationStopsWorkers(t *testing.T) {
 func TestNotifyIsNonBlocking(t *testing.T) {
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 0), st, llm)
+	pool := enrich.NewPool(testCfg(1, 0), st, &fakeExtractor{}, llm)
 
 	// Should not block even with many calls.
 	done := make(chan struct{})
@@ -755,5 +832,116 @@ func TestIsRetryable(t *testing.T) {
 	}
 	if enrich.IsRetryable(nil) {
 		t.Error("expected retryable=false for nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fetch-stage tests
+// ---------------------------------------------------------------------------
+
+// queuedArticle returns an article in the queued state with a source URL but no
+// content yet — the input to the fetch stage.
+func queuedArticle(id, sourceURL string) *model.Article {
+	return &model.Article{ID: id, SourceURL: sourceURL, Status: model.StatusQueued}
+}
+
+// TestFetchThenEnrich verifies the full pipeline: a queued article is fetched
+// (content saved, status fetched) and then enriched (status enriched).
+func TestFetchThenEnrich(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-fetch", "https://example.com/a"))
+	ex := &fakeExtractor{}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-fetch") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-fetch"))
+	}
+	if ex.callCount() != 1 {
+		t.Errorf("extractor calls: got %d, want 1", ex.callCount())
+	}
+	if got := st.originalText("article-fetch"); got != "Hello world" {
+		t.Errorf("original text: got %q, want %q", got, "Hello world")
+	}
+	if _, saved := st.savedEnrichment("article-fetch"); !saved {
+		t.Error("expected enrichment to be saved")
+	}
+}
+
+// TestFetchDecodesHTMLEntities verifies the fetch stage decodes HTML entities
+// before tokenizing, keeping token byte offsets consistent with the stored text.
+func TestFetchDecodesHTMLEntities(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-entities", "https://example.com/a"))
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL: "https://example.com/a",
+		Title:        "Let&rsquo;s talk &mdash; musings",
+		Text:         "First &amp; foremost it&rsquo;s loaded.",
+		Domain:       "example.com",
+		Lang:         "en",
+	}}
+	llm := &fakeLLM{result: &model.Enrichment{}}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-entities") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-entities"))
+	}
+	want := "First & foremost it’s loaded."
+	if got := st.originalText("article-entities"); got != want {
+		t.Errorf("decoded text:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestFetchFailedMarksFetchFailed verifies a non-retryable extractor error marks
+// the article fetch_failed and never calls the LLM.
+func TestFetchFailedMarksFetchFailed(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-badfetch", "https://example.com/a"))
+	ex := &fakeExtractor{err: &fakeError{msg: "blocked host", retryable: false}}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-badfetch") == model.StatusFetchFailed
+	})
+	if !ok {
+		t.Fatalf("expected status=fetch_failed, got %q", st.status("article-badfetch"))
+	}
+	if llm.calls() != 0 {
+		t.Errorf("LLM must not be called when fetch fails: got %d calls", llm.calls())
+	}
+	if ex.callCount() != 1 {
+		t.Errorf("extractor calls for permanent error: got %d, want 1", ex.callCount())
+	}
+	if st.errMsg("article-badfetch") == "" {
+		t.Error("expected error message to be stored")
+	}
+}
+
+// TestRecoversInflightStatuses verifies an article stuck in an in-flight state
+// (e.g. the server crashed mid-stage) is re-selected and driven to completion:
+// fetching re-fetches, enriching re-enriches.
+func TestRecoversInflightStatuses(t *testing.T) {
+	// Both articles end up with 2 tokens (the default extractor yields a
+	// two-token "Hello world"), so a single enrichment result is valid for both.
+	fetching := queuedArticle("article-stuck-fetch", "https://example.com/a")
+	fetching.Status = model.StatusFetching
+	enriching := makeArticle("article-stuck-enrich", 2)
+	enriching.Status = model.StatusEnriching
+	st := newFakeStore(fetching, enriching)
+	ex := &fakeExtractor{}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-stuck-fetch") == model.StatusEnriched &&
+			st.status("article-stuck-enrich") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected both stuck articles enriched, got fetch=%q enrich=%q",
+			st.status("article-stuck-fetch"), st.status("article-stuck-enrich"))
 	}
 }

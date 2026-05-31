@@ -93,8 +93,8 @@ func run() error {
 		)
 	}
 
-	pool := enrich.NewPool(cfg, st, llmClient)
-	ingestor := ingest.New(cfg, st, extractor, pool)
+	pool := enrich.NewPool(cfg, st, extractor, llmClient)
+	ingestor := ingest.New(cfg, st, pool)
 	log.Debug("components initialised: llm client, extractor, enrichment pool, ingestor")
 
 	// Start the worker pool in its own goroutine; it blocks until rootCtx is

@@ -43,20 +43,21 @@
 //
 // Ingestion (package internal/ingest):
 //
-//	func New(cfg *config.Config, st ports.Store, ex ports.Extractor, worker ports.EnrichmentWorker) *ingest.Ingestor
+//	func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker) *ingest.Ingestor
 //	    // *ingest.Ingestor implements ports.Ingestor.
-//	    // Add: dedup by URL hash, extract, tokenize (tokenize.Tokenize), persist
-//	    // as pending, then worker.Notify(). Reenrich: store.RequeueArticle(id)
-//	    // then worker.Notify().
+//	    // Add: normalize + dedup by URL hash, persist as queued, then
+//	    // worker.Notify(). Retry: store.RetryArticle(id) then worker.Notify().
 //
 // Enrichment worker (package internal/enrich):
 //
-//	func NewPool(cfg *config.Config, st ports.Store, client ports.LLMClient) *enrich.Pool
+//	func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient) *enrich.Pool
 //	    // *enrich.Pool implements ports.EnrichmentWorker.
 //	    // Start(ctx) launches cfg.LLMMaxConcurrent workers that drain
-//	    // store.ListPending; Notify() wakes them. On success
-//	    // store.SaveEnrichment + SetStatus(enriched); on terminal failure
-//	    // SetStatus(failed, err). Retries with backoff up to cfg.LLMMaxRetries.
+//	    // store.ListWork; Notify() wakes them. Per article it runs the fetch
+//	    // stage (ex.Extract → tokenize → store.SaveContent) then the enrich
+//	    // stage (client.Enrich → store.SaveEnrichment). On terminal failure it
+//	    // SetStatus(fetch_failed|enrich_failed, err). Retries with backoff up to
+//	    // cfg.LLMMaxRetries.
 //
 // Tokenizer (package internal/tokenize):
 //
@@ -130,16 +131,21 @@ type Store interface {
 
 	// SetStatus updates an article's status and error text, stamping UpdatedAt
 	// (and EnrichedAt when status==enriched is set via SaveEnrichment, not
-	// here). errMsg is stored only when status==failed; pass "" otherwise.
+	// here). errMsg is stored only for the *_failed states; pass "" otherwise.
 	SetStatus(ctx context.Context, id, status, errMsg string) error
+
+	// SaveContent persists fetched/extracted content for an article and advances
+	// its status to fetched (clearing any prior error). Returns ErrNotFound if
+	// the article was deleted while the fetch was in flight.
+	SaveContent(ctx context.Context, id string, c ContentUpdate) error
 
 	// SaveEnrichment persists the enrichment blob, sets status=enriched, sets
 	// EnrichedAt=enrichedAt, and stamps UpdatedAt. Atomic with the status flip.
 	SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time) error
 
-	// ListPending returns up to `limit` articles in status=pending, oldest
-	// first, for the enrichment worker to drain.
-	ListPending(ctx context.Context, limit int) ([]model.Article, error)
+	// ListWork returns up to `limit` articles awaiting pipeline work (any of
+	// model.WorkStatuses), oldest first, for the worker to drain.
+	ListWork(ctx context.Context, limit int) ([]model.Article, error)
 
 	// UpsertProgress applies reading progress with LWW semantics on UpdatedAt.
 	// It returns applied=true when the incoming record won (was stored) and
@@ -150,10 +156,11 @@ type Store interface {
 	// the zero time for everything.
 	ListProgress(ctx context.Context, since time.Time) ([]model.Progress, error)
 
-	// RequeueArticle resets an article to status=pending (clearing error and
-	// EnrichedAt) so the worker re-enriches it. Used by reenrich. Returns
-	// ErrNotFound if the article does not exist.
-	RequeueArticle(ctx context.Context, id string) error
+	// RetryArticle resets a failed article to the queue state for the stage that
+	// failed (fetch_failed → queued, enrich_failed → fetched) so the worker
+	// resumes from there, clearing error. Returns ErrNotFound if the article
+	// does not exist.
+	RetryArticle(ctx context.Context, id string) error
 
 	// MarkdownUnitsUsedToday returns the number of markdown.new request units
 	// consumed during the current UTC day, for surfacing remaining budget. It
@@ -212,17 +219,30 @@ type ExtractResult struct {
 	Text         string
 }
 
+// ContentUpdate carries the extracted content the worker writes back to an
+// article after a successful fetch stage (see Store.SaveContent).
+type ContentUpdate struct {
+	SourceURL    string
+	Title        string
+	Author       string
+	SourceDomain string
+	Lang         string
+	Text         string
+	Tokens       []model.Token
+}
+
 // Ingestor orchestrates the ingestion pipeline. Concrete constructor:
-// ingest.New(cfg, store, extractor, worker) *ingest.Ingestor.
+// ingest.New(cfg, store, worker) *ingest.Ingestor.
 type Ingestor interface {
-	// Add ingests rawURL: dedup, fetch, extract, tokenize, persist as pending,
-	// notify the worker. On a dedup hit it returns the existing article without
-	// re-spending. The returned article carries its current status.
+	// Add ingests rawURL: normalize, dedup, persist as queued, notify the
+	// worker. Fetch and enrichment happen asynchronously in the worker. On a
+	// dedup hit it returns the existing article without re-spending. The
+	// returned article carries its current status.
 	Add(ctx context.Context, rawURL string) (*model.Article, error)
 
-	// Reenrich forces re-enrichment of an existing article: requeue to pending
-	// and notify the worker. Returns ErrNotFound for an unknown id.
-	Reenrich(ctx context.Context, id string) error
+	// Retry resumes a failed article from the stage that failed (re-fetch or
+	// re-enrich) and notifies the worker. Returns ErrNotFound for an unknown id.
+	Retry(ctx context.Context, id string) error
 }
 
 // EnrichmentWorker is the async enrichment worker pool. Concrete constructor:

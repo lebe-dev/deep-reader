@@ -6,11 +6,10 @@
 //  2. Compute url_hash = sha256 hex of the normalized URL.
 //  3. Dedup: if an article with that hash exists and its enrichment_version
 //     matches cfg.EnrichmentVersion, return the existing article immediately.
-//  4. Fetch and extract content via the Extractor.
-//  5. Tokenize the extracted text via [tokenize.Tokenize].
-//  6. Persist as a new article with status=pending.
-//  7. Notify the enrichment worker.
-//  8. Return the newly-created article (without waiting for enrichment).
+//  4. Persist as a new article with status=queued (no content yet).
+//  5. Notify the enrichment worker, which performs the fetch and enrich stages
+//     asynchronously.
+//  6. Return the newly-created article (without waiting for fetch/enrichment).
 package ingest
 
 import (
@@ -18,7 +17,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -29,30 +27,31 @@ import (
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
-	"deep-reader/internal/tokenize"
 )
 
 // Ingestor orchestrates the article ingestion pipeline. Use [New] to construct.
 type Ingestor struct {
 	cfg    *config.Config
 	store  ports.Store
-	ex     ports.Extractor
 	worker ports.EnrichmentWorker
 }
 
 // New constructs an Ingestor. All arguments are required and must be non-nil.
-func New(cfg *config.Config, st ports.Store, ex ports.Extractor, worker ports.EnrichmentWorker) *Ingestor {
+func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker) *Ingestor {
 	return &Ingestor{
 		cfg:    cfg,
 		store:  st,
-		ex:     ex,
 		worker: worker,
 	}
 }
 
-// Add ingests rawURL. It normalises the URL, deduplicates by hash, extracts
-// content, tokenises, persists as pending, notifies the worker, and returns
-// the article.
+// Add ingests rawURL. It normalises the URL, deduplicates by hash, persists a
+// new article in status=queued, notifies the worker (which fetches and enriches
+// asynchronously), and returns the article.
+//
+// Add does not fetch or extract: fetch failures surface as the fetch_failed
+// stage on the persisted article, not as an error here. Only URL-normalisation
+// failures (which must not create a record) are returned as errors.
 //
 // If an article with the same url_hash already exists and its
 // enrichment_version equals cfg.EnrichmentVersion the existing article is
@@ -92,42 +91,18 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 		return nil, fmt.Errorf("ingest: dedup lookup: %w", err)
 	}
 
-	// Fetch and extract the article.
-	slog.Debug("ingest: extracting content", "url", rawURL)
-	result, err := ing.ex.Extract(ctx, rawURL)
-	if err != nil {
-		slog.Warn("ingest: extraction failed", "url", rawURL, "err", err)
-		return nil, err // preserve typed errors (ErrBlockedHost, ErrTooLarge, etc.)
-	}
-
-	// Decode HTML entities (e.g. &mdash;, &#39;) that extractors may leave in the
-	// title and body. This must happen before tokenization so that the token byte
-	// offsets stay consistent with the stored OriginalText.
-	text := html.UnescapeString(result.Text)
-
-	// Tokenise the extracted plain text.
-	tokens := tokenize.Tokenize(text)
-	slog.Debug("ingest: content extracted",
-		"url", rawURL,
-		"canonical_url", result.CanonicalURL,
-		"domain", result.Domain,
-		"lang", result.Lang,
-		"text_bytes", len(text),
-		"token_count", len(tokens),
-	)
-
+	// Persist a queued record. The worker fills in title/content/tokens during
+	// the fetch stage and the enrichment during the enrich stage. SourceURL is
+	// seeded with the normalized URL and replaced with the canonical URL after
+	// fetch; SourceDomain is derived so the library card has something to show
+	// before the fetch completes.
 	now := time.Now().UTC()
 	article := &model.Article{
 		ID:                ulid.Make().String(),
-		SourceURL:         result.CanonicalURL,
+		SourceURL:         normalized,
 		URLHash:           hash,
-		Title:             html.UnescapeString(result.Title),
-		Author:            html.UnescapeString(result.Author),
-		SourceDomain:      result.Domain,
-		Lang:              result.Lang,
-		OriginalText:      text,
-		Tokens:            tokens,
-		Status:            model.StatusPending,
+		SourceDomain:      hostOf(normalized),
+		Status:            model.StatusQueued,
 		EnrichmentVersion: ing.cfg.EnrichmentVersion,
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -151,8 +126,6 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 		"article_id", article.ID,
 		"source_url", article.SourceURL,
 		"domain", article.SourceDomain,
-		"title", article.Title,
-		"token_count", len(tokens),
 		"status", article.Status,
 	)
 
@@ -161,15 +134,25 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 	return article, nil
 }
 
-// Reenrich resets the article to pending so the enrichment worker processes it
-// again. Returns [ports.ErrNotFound] for an unknown id.
-func (ing *Ingestor) Reenrich(ctx context.Context, id string) error {
-	if err := ing.store.RequeueArticle(ctx, id); err != nil {
+// Retry resumes a failed article from the stage that failed and notifies the
+// worker. Returns [ports.ErrNotFound] for an unknown id.
+func (ing *Ingestor) Retry(ctx context.Context, id string) error {
+	if err := ing.store.RetryArticle(ctx, id); err != nil {
 		return err // preserve ErrNotFound
 	}
-	slog.Info("ingest: article requeued for re-enrichment", "article_id", id)
+	slog.Info("ingest: article queued for retry", "article_id", id)
 	ing.worker.Notify()
 	return nil
+}
+
+// hostOf returns the host of a normalized URL, or "" if it cannot be parsed.
+// Used to seed SourceDomain before the fetch stage resolves the real domain.
+func hostOf(normalized string) string {
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // NormalizeURL returns the canonical form of rawURL used for deduplication:

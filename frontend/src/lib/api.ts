@@ -135,9 +135,9 @@ export function deleteArticle(id: string, signal?: AbortSignal): Promise<void> {
 	return request<void>(`/api/articles/${encodeURIComponent(id)}`, { method: 'DELETE', signal });
 }
 
-/** `POST /api/articles/:id/reenrich` — force re-enrichment (resets to pending). */
-export function reenrichArticle(id: string, signal?: AbortSignal): Promise<AddArticleResponse> {
-	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/reenrich`, {
+/** `POST /api/articles/:id/retry` — resume a failed article from the stage that failed. */
+export function retryArticle(id: string, signal?: AbortSignal): Promise<AddArticleResponse> {
+	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/retry`, {
 		method: 'POST',
 		signal
 	});

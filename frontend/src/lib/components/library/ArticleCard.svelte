@@ -5,7 +5,7 @@
 	import { Progress } from '$lib/components/ui/progress';
 	import type { ArticleMeta, Progress as ProgressType } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
-	import { enqueueReenrich } from '$lib/sync/engine';
+	import { enqueueRetry } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
@@ -21,17 +21,43 @@
 
 	let deleteOpen = $state(false);
 
+	const isFailed = $derived(
+		article.status === 'fetch_failed' || article.status === 'enrich_failed'
+	);
+
+	// "New": ready but never opened (no progress row yet).
+	const isNew = $derived(article.status === 'enriched' && progress === undefined);
+
 	const statusVariant = $derived.by(() => {
 		if (article.status === 'enriched') return 'default' as const;
-		if (article.status === 'failed') return 'destructive' as const;
+		if (isFailed) return 'destructive' as const;
 		return 'secondary' as const;
 	});
 
 	const statusLabel = $derived.by(() => {
-		if (article.status === 'enriched') return 'Ready';
-		if (article.status === 'failed') return 'Failed';
-		return 'Processing';
+		switch (article.status) {
+			case 'queued':
+				return 'Queued';
+			case 'fetching':
+				return 'Fetching…';
+			case 'fetched':
+				return 'Content fetched';
+			case 'enriching':
+				return 'Processing…';
+			case 'enriched':
+				return 'Ready';
+			case 'fetch_failed':
+				return 'Fetch failed';
+			case 'enrich_failed':
+				return 'Process failed';
+		}
 	});
+
+	const failedMessage = $derived(
+		article.status === 'fetch_failed'
+			? 'Could not fetch the original content.'
+			: 'Could not process the article.'
+	);
 
 	// position is a token index; convert to 0–100 percentage using the article's token count.
 	const progressPct = $derived.by(() => {
@@ -54,20 +80,20 @@
 			onclick?.();
 			return;
 		}
-		if (article.status === 'pending') {
-			toast.info('Still processing — check back in a moment.');
+		if (isFailed) {
+			// do nothing on card click; user uses the Retry button
 			return;
 		}
-		// failed — do nothing on card click; user uses the Re-enrich button
+		toast.info('Still processing — check back in a moment.');
 	}
 
-	async function handleReenrich(e: MouseEvent) {
+	async function handleRetry(e: MouseEvent) {
 		e.stopPropagation();
 		try {
-			await enqueueReenrich(article.id);
-			toast.success('Re-enrichment queued.');
+			await enqueueRetry(article.id);
+			toast.success('Retry queued.');
 		} catch {
-			toast.error('Failed to queue re-enrichment.');
+			toast.error('Failed to queue retry.');
 		}
 	}
 
@@ -102,6 +128,9 @@
 				{/if}
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
+				{#if isNew}
+					<Badge variant="outline" class="border-primary text-primary rounded-md">New</Badge>
+				{/if}
 				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
 			</div>
 		</div>
@@ -131,22 +160,22 @@
 			</div>
 		{/if}
 
-		{#if article.status === 'failed'}
+		{#if isFailed}
 			<div class="bg-destructive/10 text-destructive mt-2 rounded-md px-3 py-2 text-xs">
 				{#if article.error}
 					<span class="line-clamp-2">{article.error}</span>
 				{:else}
-					Enrichment failed.
+					{failedMessage}
 				{/if}
 			</div>
 		{/if}
 	</Card.Content>
 
 	<Card.Footer class="flex justify-end gap-2 pt-0">
-		{#if article.status === 'failed'}
-			<Button size="sm" variant="secondary" onclick={handleReenrich} class="h-7 text-xs">
+		{#if isFailed}
+			<Button size="sm" variant="secondary" onclick={handleRetry} class="h-7 text-xs">
 				<RefreshCwIcon class="size-3" />
-				Re-enrich
+				Retry
 			</Button>
 		{/if}
 		<Button

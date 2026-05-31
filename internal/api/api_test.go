@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -15,7 +16,6 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"deep-reader/internal/config"
-	"deep-reader/internal/extract"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 )
@@ -34,7 +34,7 @@ type fakeStore struct {
 	payload        *model.ArticlePayload
 	getPayloadErr  error
 	deleteErr      error
-	requeueErr     error
+	retryErr       error
 	upsertApplied  bool
 	upsertErr      error
 	lastUpsert     model.Progress
@@ -80,7 +80,8 @@ func (f *fakeStore) SetStatus(context.Context, string, string, string) error {
 func (f *fakeStore) SaveEnrichment(context.Context, string, model.Enrichment, time.Time) error {
 	return nil
 }
-func (f *fakeStore) ListPending(context.Context, int) ([]model.Article, error) { return nil, nil }
+func (f *fakeStore) SaveContent(context.Context, string, ports.ContentUpdate) error { return nil }
+func (f *fakeStore) ListWork(context.Context, int) ([]model.Article, error)         { return nil, nil }
 
 func (f *fakeStore) UpsertProgress(_ context.Context, p model.Progress) (bool, error) {
 	f.lastUpsert = p
@@ -90,7 +91,7 @@ func (f *fakeStore) UpsertProgress(_ context.Context, p model.Progress) (bool, e
 func (f *fakeStore) ListProgress(context.Context, time.Time) ([]model.Progress, error) {
 	return f.progress, nil
 }
-func (f *fakeStore) RequeueArticle(context.Context, string) error { return f.requeueErr }
+func (f *fakeStore) RetryArticle(context.Context, string) error { return f.retryErr }
 
 func (f *fakeStore) MarkdownUnitsUsedToday(context.Context) (int, error) {
 	return f.markdownUsed, nil
@@ -105,7 +106,7 @@ func (f *fakeStore) RefundMarkdownUnits(context.Context, int) error { return nil
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
 	add        func(string) (*model.Article, error)
-	reenrich   func(string) error
+	retry      func(string) error
 	lastAddURL string
 }
 
@@ -114,12 +115,12 @@ func (f *fakeIngestor) Add(_ context.Context, rawURL string) (*model.Article, er
 	if f.add != nil {
 		return f.add(rawURL)
 	}
-	return &model.Article{ID: "art-1", Status: model.StatusPending}, nil
+	return &model.Article{ID: "art-1", Status: model.StatusQueued}, nil
 }
 
-func (f *fakeIngestor) Reenrich(_ context.Context, id string) error {
-	if f.reenrich != nil {
-		return f.reenrich(id)
+func (f *fakeIngestor) Retry(_ context.Context, id string) error {
+	if f.retry != nil {
+		return f.retry(id)
 	}
 	return nil
 }
@@ -216,7 +217,7 @@ func TestConfigReturnsSettingsAndArticles(t *testing.T) {
 		settings: model.Settings{CEFRLevel: model.CEFRB1, TargetLanguage: "ru"},
 		metas: []model.ArticleMeta{
 			{ID: "a1", Title: "One", Status: model.StatusEnriched},
-			{ID: "a2", Title: "Two", Status: model.StatusPending},
+			{ID: "a2", Title: "Two", Status: model.StatusQueued},
 		},
 		progress: []model.Progress{{ArticleID: "a1", Position: 5}},
 	}
@@ -264,7 +265,7 @@ func TestConfigSinceParsing(t *testing.T) {
 func TestAddArticle(t *testing.T) {
 	ing := &fakeIngestor{
 		add: func(string) (*model.Article, error) {
-			return &model.Article{ID: "new-id", Status: model.StatusPending}, nil
+			return &model.Article{ID: "new-id", Status: model.StatusQueued}, nil
 		},
 	}
 	s := newTestServer(t, &fakeStore{}, ing)
@@ -274,7 +275,7 @@ func TestAddArticle(t *testing.T) {
 		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
 	got := decode[model.AddArticleResponse](t, resp)
-	if got.ID != "new-id" || got.Status != model.StatusPending {
+	if got.ID != "new-id" || got.Status != model.StatusQueued {
 		t.Errorf("got %+v, want {new-id pending}", got)
 	}
 	if ing.lastAddURL != "https://example.com/x" {
@@ -290,14 +291,16 @@ func TestAddArticleMissingURL(t *testing.T) {
 	}
 }
 
-func TestAddArticleBlockedHost(t *testing.T) {
+func TestAddArticleServerError(t *testing.T) {
+	// Add no longer fetches, so transport/extract failures don't surface here;
+	// any non-URL error from Add maps to a 500.
 	ing := &fakeIngestor{
-		add: func(string) (*model.Article, error) { return nil, extract.ErrBlockedHost },
+		add: func(string) (*model.Article, error) { return nil, errors.New("boom") },
 	}
 	s := newTestServer(t, &fakeStore{}, ing)
-	resp := doReq(t, s, http.MethodPost, "/api/articles", model.AddArticleRequest{URL: "http://169.254.169.254/"}, testToken)
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	resp := doReq(t, s, http.MethodPost, "/api/articles", model.AddArticleRequest{URL: "https://example.com/x"}, testToken)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
 	}
 }
 
@@ -318,7 +321,7 @@ func TestGetArticleEnriched(t *testing.T) {
 
 func TestGetArticleNotEnriched409(t *testing.T) {
 	st := &fakeStore{
-		payload: &model.ArticlePayload{ID: "a1", Status: model.StatusPending},
+		payload: &model.ArticlePayload{ID: "a1", Status: model.StatusQueued},
 	}
 	s := newTestServer(t, st, &fakeIngestor{})
 	resp := doReq(t, s, http.MethodGet, "/api/articles/a1", nil, testToken)
@@ -428,18 +431,18 @@ func TestDeleteArticle(t *testing.T) {
 	})
 }
 
-func TestReenrich(t *testing.T) {
+func TestRetry(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
-		resp := doReq(t, s, http.MethodPost, "/api/articles/a1/reenrich", nil, testToken)
+		resp := doReq(t, s, http.MethodPost, "/api/articles/a1/retry", nil, testToken)
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("status = %d, want 202", resp.StatusCode)
 		}
 	})
 	t.Run("not found", func(t *testing.T) {
-		ing := &fakeIngestor{reenrich: func(string) error { return ports.ErrNotFound }}
+		ing := &fakeIngestor{retry: func(string) error { return ports.ErrNotFound }}
 		s := newTestServer(t, &fakeStore{}, ing)
-		resp := doReq(t, s, http.MethodPost, "/api/articles/missing/reenrich", nil, testToken)
+		resp := doReq(t, s, http.MethodPost, "/api/articles/missing/retry", nil, testToken)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", resp.StatusCode)
 		}
@@ -449,10 +452,10 @@ func TestReenrich(t *testing.T) {
 func TestStats(t *testing.T) {
 	st := &fakeStore{
 		metas: []model.ArticleMeta{
-			{Status: model.StatusPending},
+			{Status: model.StatusQueued},
 			{Status: model.StatusEnriched},
 			{Status: model.StatusEnriched},
-			{Status: model.StatusFailed},
+			{Status: model.StatusFetchFailed},
 		},
 	}
 	s := newTestServer(t, st, &fakeIngestor{})
@@ -461,7 +464,7 @@ func TestStats(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	got := decode[statsResponse](t, resp)
-	if got.Total != 4 || got.Pending != 1 || got.Enriched != 2 || got.Failed != 1 {
+	if got.Total != 4 || got.InProgress != 1 || got.Ready != 2 || got.Failed != 1 {
 		t.Errorf("stats = %+v", got)
 	}
 }

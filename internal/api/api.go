@@ -10,7 +10,7 @@
 //	GET    /api/articles/:id                full enriched payload (409 if not enriched)
 //	POST   /api/articles                    {url} -> {id,status} (rate limited)
 //	DELETE /api/articles/:id                remove from library
-//	POST   /api/articles/:id/reenrich       requeue to pending
+//	POST   /api/articles/:id/retry          resume failed article from its stage
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
 //	PATCH  /api/settings                    partial settings update
 //	GET    /api/stats                        library counters
@@ -134,7 +134,7 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Get("/articles/:id", s.getArticle)
 	api.Post("/articles", s.addArticle, s.ingestRateLimiter())
 	api.Delete("/articles/:id", s.deleteArticle)
-	api.Post("/articles/:id/reenrich", s.reenrichArticle)
+	api.Post("/articles/:id/retry", s.retryArticle)
 	api.Put("/articles/:id/progress", s.putProgress)
 
 	api.Patch("/settings", s.patchSettings)

@@ -9,18 +9,41 @@ package model
 
 import "time"
 
-// Article status values stored in the articles.status column.
+// Article status values stored in the articles.status column. They form an
+// explicit two-stage pipeline — fetch (extract original content) then enrich
+// (LLM annotation) — so the UI can show exactly which stage an article is in
+// and, on failure, which stage failed. The in-flight states (StatusFetching,
+// StatusEnriching) are persisted for the UI; a crash mid-stage is safe because
+// the worker re-selects them as their preceding queue state (see ListWork).
 const (
-	// StatusPending means the article has been ingested and tokenized but not
-	// yet enriched by the LLM worker.
-	StatusPending = "pending"
+	// StatusQueued means the article record exists but its original content has
+	// not been fetched yet. This is the state right after ingestion.
+	StatusQueued = "queued"
+	// StatusFetching means the fetch/extract stage is in flight.
+	StatusFetching = "fetching"
+	// StatusFetched means the original content has been fetched and tokenized
+	// and the article is waiting for the enrichment stage. UI label: original
+	// content received.
+	StatusFetched = "fetched"
+	// StatusEnriching means the enrichment (LLM) stage is in flight. UI label:
+	// sent for processing.
+	StatusEnriching = "enriching"
 	// StatusEnriched means enrichment completed successfully and the payload is
-	// available.
+	// available. This is the terminal success state. UI label: ready.
 	StatusEnriched = "enriched"
-	// StatusFailed means enrichment failed after exhausting retries; the reason
-	// is stored in Article.Error.
-	StatusFailed = "failed"
+	// StatusFetchFailed means the fetch stage failed; the reason is stored in
+	// Article.Error. Retry re-runs the fetch stage.
+	StatusFetchFailed = "fetch_failed"
+	// StatusEnrichFailed means the enrichment stage failed after exhausting
+	// retries; the reason is stored in Article.Error. Retry re-runs only the
+	// enrichment stage (the fetched content is preserved).
+	StatusEnrichFailed = "enrich_failed"
 )
+
+// WorkStatuses is the set of statuses the enrichment worker picks up. It
+// includes the in-flight states so a stuck article (server crashed mid-stage)
+// is re-processed: queued/fetching need fetch, fetched/enriching need enrich.
+var WorkStatuses = []string{StatusQueued, StatusFetching, StatusFetched, StatusEnriching}
 
 // CEFR proficiency levels. These are the legal values for Settings.CEFRLevel
 // and Settings.MinDifficultyToHighlight, and for DifficultWord.CEFRLevel.

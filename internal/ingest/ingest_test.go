@@ -21,7 +21,7 @@ import (
 type fakeStore struct {
 	articles map[string]*model.Article // keyed by url_hash
 	byID     map[string]*model.Article // keyed by id
-	requeued []string                  // ids passed to RequeueArticle
+	retried  []string                  // ids passed to RetryArticle
 }
 
 func newFakeStore() *fakeStore {
@@ -49,13 +49,28 @@ func (f *fakeStore) CreateArticle(_ context.Context, a *model.Article) error {
 	return nil
 }
 
-func (f *fakeStore) RequeueArticle(_ context.Context, id string) error {
+func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	a, ok := f.byID[id]
 	if !ok {
 		return ports.ErrNotFound
 	}
-	a.Status = model.StatusPending
-	f.requeued = append(f.requeued, id)
+	if a.Status == model.StatusEnrichFailed {
+		a.Status = model.StatusFetched
+	} else {
+		a.Status = model.StatusQueued
+	}
+	f.retried = append(f.retried, id)
+	return nil
+}
+
+func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpdate) error {
+	a, ok := f.byID[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.OriginalText = c.Text
+	a.Tokens = c.Tokens
+	a.Status = model.StatusFetched
 	return nil
 }
 
@@ -86,7 +101,7 @@ func (f *fakeStore) SetStatus(_ context.Context, _, _, _ string) error {
 func (f *fakeStore) SaveEnrichment(_ context.Context, _ string, _ model.Enrichment, _ time.Time) error {
 	return nil
 }
-func (f *fakeStore) ListPending(_ context.Context, _ int) ([]model.Article, error) { return nil, nil }
+func (f *fakeStore) ListWork(_ context.Context, _ int) ([]model.Article, error) { return nil, nil }
 func (f *fakeStore) UpsertProgress(_ context.Context, _ model.Progress) (bool, error) {
 	return false, nil
 }
@@ -98,32 +113,6 @@ func (f *fakeStore) TryConsumeMarkdownUnits(_ context.Context, _, _ int) (bool, 
 	return true, 0, nil
 }
 func (f *fakeStore) RefundMarkdownUnits(_ context.Context, _ int) error { return nil }
-
-// fakeExtractor records calls and returns canned results.
-type fakeExtractor struct {
-	calls  int
-	result *ports.ExtractResult
-	err    error
-}
-
-func (f *fakeExtractor) Extract(_ context.Context, rawURL string) (*ports.ExtractResult, error) {
-	f.calls++
-	if f.err != nil {
-		return nil, f.err
-	}
-	if f.result != nil {
-		return f.result, nil
-	}
-	return &ports.ExtractResult{
-		CanonicalURL: rawURL,
-		Title:        "Test Article",
-		Author:       "Author",
-		Domain:       "example.com",
-		Lang:         "en",
-		HTML:         "<p>Hello world</p>",
-		Text:         "Hello world",
-	}, nil
-}
 
 // fakeWorker counts Notify calls.
 type fakeWorker struct {
@@ -159,11 +148,10 @@ func defaultCfg() *config.Config {
 
 func TestAdd_NewURL(t *testing.T) {
 	st := newFakeStore()
-	ex := &fakeExtractor{}
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, ex, wk)
+	ing := ingest.New(cfg, st, wk)
 
 	rawURL := "https://example.com/article?utm_source=twitter#section"
 	art, err := ing.Add(context.Background(), rawURL)
@@ -171,22 +159,20 @@ func TestAdd_NewURL(t *testing.T) {
 		t.Fatalf("Add: unexpected error: %v", err)
 	}
 
-	// Extractor must have been called exactly once.
-	if ex.calls != 1 {
-		t.Errorf("extractor calls: got %d, want 1", ex.calls)
-	}
-
-	// Worker must have been notified once.
+	// Worker must have been notified once (so it picks up the fetch stage).
 	if n := wk.notified.Load(); n != 1 {
 		t.Errorf("worker notified: got %d, want 1", n)
 	}
 
-	// Returned article must have status=pending.
-	if art.Status != model.StatusPending {
-		t.Errorf("status: got %q, want %q", art.Status, model.StatusPending)
+	// Add does not fetch: the article starts queued with no content/tokens yet.
+	if art.Status != model.StatusQueued {
+		t.Errorf("status: got %q, want %q", art.Status, model.StatusQueued)
+	}
+	if len(art.Tokens) != 0 {
+		t.Errorf("tokens must be empty before fetch, got %d", len(art.Tokens))
 	}
 
-	// Article must be persisted.
+	// Article must be persisted under the normalized URL hash.
 	hash := ingest.URLHash(mustNormalize(t, rawURL))
 	stored, err := st.GetArticleByHash(context.Background(), hash)
 	if err != nil {
@@ -200,10 +186,21 @@ func TestAdd_NewURL(t *testing.T) {
 	if art.EnrichmentVersion != cfg.EnrichmentVersion {
 		t.Errorf("enrichment_version: got %d, want %d", art.EnrichmentVersion, cfg.EnrichmentVersion)
 	}
+}
 
-	// Tokens must be non-empty (text="Hello world" → 2 tokens).
-	if len(art.Tokens) == 0 {
-		t.Error("tokens must not be empty")
+func TestAdd_InvalidURLCreatesNoRecord(t *testing.T) {
+	st := newFakeStore()
+	wk := &fakeWorker{}
+	ing := ingest.New(defaultCfg(), st, wk)
+
+	if _, err := ing.Add(context.Background(), "/relative/path"); err == nil {
+		t.Fatal("Add: expected error for URL without host")
+	}
+	if len(st.byID) != 0 {
+		t.Errorf("no article should be created for an invalid URL, got %d", len(st.byID))
+	}
+	if n := wk.notified.Load(); n != 0 {
+		t.Errorf("worker must not be notified on invalid URL, got %d", n)
 	}
 }
 
@@ -213,11 +210,10 @@ func TestAdd_NewURL(t *testing.T) {
 
 func TestAdd_DedupReturnExisting(t *testing.T) {
 	st := newFakeStore()
-	ex := &fakeExtractor{}
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, ex, wk)
+	ing := ingest.New(cfg, st, wk)
 
 	rawURL := "https://example.com/article"
 
@@ -227,19 +223,13 @@ func TestAdd_DedupReturnExisting(t *testing.T) {
 		t.Fatalf("first Add: %v", err)
 	}
 
-	// Reset counters for the second call.
-	ex.calls = 0
+	// Reset counter for the second call.
 	wk.notified.Store(0)
 
 	// Second call with same URL and same enrichment version → dedup.
 	second, err := ing.Add(context.Background(), rawURL)
 	if err != nil {
 		t.Fatalf("second Add (dedup): %v", err)
-	}
-
-	// Extractor must NOT have been called on dedup.
-	if ex.calls != 0 {
-		t.Errorf("extractor calls on dedup: got %d, want 0", ex.calls)
 	}
 
 	// Worker must NOT have been notified on dedup.
@@ -254,18 +244,17 @@ func TestAdd_DedupReturnExisting(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Reenrich
+// Tests: Retry
 // ---------------------------------------------------------------------------
 
-func TestReenrich_RequeuesAndNotifies(t *testing.T) {
+func TestRetry_RequeuesAndNotifies(t *testing.T) {
 	st := newFakeStore()
-	ex := &fakeExtractor{}
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, ex, wk)
+	ing := ingest.New(cfg, st, wk)
 
-	// First, ingest an article so we have an id to reenrich.
+	// First, ingest an article so we have an id to retry.
 	art, err := ing.Add(context.Background(), "https://example.com/article")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
@@ -274,33 +263,31 @@ func TestReenrich_RequeuesAndNotifies(t *testing.T) {
 	// Reset worker counter.
 	wk.notified.Store(0)
 
-	// Reenrich.
-	if err := ing.Reenrich(context.Background(), art.ID); err != nil {
-		t.Fatalf("Reenrich: %v", err)
+	if err := ing.Retry(context.Background(), art.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
 	}
 
-	// Store must have recorded the requeue.
-	if len(st.requeued) == 0 || st.requeued[len(st.requeued)-1] != art.ID {
-		t.Errorf("RequeueArticle not called for id %q; requeued=%v", art.ID, st.requeued)
+	// Store must have recorded the retry.
+	if len(st.retried) == 0 || st.retried[len(st.retried)-1] != art.ID {
+		t.Errorf("RetryArticle not called for id %q; retried=%v", art.ID, st.retried)
 	}
 
 	// Worker must have been notified.
 	if n := wk.notified.Load(); n != 1 {
-		t.Errorf("worker notified after reenrich: got %d, want 1", n)
+		t.Errorf("worker notified after retry: got %d, want 1", n)
 	}
 }
 
-func TestReenrich_NotFound(t *testing.T) {
+func TestRetry_NotFound(t *testing.T) {
 	st := newFakeStore()
-	ex := &fakeExtractor{}
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, ex, wk)
+	ing := ingest.New(cfg, st, wk)
 
-	err := ing.Reenrich(context.Background(), "nonexistent-id")
+	err := ing.Retry(context.Background(), "nonexistent-id")
 	if !errors.Is(err, ports.ErrNotFound) {
-		t.Errorf("Reenrich unknown id: got %v, want ErrNotFound", err)
+		t.Errorf("Retry unknown id: got %v, want ErrNotFound", err)
 	}
 }
 
@@ -410,79 +397,9 @@ func TestURLHash_DifferentInputs(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tests: Add — extractor error propagation
-// ---------------------------------------------------------------------------
-
-func TestAdd_ExtractorError(t *testing.T) {
-	st := newFakeStore()
-	wantErr := errors.New("some extract error")
-	ex := &fakeExtractor{err: wantErr}
-	wk := &fakeWorker{}
-	cfg := defaultCfg()
-
-	ing := ingest.New(cfg, st, ex, wk)
-
-	_, err := ing.Add(context.Background(), "https://example.com/article")
-	if !errors.Is(err, wantErr) {
-		t.Errorf("Add: extractor error not propagated: got %v, want %v", err, wantErr)
-	}
-
-	// Worker must NOT be notified on error.
-	if n := wk.notified.Load(); n != 0 {
-		t.Errorf("worker notified on error: got %d, want 0", n)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Tests: Add — HTML entity decoding
-// ---------------------------------------------------------------------------
-
-func TestAdd_DecodesHTMLEntities(t *testing.T) {
-	st := newFakeStore()
-	ex := &fakeExtractor{result: &ports.ExtractResult{
-		CanonicalURL: "https://example.com/article",
-		Title:        "Let&rsquo;s talk about EU Sovereignty &mdash; Martyn&#39;s random musings",
-		Author:       "Martyn &amp; Co",
-		Domain:       "example.com",
-		Lang:         "en",
-		Text:         "First &amp; foremost I really dislike the term &mdash; it&rsquo;s loaded.",
-	}}
-	wk := &fakeWorker{}
-	cfg := defaultCfg()
-
-	ing := ingest.New(cfg, st, ex, wk)
-
-	art, err := ing.Add(context.Background(), "https://example.com/article")
-	if err != nil {
-		t.Fatalf("Add: unexpected error: %v", err)
-	}
-
-	wantTitle := "Let’s talk about EU Sovereignty — Martyn's random musings"
-	if art.Title != wantTitle {
-		t.Errorf("title not decoded:\n got %q\nwant %q", art.Title, wantTitle)
-	}
-
-	wantAuthor := "Martyn & Co"
-	if art.Author != wantAuthor {
-		t.Errorf("author not decoded: got %q, want %q", art.Author, wantAuthor)
-	}
-
-	wantText := "First & foremost I really dislike the term — it’s loaded."
-	if art.OriginalText != wantText {
-		t.Errorf("text not decoded:\n got %q\nwant %q", art.OriginalText, wantText)
-	}
-
-	// Token byte offsets must stay consistent with the decoded text.
-	for _, tok := range art.Tokens {
-		if tok.Start < 0 || tok.End > len(art.OriginalText) || tok.Start > tok.End {
-			t.Fatalf("token offsets out of range: %+v (text len %d)", tok, len(art.OriginalText))
-		}
-		if got := art.OriginalText[tok.Start:tok.End]; got != tok.Text {
-			t.Errorf("token text mismatch: text[%d:%d]=%q, token.Text=%q", tok.Start, tok.End, got, tok.Text)
-		}
-	}
-}
+// Note: extraction (and its HTML-entity decoding / error handling) now happens
+// in the enrichment worker's fetch stage, not in ingest.Add — those behaviours
+// are covered by the enrich package tests.
 
 // ---------------------------------------------------------------------------
 // Helpers

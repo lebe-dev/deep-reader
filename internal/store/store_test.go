@@ -41,7 +41,7 @@ func makeArticle(url string) *model.Article {
 		Lang:              "en",
 		OriginalText:      "Hello world",
 		Tokens:            []model.Token{{Index: 0, Text: "Hello", Start: 0, End: 5}},
-		Status:            model.StatusPending,
+		Status:            model.StatusFetched,
 		EnrichmentVersion: 1,
 		CreatedAt:         time.Now().UTC().Truncate(time.Second),
 		UpdatedAt:         time.Now().UTC().Truncate(time.Second),
@@ -461,59 +461,83 @@ func TestSaveEnrichment_ArticleMissing(t *testing.T) {
 	}
 }
 
-// ── RequeueArticle ────────────────────────────────────────────────────────────
+// ── RetryArticle ────────────────────────────────────────────────────────────
 
-func TestRequeueArticle(t *testing.T) {
+func TestRetryArticle(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
 
-	a := makeArticle("https://example.com/requeue")
+	a := makeArticle("https://example.com/retry")
 	if err := s.CreateArticle(ctx, a); err != nil {
 		t.Fatalf("CreateArticle: %v", err)
 	}
 
-	// Enrich it first.
+	// Enrich it first, then mark the enrichment stage failed.
 	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
-	// Set it failed too.
-	if err := s.SetStatus(ctx, a.ID, model.StatusFailed, "timeout"); err != nil {
+	if err := s.SetStatus(ctx, a.ID, model.StatusEnrichFailed, "timeout"); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
-	// Requeue.
-	if err := s.RequeueArticle(ctx, a.ID); err != nil {
-		t.Fatalf("RequeueArticle: %v", err)
+	// Retry: an enrich_failed article goes back to fetched (re-enrich only).
+	if err := s.RetryArticle(ctx, a.ID); err != nil {
+		t.Fatalf("RetryArticle: %v", err)
 	}
 
 	got, err := s.GetArticle(ctx, a.ID)
 	if err != nil {
-		t.Fatalf("GetArticle after requeue: %v", err)
+		t.Fatalf("GetArticle after retry: %v", err)
 	}
-	if got.Status != model.StatusPending {
-		t.Errorf("status: got %q, want %q", got.Status, model.StatusPending)
+	if got.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusFetched)
 	}
 	if got.Error != "" {
 		t.Errorf("error should be cleared, got %q", got.Error)
 	}
 	if !got.EnrichedAt.IsZero() {
-		t.Errorf("enriched_at should be zero after requeue, got %v", got.EnrichedAt)
+		t.Errorf("enriched_at should be zero after retry, got %v", got.EnrichedAt)
 	}
 }
 
-func TestRequeueArticle_NotFound(t *testing.T) {
+func TestRetryArticle_FetchFailedGoesToQueued(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
 
-	err := s.RequeueArticle(ctx, "no-such-id")
+	a := makeArticle("https://example.com/retry-fetch")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.SetStatus(ctx, a.ID, model.StatusFetchFailed, "blocked"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	if err := s.RetryArticle(ctx, a.ID); err != nil {
+		t.Fatalf("RetryArticle: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusQueued {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusQueued)
+	}
+}
+
+func TestRetryArticle_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	err := s.RetryArticle(ctx, "no-such-id")
 	if !isErr(err, ports.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
-// ── ListPending ───────────────────────────────────────────────────────────────
+// ── ListWork ───────────────────────────────────────────────────────────────
 
-func TestListPending(t *testing.T) {
+func TestListWork(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
 
@@ -524,27 +548,77 @@ func TestListPending(t *testing.T) {
 		}
 	}
 
-	// Enrich one of them.
+	// Enrich one of them — it leaves the work set.
 	all, _ := s.ListArticleMeta(ctx, time.Time{})
 	if err := s.SaveEnrichment(ctx, all[0].ID, model.Enrichment{}, time.Now().UTC()); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
-	pending, err := s.ListPending(ctx, 10)
+	work, err := s.ListWork(ctx, 10)
 	if err != nil {
-		t.Fatalf("ListPending: %v", err)
+		t.Fatalf("ListWork: %v", err)
 	}
-	if len(pending) != 4 {
-		t.Errorf("expected 4 pending, got %d", len(pending))
+	if len(work) != 4 {
+		t.Errorf("expected 4 awaiting work, got %d", len(work))
 	}
 
 	// Limit works.
-	limited, err := s.ListPending(ctx, 2)
+	limited, err := s.ListWork(ctx, 2)
 	if err != nil {
-		t.Fatalf("ListPending limited: %v", err)
+		t.Fatalf("ListWork limited: %v", err)
 	}
 	if len(limited) != 2 {
 		t.Errorf("expected 2 with limit 2, got %d", len(limited))
+	}
+}
+
+// ── SaveContent ──────────────────────────────────────────────────────────────
+
+func TestSaveContent(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// A queued article with no content yet.
+	a := makeArticle("https://example.com/savecontent")
+	a.Status = model.StatusQueued
+	a.OriginalText = ""
+	a.Tokens = nil
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	upd := ports.ContentUpdate{
+		SourceURL:    "https://example.com/canonical",
+		Title:        "Fetched Title",
+		Author:       "Fetched Author",
+		SourceDomain: "example.com",
+		Lang:         "en",
+		Text:         "Hello world",
+		Tokens:       []model.Token{{Index: 0, Text: "Hello", Start: 0, End: 5}},
+	}
+	if err := s.SaveContent(ctx, a.ID, upd); err != nil {
+		t.Fatalf("SaveContent: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusFetched)
+	}
+	if got.Title != upd.Title || got.OriginalText != upd.Text || len(got.Tokens) != 1 {
+		t.Errorf("content not saved: %+v", got)
+	}
+}
+
+func TestSaveContent_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	err := s.SaveContent(ctx, "no-such-id", ports.ContentUpdate{})
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
@@ -564,10 +638,10 @@ func TestGetArticlePayload_NoEnrichment(t *testing.T) {
 		t.Fatalf("GetArticlePayload: %v", err)
 	}
 	if payload.Enrichment != nil {
-		t.Error("enrichment should be nil for pending article")
+		t.Error("enrichment should be nil for not-yet-enriched article")
 	}
-	if payload.Status != model.StatusPending {
-		t.Errorf("status: got %q, want %q", payload.Status, model.StatusPending)
+	if payload.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", payload.Status, model.StatusFetched)
 	}
 }
 
