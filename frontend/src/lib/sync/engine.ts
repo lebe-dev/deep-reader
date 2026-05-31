@@ -3,13 +3,7 @@
 //
 // Named exports only; no default export.
 
-import {
-	db,
-	enqueueOutbox,
-	getSyncState,
-	updateSyncState,
-	type OutboxEntry
-} from '$lib/db';
+import { db, enqueueOutbox, getSyncState, updateSyncState, type OutboxEntry } from '$lib/db';
 import {
 	addArticle as apiAddArticle,
 	deleteArticle as apiDeleteArticle,

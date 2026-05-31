@@ -130,10 +130,19 @@ type DifficultWord struct {
 // Phrase is a contiguous token range [StartIndex, EndIndex] (inclusive) that
 // forms an idiom, phrasal verb, or domain term, with its translation or
 // definition.
+//
+// Text is the literal phrase the LLM claims to annotate, echoed back from the
+// source. It is the validation anchor: the enrichment pipeline rejects a phrase
+// whose Text does not match the words actually spanned by [StartIndex, EndIndex]
+// (see enrich.validateEnrichment). This catches the common failure mode where
+// the model picks a correct phrase but emits an over-wide or drifted token
+// range, which would otherwise surface in the reader as a term tooltip showing
+// a whole clause instead of the term.
 type Phrase struct {
 	StartIndex  int    `json:"start_index"`
 	EndIndex    int    `json:"end_index"`
 	Type        string `json:"type"`
+	Text        string `json:"text"`
 	Translation string `json:"translation"`
 }
 

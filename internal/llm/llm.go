@@ -111,12 +111,13 @@ const enrichmentSchema = `{
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["start_index", "end_index", "type", "translation"],
+        "required": ["start_index", "end_index", "type", "text", "translation"],
         "additionalProperties": false,
         "properties": {
           "start_index": {"type": "integer"},
           "end_index":   {"type": "integer"},
           "type":        {"type": "string", "enum": ["idiom","phrasal_verb","term"]},
+          "text":        {"type": "string"},
           "translation": {"type": "string"}
         }
       }
@@ -166,7 +167,10 @@ func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion in
 			"Use token_index from the input array.\n"+
 			"2. phrases: identify idioms, phrasal verbs, and domain terms as contiguous token ranges. "+
 			"Provide start_index and end_index (inclusive) from the input array, the phrase type "+
-			"(idiom | phrasal_verb | term), and a translation/definition into %s.\n"+
+			"(idiom | phrasal_verb | term), the exact phrase text, and a translation/definition into %s. "+
+			"The text field MUST be the verbatim concatenation of exactly the tokens from start_index to "+
+			"end_index (joined by single spaces) and nothing more — start_index and end_index must delimit "+
+			"precisely that phrase, not the surrounding sentence. Keep term ranges tight (usually 1–4 tokens).\n"+
 			"3. sentences: for every sentence provide start_index and end_index (inclusive) of its "+
 			"tokens and a fluent translation into %s.\n"+
 			"4. glossary: for domain-specific terms that deserve a definition rather than a plain translation, "+

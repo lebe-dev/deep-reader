@@ -17,6 +17,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
@@ -285,7 +286,7 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 		}
 
 		// Validate the enrichment before persisting.
-		if valErr := validateEnrichment(enrichment, len(a.Tokens)); valErr != nil {
+		if valErr := validateEnrichment(enrichment, a.Tokens); valErr != nil {
 			lastErr = valErr
 			log.Warn("enrich: validation failed, will retry", "attempt", attempt, "max_retries", maxRetries, "err", valErr)
 			continue
@@ -382,11 +383,14 @@ func (e *ValidationError) Error() string {
 
 // validateEnrichment checks that all token-index references in e are within
 // [0, tokenCount). It also verifies Phrase.StartIndex <= Phrase.EndIndex and
-// Sentence.StartIndex <= Sentence.EndIndex.
-func validateEnrichment(e *model.Enrichment, tokenCount int) error {
+// Sentence.StartIndex <= Sentence.EndIndex, and that each Phrase.Text matches
+// the words actually spanned by its [StartIndex, EndIndex] range — the guard
+// against over-wide / drifted phrase ranges (see model.Phrase.Text).
+func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
 	if e == nil {
 		return errors.New("enrich: validation: nil enrichment")
 	}
+	tokenCount := len(tokens)
 
 	for i, dw := range e.DifficultWords {
 		if dw.TokenIndex < 0 || dw.TokenIndex >= tokenCount {
@@ -440,6 +444,26 @@ func validateEnrichment(e *model.Enrichment, tokenCount int) error {
 				Message: "empty translation",
 			}
 		}
+		if strings.TrimSpace(ph.Text) == "" {
+			return &ValidationError{
+				Field:   "phrases",
+				Index:   i,
+				TokenN:  tokenCount,
+				Message: "empty text",
+			}
+		}
+		// Indices are already known valid here. The echoed text must spell the
+		// same word sequence as the claimed range; a mismatch means the model
+		// drifted the range (e.g. a one-word term tagged onto a whole clause).
+		want := normalizePhraseText(joinTokenText(tokens, ph.StartIndex, ph.EndIndex))
+		if got := normalizePhraseText(ph.Text); got != want {
+			return &ValidationError{
+				Field:   "phrases",
+				Index:   i,
+				TokenN:  tokenCount,
+				Message: fmt.Sprintf("text %q does not match tokens [%d,%d] (%q)", ph.Text, ph.StartIndex, ph.EndIndex, want),
+			}
+		}
 	}
 
 	for i, s := range e.Sentences {
@@ -483,6 +507,40 @@ func validateEnrichment(e *model.Enrichment, tokenCount int) error {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// joinTokenText concatenates the text of tokens [start, end] (inclusive) with a
+// single space between each. The range is assumed valid (callers validate
+// indices first).
+func joinTokenText(tokens []model.Token, start, end int) string {
+	parts := make([]string, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		parts = append(parts, tokens[i].Text)
+	}
+	return strings.Join(parts, " ")
+}
+
+// normalizePhraseText reduces a string to its lowercased word sequence: each run
+// of non-alphanumeric runes (whitespace, punctuation) collapses to a single
+// separating space, and leading/trailing separators are dropped. This makes the
+// phrase-text comparison robust to punctuation and spacing differences between
+// the model's echoed text and the tokenized source, so only the actual word
+// sequence has to agree.
+func normalizePhraseText(s string) string {
+	var b strings.Builder
+	pendingSpace := false
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteRune(r)
+			pendingSpace = false
+			continue
+		}
+		pendingSpace = true
+	}
+	return b.String()
+}
 
 // backoffDuration returns the capped exponential backoff for the given attempt
 // (1-based: attempt=1 is the first retry).

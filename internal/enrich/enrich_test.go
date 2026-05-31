@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -358,16 +359,33 @@ func testCfg(maxConcurrent, maxRetries int) *config.Config {
 	}
 }
 
-func makeArticle(id string, tokenCount int) *model.Article {
-	tokens := make([]model.Token, tokenCount)
+// wordTokens builds n identical "word" tokens with consistent byte offsets.
+func wordTokens(n int) []model.Token {
+	tokens := make([]model.Token, n)
 	for i := range tokens {
 		tokens[i] = model.Token{Index: i, Text: "word", Start: i * 5, End: i*5 + 4}
 	}
+	return tokens
+}
+
+// tokensFromWords builds word tokens from the given words with sequential byte
+// offsets (one separating space between consecutive tokens).
+func tokensFromWords(words ...string) []model.Token {
+	tokens := make([]model.Token, len(words))
+	off := 0
+	for i, w := range words {
+		tokens[i] = model.Token{Index: i, Text: w, Start: off, End: off + len(w)}
+		off += len(w) + 1
+	}
+	return tokens
+}
+
+func makeArticle(id string, tokenCount int) *model.Article {
 	return &model.Article{
 		ID:     id,
 		Title:  "Test Article",
 		Status: model.StatusFetched,
-		Tokens: tokens,
+		Tokens: wordTokens(tokenCount),
 	}
 }
 
@@ -381,7 +399,33 @@ func goodEnrichment(tokenCount int) *model.Enrichment {
 			{TokenIndex: 0, Lemma: "word", Translation: "слово", CEFRLevel: model.CEFRB2},
 		},
 		Phrases: []model.Phrase{
-			{StartIndex: 0, EndIndex: tokenCount - 1, Type: model.PhraseTypeIdiom, Translation: "фраза"},
+			{
+				StartIndex:  0,
+				EndIndex:    tokenCount - 1,
+				Type:        model.PhraseTypeIdiom,
+				Text:        strings.TrimSpace(strings.Repeat("word ", tokenCount)),
+				Translation: "фраза",
+			},
+		},
+		Sentences: []model.Sentence{
+			{StartIndex: 0, EndIndex: tokenCount - 1, Translation: "предложение"},
+		},
+		Glossary: []model.GlossaryItem{
+			{Term: "term", Definition: "definition"},
+		},
+	}
+}
+
+// goodEnrichmentNoPhrase returns a valid enrichment without phrases — used by
+// fetch-stage tests whose tokens come from the real tokenizer (so a canned
+// phrase text would not match the fetched words and fail validation).
+func goodEnrichmentNoPhrase(tokenCount int) *model.Enrichment {
+	if tokenCount < 2 {
+		tokenCount = 2
+	}
+	return &model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 0, Lemma: "word", Translation: "слово", CEFRLevel: model.CEFRB2},
 		},
 		Sentences: []model.Sentence{
 			{StartIndex: 0, EndIndex: tokenCount - 1, Translation: "предложение"},
@@ -612,6 +656,35 @@ func TestSentenceBoundsValidation(t *testing.T) {
 	}
 }
 
+// TestPhraseTextMismatchRejected verifies that a phrase whose echoed Text does
+// not match the words actually spanned by [StartIndex, EndIndex] is rejected,
+// so an over-wide / drifted token range is retried rather than saved. This is
+// the regression guard for the "Term tooltip shows a whole clause" bug.
+func TestPhraseTextMismatchRejected(t *testing.T) {
+	article := makeArticle("article-phrasetext", 4) // tokens are all "word"
+	st := newFakeStore(article)
+
+	// Valid indices, non-empty translation — but Text claims a single term the
+	// 4-token range does not spell.
+	bad := &model.Enrichment{
+		Phrases: []model.Phrase{
+			{StartIndex: 0, EndIndex: 3, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},
+		},
+	}
+	llm := &fakeLLM{result: bad}
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
+
+	ok := runPool(t, pool, 10*time.Second, func() bool {
+		return st.status("article-phrasetext") == model.StatusEnrichFailed
+	})
+	if !ok {
+		t.Fatalf("expected status=failed for phrase text/range mismatch, got %q", st.status("article-phrasetext"))
+	}
+	if _, saved := st.savedEnrichment("article-phrasetext"); saved {
+		t.Error("expected enrichment NOT to be saved when phrase text mismatches its range")
+	}
+}
+
 // TestArticleDeletedDuringEnrichment verifies the TOCTOU race where an article
 // is deleted after the worker fetched it but before the enrichment is saved.
 // SaveEnrichment then reports ErrNotFound; the worker must treat this as a
@@ -752,7 +825,7 @@ func TestValidateEnrichmentOOBDifficultWord(t *testing.T) {
 			{TokenIndex: 10, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
 		},
 	}
-	if err := validateEnrichmentExported(e, 5); err == nil {
+	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
 		t.Error("expected validation error for OOB token_index")
 	}
 }
@@ -764,7 +837,7 @@ func TestValidateEnrichmentNegativeIndex(t *testing.T) {
 			{TokenIndex: -1, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
 		},
 	}
-	if err := validateEnrichmentExported(e, 5); err == nil {
+	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
 		t.Error("expected validation error for negative token_index")
 	}
 }
@@ -772,7 +845,7 @@ func TestValidateEnrichmentNegativeIndex(t *testing.T) {
 // TestValidateEnrichmentValidPasses ensures a fully valid enrichment is accepted.
 func TestValidateEnrichmentValidPasses(t *testing.T) {
 	e := goodEnrichment(5)
-	if err := validateEnrichmentExported(e, 5); err != nil {
+	if err := validateEnrichmentExported(e, wordTokens(5)); err != nil {
 		t.Errorf("expected no validation error, got: %v", err)
 	}
 }
@@ -786,7 +859,7 @@ func TestValidateEnrichmentEmptyWordTranslation(t *testing.T) {
 			{TokenIndex: 0, Lemma: "x", Translation: "", CEFRLevel: model.CEFRA2},
 		},
 	}
-	if err := validateEnrichmentExported(e, 5); err == nil {
+	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
 		t.Error("expected validation error for empty difficult_word translation")
 	}
 }
@@ -799,15 +872,58 @@ func TestValidateEnrichmentEmptySentenceTranslation(t *testing.T) {
 			{StartIndex: 0, EndIndex: 1, Translation: "   "},
 		},
 	}
-	if err := validateEnrichmentExported(e, 5); err == nil {
+	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
 		t.Error("expected validation error for blank sentence translation")
 	}
 }
 
 // TestValidateEnrichmentNil ensures nil enrichment is rejected.
 func TestValidateEnrichmentNil(t *testing.T) {
-	if err := validateEnrichmentExported(nil, 5); err == nil {
+	if err := validateEnrichmentExported(nil, wordTokens(5)); err == nil {
 		t.Error("expected error for nil enrichment")
+	}
+}
+
+// TestValidateEnrichmentPhraseTextMismatch ensures a phrase whose echoed text
+// does not match its token range is rejected.
+func TestValidateEnrichmentPhraseTextMismatch(t *testing.T) {
+	tokens := tokensFromWords("semaphore", "is", "a", "variable")
+	e := &model.Enrichment{
+		Phrases: []model.Phrase{
+			// Range spans all four tokens, but Text claims only "semaphore".
+			{StartIndex: 0, EndIndex: 3, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},
+		},
+	}
+	if err := validateEnrichmentExported(e, tokens); err == nil {
+		t.Error("expected validation error when phrase text does not match its token range")
+	}
+}
+
+// TestValidateEnrichmentEmptyPhraseText ensures a blank phrase text is rejected.
+func TestValidateEnrichmentEmptyPhraseText(t *testing.T) {
+	tokens := tokensFromWords("counting", "semaphores")
+	e := &model.Enrichment{
+		Phrases: []model.Phrase{
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "  ", Translation: "семафор"},
+		},
+	}
+	if err := validateEnrichmentExported(e, tokens); err == nil {
+		t.Error("expected validation error for empty phrase text")
+	}
+}
+
+// TestValidateEnrichmentPhraseTextMatchPasses ensures matching is tolerant of
+// case, whitespace, and surrounding punctuation: only the lowercased word
+// sequence must agree with the token range.
+func TestValidateEnrichmentPhraseTextMatchPasses(t *testing.T) {
+	tokens := tokensFromWords("counting", "semaphores")
+	e := &model.Enrichment{
+		Phrases: []model.Phrase{
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "Counting  semaphores!", Translation: "счётный семафор"},
+		},
+	}
+	if err := validateEnrichmentExported(e, tokens); err != nil {
+		t.Errorf("expected normalised phrase text to match token range, got: %v", err)
 	}
 }
 
@@ -877,7 +993,7 @@ func queuedArticle(id, sourceURL string) *model.Article {
 func TestFetchThenEnrich(t *testing.T) {
 	st := newFakeStore(queuedArticle("article-fetch", "https://example.com/a"))
 	ex := &fakeExtractor{}
-	llm := &fakeLLM{result: goodEnrichment(2)}
+	llm := &fakeLLM{result: goodEnrichmentNoPhrase(2)}
 	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
@@ -960,7 +1076,10 @@ func TestRecoversInflightStatuses(t *testing.T) {
 	enriching.Status = model.StatusEnriching
 	st := newFakeStore(fetching, enriching)
 	ex := &fakeExtractor{}
-	llm := &fakeLLM{result: goodEnrichment(2)}
+	// No phrase: the two articles have different token texts (fetched "Hello
+	// world" vs. canned "word word"), so a single phrase text could not match
+	// both. Phrase text validation is covered by TestPhraseTextMismatchRejected.
+	llm := &fakeLLM{result: goodEnrichmentNoPhrase(2)}
 	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {

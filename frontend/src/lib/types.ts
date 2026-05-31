@@ -76,6 +76,12 @@ export interface Phrase {
 	start_index: number;
 	end_index: number;
 	type: PhraseType;
+	/**
+	 * The literal phrase text spanned by [start_index, end_index], echoed by the
+	 * backend. The enrichment pipeline validates it against the token range, so
+	 * the range is guaranteed to match these words (no over-wide term tooltips).
+	 */
+	text: string;
 	/** Contextual translation or definition (backend wire field: `translation`). */
 	translation: string;
 }

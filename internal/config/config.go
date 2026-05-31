@@ -74,7 +74,7 @@ type Config struct {
 	MarkdownCostPerArticle int
 
 	// EnrichmentVersion is the current enrichment schema/prompt version. Bumping
-	// it signals re-enrichment. Env: ENRICHMENT_VERSION (1).
+	// it signals re-enrichment. Env: ENRICHMENT_VERSION (2).
 	EnrichmentVersion int
 
 	// LogLevel is one of debug|info|warn|error. Env: LOG_LEVEL (info).
@@ -159,7 +159,7 @@ func Load() (*Config, error) {
 	}
 	cfg.MarkdownCostPerArticle = mdCost
 
-	enrichVersion, err := envInt("ENRICHMENT_VERSION", 1)
+	enrichVersion, err := envInt("ENRICHMENT_VERSION", 2)
 	if err != nil {
 		return nil, err
 	}
