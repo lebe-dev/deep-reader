@@ -1,0 +1,29 @@
+# Deep Reader — single-container compose stack.
+#
+# TLS / HTTPS is intentionally out of scope here. A reverse proxy on the host
+# (Caddy, nginx, Traefik) must terminate TLS and forward to 127.0.0.1:8080.
+# TLS is required for Service Workers and PWA install to work on all browsers.
+#
+# Quick start:
+#   cp .env.example .env   # then fill in AUTH_TOKEN and LLM_API_KEY
+#   docker compose up -d
+
+services:
+  deep-reader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      # Bind only on loopback — TLS reverse proxy on the host handles the
+      # public-facing port and forwards here.
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

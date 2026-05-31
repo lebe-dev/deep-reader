@@ -1,0 +1,163 @@
+// HTTP client for the Deep Reader backend (deep-reader-architecture.md §9).
+//
+// - Base URL: same origin when the PWA is served by the backend; otherwise the
+//   `serverUrl` configured in the sync-state singleton.
+// - Auth: shared bearer token from sync-state, sent as `Authorization: Bearer`.
+// - When the network is absent, requests throw a typed `OfflineError` so callers
+//   can fall back to IndexedDB / the outbox (spec §10).
+
+import { browser } from '$app/environment';
+import { getSyncState } from './db';
+import type {
+	AddArticleResponse,
+	ArticlePayload,
+	ConfigResponse,
+	Progress,
+	ProgressUpdate,
+	Settings,
+	SettingsPatch
+} from './types';
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/** Thrown when a request cannot reach the network (offline / fetch failed). */
+export class OfflineError extends Error {
+	constructor(message = 'Network unavailable') {
+		super(message);
+		this.name = 'OfflineError';
+	}
+}
+
+/** Thrown for non-2xx HTTP responses. */
+export class ApiError extends Error {
+	readonly status: number;
+	readonly body: string;
+	constructor(status: number, body: string) {
+		super(`API error ${status}`);
+		this.name = 'ApiError';
+		this.status = status;
+		this.body = body;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Request plumbing
+// ---------------------------------------------------------------------------
+
+/** Resolve the API base URL. Same origin in the browser, else configured serverUrl. */
+async function resolveBaseUrl(): Promise<string> {
+	if (browser) {
+		const state = await getSyncState();
+		// When served by the backend the PWA lives on the same origin, so a
+		// relative path is correct. A configured serverUrl overrides (e.g. dev).
+		return state.serverUrl?.replace(/\/$/, '') ?? '';
+	}
+	return '';
+}
+
+interface RequestOptions {
+	method?: string;
+	body?: unknown;
+	/** Extra query params (omitted when undefined). */
+	query?: Record<string, string | undefined>;
+	signal?: AbortSignal;
+}
+
+async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+	const base = await resolveBaseUrl();
+	const state = await getSyncState();
+
+	const url = new URL(`${base}${path}`, browser ? window.location.origin : 'http://localhost');
+	if (opts.query) {
+		for (const [key, value] of Object.entries(opts.query)) {
+			if (value !== undefined) url.searchParams.set(key, value);
+		}
+	}
+
+	const headers: Record<string, string> = { Accept: 'application/json' };
+	if (state.authToken) headers.Authorization = `Bearer ${state.authToken}`;
+	if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+
+	// A relative base must keep the request relative so it stays same-origin.
+	const target = base === '' ? `${path}${url.search}` : url.toString();
+
+	let res: Response;
+	try {
+		res = await fetch(target, {
+			method: opts.method ?? 'GET',
+			headers,
+			body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+			signal: opts.signal
+		});
+	} catch {
+		// fetch rejects on network failure / offline.
+		throw new OfflineError();
+	}
+
+	if (!res.ok) {
+		const text = await res.text().catch(() => '');
+		throw new ApiError(res.status, text);
+	}
+
+	if (res.status === 204) return undefined as T;
+	const text = await res.text();
+	if (!text) return undefined as T;
+	return JSON.parse(text) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Read endpoints
+// ---------------------------------------------------------------------------
+
+/** `GET /api/config` — bootstrap / delta sync. Pass `since` for a delta cursor. */
+export function getConfig(since?: string, signal?: AbortSignal): Promise<ConfigResponse> {
+	return request<ConfigResponse>('/api/config', { query: { since }, signal });
+}
+
+/** `GET /api/articles/:id` — full immutable article payload. */
+export function getArticle(id: string, signal?: AbortSignal): Promise<ArticlePayload> {
+	return request<ArticlePayload>(`/api/articles/${encodeURIComponent(id)}`, { signal });
+}
+
+// ---------------------------------------------------------------------------
+// Write endpoints
+// ---------------------------------------------------------------------------
+
+/** `POST /api/articles` — add an article by URL (dedup is transparent). */
+export function addArticle(url: string, signal?: AbortSignal): Promise<AddArticleResponse> {
+	return request<AddArticleResponse>('/api/articles', { method: 'POST', body: { url }, signal });
+}
+
+/** `DELETE /api/articles/:id` — remove an article from the library. */
+export function deleteArticle(id: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/articles/${encodeURIComponent(id)}`, { method: 'DELETE', signal });
+}
+
+/** `POST /api/articles/:id/reenrich` — force re-enrichment (resets to pending). */
+export function reenrichArticle(id: string, signal?: AbortSignal): Promise<AddArticleResponse> {
+	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/reenrich`, {
+		method: 'POST',
+		signal
+	});
+}
+
+/** `PUT /api/articles/:id/progress` — update reading position / read flag (LWW). */
+export function putProgress(p: Progress, signal?: AbortSignal): Promise<void> {
+	const body: ProgressUpdate = {
+		position: p.position,
+		is_read: p.is_read,
+		updated_at: p.updated_at
+	};
+	return request<void>(`/api/articles/${encodeURIComponent(p.article_id)}/progress`, {
+		method: 'PUT',
+		body,
+		signal
+	});
+}
+
+/** `PATCH /api/settings` — update user settings (partial). */
+export function patchSettings(partial: SettingsPatch, signal?: AbortSignal): Promise<Settings> {
+	return request<Settings>('/api/settings', { method: 'PATCH', body: partial, signal });
+}

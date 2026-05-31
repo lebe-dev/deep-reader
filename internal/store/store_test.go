@@ -1,0 +1,681 @@
+package store_test
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"deep-reader/internal/config"
+	"deep-reader/internal/model"
+	"deep-reader/internal/ports"
+	"deep-reader/internal/store"
+)
+
+// openStore creates a fresh SQLite store in a temp directory.
+func openStore(t *testing.T) *store.SQLite {
+	t.Helper()
+	cfg := &config.Config{
+		DatabasePath: filepath.Join(t.TempDir(), "test.db"),
+	}
+	s, err := store.NewSQLite(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSQLite: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// makeArticle builds a minimal valid Article with the given url.
+func makeArticle(url string) *model.Article {
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(url)))
+	return &model.Article{
+		ID:                store.NewID(),
+		SourceURL:         url,
+		URLHash:           hash,
+		Title:             "Test Article",
+		Author:            "Author",
+		SourceDomain:      "example.com",
+		Lang:              "en",
+		OriginalText:      "Hello world",
+		Tokens:            []model.Token{{Index: 0, Text: "Hello", Start: 0, End: 5}},
+		Status:            model.StatusPending,
+		EnrichmentVersion: 1,
+		CreatedAt:         time.Now().UTC().Truncate(time.Second),
+		UpdatedAt:         time.Now().UTC().Truncate(time.Second),
+	}
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+func TestGetSettings_Defaults(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	got, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got.CEFRLevel != model.CEFRA2 {
+		t.Errorf("CEFRLevel: got %q, want %q", got.CEFRLevel, model.CEFRA2)
+	}
+	if got.TargetLanguage != model.DefaultTargetLanguage {
+		t.Errorf("TargetLanguage: got %q, want %q", got.TargetLanguage, model.DefaultTargetLanguage)
+	}
+	if got.MinDifficultyToHighlight != model.CEFRB1 {
+		t.Errorf("MinDifficultyToHighlight: got %q, want %q", got.MinDifficultyToHighlight, model.CEFRB1)
+	}
+}
+
+func TestUpdateSettings(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	newLevel := model.CEFRB2
+	got, err := s.UpdateSettings(ctx, model.SettingsPatch{CEFRLevel: &newLevel})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.CEFRLevel != newLevel {
+		t.Errorf("CEFRLevel after update: got %q, want %q", got.CEFRLevel, newLevel)
+	}
+	// Other fields should remain unchanged.
+	if got.TargetLanguage != model.DefaultTargetLanguage {
+		t.Errorf("TargetLanguage should be unchanged: got %q", got.TargetLanguage)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.CEFRLevel != newLevel {
+		t.Errorf("CEFRLevel after reload: got %q, want %q", got2.CEFRLevel, newLevel)
+	}
+}
+
+// ── Articles ──────────────────────────────────────────────────────────────────
+
+func TestCreateArticle_And_GetByHash(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/article1")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	got, err := s.GetArticleByHash(ctx, a.URLHash)
+	if err != nil {
+		t.Fatalf("GetArticleByHash: %v", err)
+	}
+	if got.ID != a.ID {
+		t.Errorf("ID mismatch: got %q, want %q", got.ID, a.ID)
+	}
+	if got.Title != a.Title {
+		t.Errorf("Title mismatch: got %q, want %q", got.Title, a.Title)
+	}
+	if len(got.Tokens) != 1 {
+		t.Errorf("Tokens: got %d, want 1", len(got.Tokens))
+	}
+}
+
+func TestCreateArticle_Dedup(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/dup")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle first: %v", err)
+	}
+
+	// Second insert with same url_hash must return ErrDuplicate.
+	a2 := makeArticle("https://example.com/dup")
+	a2.ID = store.NewID() // different ID
+	err := s.CreateArticle(ctx, a2)
+	if err == nil {
+		t.Fatal("expected ErrDuplicate, got nil")
+	}
+	if !isErr(err, ports.ErrDuplicate) {
+		t.Errorf("expected ErrDuplicate, got %v", err)
+	}
+}
+
+func TestGetArticleByHash_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	_, err := s.GetArticleByHash(ctx, "nonexistent-hash")
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestGetArticle_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	_, err := s.GetArticle(ctx, "nonexistent-id")
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestListArticleMeta_AllAndSince(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Truncate(time.Second)
+
+	a1 := makeArticle("https://example.com/a1")
+	a1.UpdatedAt = base.Add(-2 * time.Second)
+	a2 := makeArticle("https://example.com/a2")
+	a2.UpdatedAt = base.Add(2 * time.Second)
+
+	for _, a := range []*model.Article{a1, a2} {
+		if err := s.CreateArticle(ctx, a); err != nil {
+			t.Fatalf("CreateArticle %s: %v", a.ID, err)
+		}
+	}
+
+	// Full list.
+	all, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 articles, got %d", len(all))
+	}
+
+	// Since cursor — should only return a2 (updated_at > base).
+	since, err := s.ListArticleMeta(ctx, base)
+	if err != nil {
+		t.Fatalf("ListArticleMeta since: %v", err)
+	}
+	if len(since) != 1 {
+		t.Errorf("expected 1 article since cursor, got %d", len(since))
+	}
+	if since[0].ID != a2.ID {
+		t.Errorf("expected a2, got %q", since[0].ID)
+	}
+}
+
+// ── Enrichment roundtrip ──────────────────────────────────────────────────────
+
+func TestEnrichmentRoundtrip(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/enrich")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	enrichment := model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 0, Lemma: "hello", Translation: "привет", CEFRLevel: model.CEFRA2},
+		},
+		Phrases: []model.Phrase{
+			{StartIndex: 0, EndIndex: 0, Type: model.PhraseTypeIdiom, Translation: "test"},
+		},
+		Sentences: []model.Sentence{
+			{StartIndex: 0, EndIndex: 0, Translation: "Привет мир"},
+		},
+		Glossary: []model.GlossaryItem{
+			{Term: "Hello", Definition: "A greeting"},
+		},
+	}
+	enrichedAt := time.Now().UTC().Truncate(time.Second)
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, enrichedAt); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	// Verify via GetArticlePayload.
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.Status != model.StatusEnriched {
+		t.Errorf("status: got %q, want %q", payload.Status, model.StatusEnriched)
+	}
+	if payload.Enrichment == nil {
+		t.Fatal("enrichment is nil")
+	}
+	if len(payload.Enrichment.DifficultWords) != 1 {
+		t.Errorf("difficult_words: got %d, want 1", len(payload.Enrichment.DifficultWords))
+	}
+	if payload.Enrichment.DifficultWords[0].Translation != "привет" {
+		t.Errorf("translation: got %q, want %q", payload.Enrichment.DifficultWords[0].Translation, "привет")
+	}
+	if len(payload.Enrichment.Phrases) != 1 {
+		t.Errorf("phrases: got %d, want 1", len(payload.Enrichment.Phrases))
+	}
+	if len(payload.Enrichment.Sentences) != 1 {
+		t.Errorf("sentences: got %d, want 1", len(payload.Enrichment.Sentences))
+	}
+	if len(payload.Enrichment.Glossary) != 1 {
+		t.Errorf("glossary: got %d, want 1", len(payload.Enrichment.Glossary))
+	}
+
+	// Verify enriched_at via GetArticle.
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after enrichment: %v", err)
+	}
+	if !got.EnrichedAt.Equal(enrichedAt) {
+		t.Errorf("enriched_at: got %v, want %v", got.EnrichedAt, enrichedAt)
+	}
+}
+
+// ── LWW Progress ─────────────────────────────────────────────────────────────
+
+func TestUpsertProgress_LWW(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/progress")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Initial insert.
+	p1 := model.Progress{ArticleID: a.ID, Position: 100, IsRead: false, UpdatedAt: base}
+	applied, err := s.UpsertProgress(ctx, p1)
+	if err != nil {
+		t.Fatalf("UpsertProgress initial: %v", err)
+	}
+	if !applied {
+		t.Error("initial insert should be applied")
+	}
+
+	// Newer record — should win.
+	p2 := model.Progress{ArticleID: a.ID, Position: 200, IsRead: true, UpdatedAt: base.Add(time.Second)}
+	applied, err = s.UpsertProgress(ctx, p2)
+	if err != nil {
+		t.Fatalf("UpsertProgress newer: %v", err)
+	}
+	if !applied {
+		t.Error("newer record should be applied")
+	}
+
+	// Older record — must be rejected.
+	p3 := model.Progress{ArticleID: a.ID, Position: 50, IsRead: false, UpdatedAt: base.Add(-time.Second)}
+	applied, err = s.UpsertProgress(ctx, p3)
+	if err != nil {
+		t.Fatalf("UpsertProgress older: %v", err)
+	}
+	if applied {
+		t.Error("older record should NOT be applied")
+	}
+
+	// Equal timestamp — must be rejected (not strictly after).
+	p4 := model.Progress{ArticleID: a.ID, Position: 300, IsRead: false, UpdatedAt: base.Add(time.Second)}
+	applied, err = s.UpsertProgress(ctx, p4)
+	if err != nil {
+		t.Fatalf("UpsertProgress equal: %v", err)
+	}
+	if applied {
+		t.Error("equal-timestamp record should NOT be applied")
+	}
+
+	// Confirm that the stored value is p2.
+	progs, err := s.ListProgress(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListProgress: %v", err)
+	}
+	if len(progs) != 1 {
+		t.Fatalf("expected 1 progress, got %d", len(progs))
+	}
+	if progs[0].Position != 200 {
+		t.Errorf("position: got %d, want 200", progs[0].Position)
+	}
+	if !progs[0].IsRead {
+		t.Error("is_read should be true")
+	}
+}
+
+// ── Since cursor for ListProgress ─────────────────────────────────────────────
+
+func TestListProgress_Since(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Truncate(time.Second)
+
+	a1 := makeArticle("https://example.com/p1")
+	a1.UpdatedAt = base
+	a2 := makeArticle("https://example.com/p2")
+	a2.UpdatedAt = base
+	for _, a := range []*model.Article{a1, a2} {
+		if err := s.CreateArticle(ctx, a); err != nil {
+			t.Fatalf("CreateArticle: %v", err)
+		}
+	}
+
+	old := model.Progress{ArticleID: a1.ID, Position: 10, UpdatedAt: base.Add(-time.Second)}
+	new := model.Progress{ArticleID: a2.ID, Position: 20, UpdatedAt: base.Add(time.Second)}
+	for _, p := range []model.Progress{old, new} {
+		if _, err := s.UpsertProgress(ctx, p); err != nil {
+			t.Fatalf("UpsertProgress: %v", err)
+		}
+	}
+
+	// Since base: only the newer record (base+1s > base).
+	result, err := s.ListProgress(ctx, base)
+	if err != nil {
+		t.Fatalf("ListProgress since: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 progress since cursor, got %d", len(result))
+	}
+	if len(result) == 1 && result[0].ArticleID != a2.ID {
+		t.Errorf("expected a2 progress, got %q", result[0].ArticleID)
+	}
+}
+
+// ── Delete cascade ────────────────────────────────────────────────────────────
+
+func TestDeleteArticle_Cascade(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/cascade")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	// Insert enrichment.
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	// Insert progress.
+	p := model.Progress{ArticleID: a.ID, Position: 1, UpdatedAt: time.Now().UTC().Truncate(time.Second)}
+	if _, err := s.UpsertProgress(ctx, p); err != nil {
+		t.Fatalf("UpsertProgress: %v", err)
+	}
+
+	// Delete article.
+	if err := s.DeleteArticle(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteArticle: %v", err)
+	}
+
+	// Article should be gone.
+	if _, err := s.GetArticle(ctx, a.ID); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+
+	// Progress should be gone due to FK cascade.
+	progs, err := s.ListProgress(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListProgress after delete: %v", err)
+	}
+	if len(progs) != 0 {
+		t.Errorf("expected 0 progress after delete, got %d", len(progs))
+	}
+
+	// Payload should be gone.
+	if _, err := s.GetArticlePayload(ctx, a.ID); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for payload after delete, got %v", err)
+	}
+}
+
+func TestDeleteArticle_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	err := s.DeleteArticle(ctx, "no-such-id")
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestSaveEnrichment_ArticleMissing verifies that saving an enrichment for an
+// article that does not exist surfaces ErrNotFound (the FOREIGN KEY violation
+// is mapped), rather than a raw constraint error. This is the TOCTOU race where
+// an article is deleted while its enrichment is in flight.
+func TestSaveEnrichment_ArticleMissing(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Never-existed article.
+	err := s.SaveEnrichment(ctx, "no-such-id", model.Enrichment{}, time.Now().UTC())
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing article, got %v", err)
+	}
+
+	// Article that existed, then was deleted before the enrichment save.
+	a := makeArticle("https://example.com/deleted-mid-enrich")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.DeleteArticle(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteArticle: %v", err)
+	}
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+}
+
+// ── RequeueArticle ────────────────────────────────────────────────────────────
+
+func TestRequeueArticle(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/requeue")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	// Enrich it first.
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+	// Set it failed too.
+	if err := s.SetStatus(ctx, a.ID, model.StatusFailed, "timeout"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	// Requeue.
+	if err := s.RequeueArticle(ctx, a.ID); err != nil {
+		t.Fatalf("RequeueArticle: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after requeue: %v", err)
+	}
+	if got.Status != model.StatusPending {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusPending)
+	}
+	if got.Error != "" {
+		t.Errorf("error should be cleared, got %q", got.Error)
+	}
+	if !got.EnrichedAt.IsZero() {
+		t.Errorf("enriched_at should be zero after requeue, got %v", got.EnrichedAt)
+	}
+}
+
+func TestRequeueArticle_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	err := s.RequeueArticle(ctx, "no-such-id")
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// ── ListPending ───────────────────────────────────────────────────────────────
+
+func TestListPending(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		a := makeArticle(fmt.Sprintf("https://example.com/p%d", i))
+		if err := s.CreateArticle(ctx, a); err != nil {
+			t.Fatalf("CreateArticle %d: %v", i, err)
+		}
+	}
+
+	// Enrich one of them.
+	all, _ := s.ListArticleMeta(ctx, time.Time{})
+	if err := s.SaveEnrichment(ctx, all[0].ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	pending, err := s.ListPending(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 4 {
+		t.Errorf("expected 4 pending, got %d", len(pending))
+	}
+
+	// Limit works.
+	limited, err := s.ListPending(ctx, 2)
+	if err != nil {
+		t.Fatalf("ListPending limited: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("expected 2 with limit 2, got %d", len(limited))
+	}
+}
+
+// ── GetArticlePayload — no enrichment ─────────────────────────────────────────
+
+func TestGetArticlePayload_NoEnrichment(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/noenrich")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.Enrichment != nil {
+		t.Error("enrichment should be nil for pending article")
+	}
+	if payload.Status != model.StatusPending {
+		t.Errorf("status: got %q, want %q", payload.Status, model.StatusPending)
+	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// isErr reports whether err matches target via errors.Is.
+func isErr(err, target error) bool {
+	if err == nil {
+		return false
+	}
+	// Direct check.
+	if err == target {
+		return true
+	}
+	// errors.Is unwrapping.
+	type unwrapper interface{ Unwrap() error }
+	type multiUnwrapper interface{ Unwrap() []error }
+	if u, ok := err.(multiUnwrapper); ok {
+		for _, e := range u.Unwrap() {
+			if isErr(e, target) {
+				return true
+			}
+		}
+	}
+	if u, ok := err.(unwrapper); ok {
+		return isErr(u.Unwrap(), target)
+	}
+	return err.Error() == target.Error()
+}
+
+// --- Markdown budget --------------------------------------------------------
+
+func TestMarkdownBudget(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Fresh day starts at zero.
+	used, err := s.MarkdownUnitsUsedToday(ctx)
+	if err != nil {
+		t.Fatalf("MarkdownUnitsUsedToday: %v", err)
+	}
+	if used != 0 {
+		t.Fatalf("initial used = %d, want 0", used)
+	}
+
+	// Consume within budget.
+	allowed, after, err := s.TryConsumeMarkdownUnits(ctx, 50, 120)
+	if err != nil {
+		t.Fatalf("TryConsumeMarkdownUnits: %v", err)
+	}
+	if !allowed || after != 50 {
+		t.Fatalf("first consume: allowed=%v after=%d, want true/50", allowed, after)
+	}
+
+	allowed, after, err = s.TryConsumeMarkdownUnits(ctx, 50, 120)
+	if err != nil {
+		t.Fatalf("TryConsumeMarkdownUnits: %v", err)
+	}
+	if !allowed || after != 100 {
+		t.Fatalf("second consume: allowed=%v after=%d, want true/100", allowed, after)
+	}
+
+	// Third would exceed 120 — rejected, counter unchanged.
+	allowed, after, err = s.TryConsumeMarkdownUnits(ctx, 50, 120)
+	if err != nil {
+		t.Fatalf("TryConsumeMarkdownUnits: %v", err)
+	}
+	if allowed {
+		t.Fatalf("third consume should be rejected, got allowed with after=%d", after)
+	}
+	if after != 100 {
+		t.Fatalf("rejected consume reported after=%d, want 100", after)
+	}
+
+	// Refund returns units.
+	if err := s.RefundMarkdownUnits(ctx, 50); err != nil {
+		t.Fatalf("RefundMarkdownUnits: %v", err)
+	}
+	used, err = s.MarkdownUnitsUsedToday(ctx)
+	if err != nil {
+		t.Fatalf("MarkdownUnitsUsedToday: %v", err)
+	}
+	if used != 50 {
+		t.Fatalf("used after refund = %d, want 50", used)
+	}
+
+	// Refund never goes below zero.
+	if err := s.RefundMarkdownUnits(ctx, 1000); err != nil {
+		t.Fatalf("RefundMarkdownUnits clamp: %v", err)
+	}
+	used, _ = s.MarkdownUnitsUsedToday(ctx)
+	if used != 0 {
+		t.Fatalf("used after over-refund = %d, want 0", used)
+	}
+}
+
+func TestMarkdownBudgetUnlimited(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// dailyLimit <= 0 means unlimited.
+	for i := 0; i < 5; i++ {
+		allowed, _, err := s.TryConsumeMarkdownUnits(ctx, 1000, 0)
+		if err != nil {
+			t.Fatalf("TryConsumeMarkdownUnits: %v", err)
+		}
+		if !allowed {
+			t.Fatalf("unlimited consume %d rejected", i)
+		}
+	}
+}

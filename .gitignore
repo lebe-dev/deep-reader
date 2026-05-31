@@ -1,0 +1,32 @@
+# Markdown files (keep docs and root README)
+*.md
+!docs/**/*.md
+!README.md
+!DEV.md
+
+# Compiled backend binary
+/bin/
+
+# Local data and SQLite files
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime secrets
+.env
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+
+# Embedded frontend dist — everything EXCEPT the placeholder that keeps
+# `go build` working before any frontend has been built.
+web/dist/*
+!web/dist/.gitkeep
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo

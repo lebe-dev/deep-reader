@@ -1,0 +1,28 @@
+# Version control
+.git
+.gitignore
+
+# Frontend build artifacts (rebuilt inside the image)
+frontend/node_modules
+frontend/build
+frontend/.svelte-kit
+
+# Embedded dist (rebuilt+copied inside the image from the frontend stage)
+web/dist
+
+# Local data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Compiled backend binaries
+bin/
+
+# Environment secrets
+.env
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*.swo

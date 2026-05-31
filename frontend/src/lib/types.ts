@@ -1,0 +1,209 @@
+// TypeScript mirror of the backend data model (deep-reader-architecture.md §8/§9).
+//
+// JSON field names match the backend wire format (snake_case). All names are
+// exported individually (named exports) per project conventions.
+
+// ---------------------------------------------------------------------------
+// Enums / unions
+// ---------------------------------------------------------------------------
+
+/** Enrichment / processing status of an article (spec §8 `articles.status`). */
+export type Status = 'pending' | 'enriched' | 'failed';
+
+/** CEFR proficiency levels (spec §8 `settings.cefr_level`). */
+export type CefrLevel = 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
+
+/** Kind of a marked-up multi-token phrase (spec §8 `enrichments.phrases.type`). */
+export type PhraseType = 'idiom' | 'phrasal_verb' | 'term';
+
+// ---------------------------------------------------------------------------
+// Tokens (deterministic backend tokenization, spec §5 "Tokenize")
+// ---------------------------------------------------------------------------
+
+/**
+ * A single token produced by the backend tokenizer. The tokenizer emits only
+ * *word* tokens (whitespace and punctuation are split boundaries, not tokens),
+ * so the array index equals `index`. `start`/`end` are *byte* offsets into the
+ * UTF-8 encoding of `Article.original_text` (Go semantics), such that the
+ * encoded `original_text[start:end]` equals `text`. Contractions (`don't`) and
+ * compounds (`well-known`) are a single token. The reader reconstructs the
+ * whitespace/punctuation between tokens from `original_text` using these
+ * offsets.
+ */
+export interface Token {
+	/** Position of this token within the tokens array. */
+	index: number;
+	/** Exact substring from the original text. */
+	text: string;
+	/** Start byte offset (inclusive) in the UTF-8 encoded original text. */
+	start: number;
+	/** End byte offset (exclusive) in the UTF-8 encoded original text. */
+	end: number;
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment payload pieces (spec §8 `enrichments`)
+// ---------------------------------------------------------------------------
+
+/** A word above the user's level, translated in context. */
+export interface DifficultWord {
+	token_index: number;
+	lemma: string;
+	translation: string;
+	cefr_level: CefrLevel;
+}
+
+/** An idiom / phrasal verb / domain term spanning a token range. */
+export interface Phrase {
+	start_index: number;
+	end_index: number;
+	type: PhraseType;
+	translation_or_definition: string;
+}
+
+/** A full-sentence translation spanning a token range. */
+export interface Sentence {
+	start_index: number;
+	end_index: number;
+	translation: string;
+}
+
+/** A domain term worth defining rather than translating. */
+export interface GlossaryItem {
+	term: string;
+	definition: string;
+}
+
+/** The structured LLM enrichment result for an article (spec §8). */
+export interface Enrichment {
+	difficult_words: DifficultWord[];
+	phrases: Phrase[];
+	sentences: Sentence[];
+	glossary: GlossaryItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Articles (spec §8 `articles`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Library list metadata (`GET /api/config` returns an array of these).
+ * Does not include the heavy `tokens` / `enrichment` payload.
+ */
+export interface ArticleMeta {
+	id: string;
+	source_url: string;
+	title: string;
+	author: string;
+	source_domain: string;
+	lang: string;
+	status: Status;
+	enrichment_version: number;
+	/** Present when `status === 'failed'`. */
+	error?: string;
+	created_at: string;
+	enriched_at?: string;
+	updated_at: string;
+	/** Number of tokens in the article; used to compute reading progress percentage. */
+	token_count: number;
+}
+
+/**
+ * Full immutable article payload (`GET /api/articles/:id`): tokens plus the
+ * enrichment structure. Cached aggressively client-side.
+ */
+export interface ArticlePayload {
+	id: string;
+	original_text: string;
+	tokens: Token[];
+	enrichment: Enrichment;
+	enrichment_version: number;
+	status: Status;
+}
+
+/** Convenience type: full server-side article (meta + payload + original). */
+export interface Article extends ArticleMeta {
+	original_text: string;
+	tokens: Token[];
+	enrichment?: Enrichment;
+}
+
+// ---------------------------------------------------------------------------
+// Progress (spec §8 `progress`)
+// ---------------------------------------------------------------------------
+
+/** Reading progress for an article, LWW-merged on `updated_at`. */
+export interface Progress {
+	article_id: string;
+	/** Reading position (token index or percent, per backend convention). */
+	position: number;
+	is_read: boolean;
+	updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Settings (spec §8 `settings`)
+// ---------------------------------------------------------------------------
+
+/** User-editable settings singleton. */
+export interface Settings {
+	cefr_level: CefrLevel;
+	/** Target translation language. MVP: hard `ru`, kept in schema. */
+	target_language: string;
+	llm_model: string;
+	/** Minimum word level considered "difficult" (usually cefr_level + 1). */
+	min_difficulty_to_highlight: CefrLevel;
+	updated_at: string;
+}
+
+/** Partial settings patch body for `PATCH /api/settings`. */
+export type SettingsPatch = Partial<
+	Pick<Settings, 'cefr_level' | 'target_language' | 'llm_model' | 'min_difficulty_to_highlight'>
+>;
+
+// ---------------------------------------------------------------------------
+// API response shapes (spec §9)
+// ---------------------------------------------------------------------------
+
+/**
+ * markdown.new daily request-unit budget (spec §11 "Стоимость и rate limiting").
+ * Surfaced so the UI can show remaining capacity and warn before the free-plan
+ * limit is hit. When markdown.new is disabled, `enabled` is false.
+ */
+export interface MarkdownBudget {
+	enabled: boolean;
+	/** Request-unit budget per UTC day (0 = unlimited). */
+	daily_limit: number;
+	/** Request units one article conversion costs. */
+	cost_per_article: number;
+	/** Request units consumed so far today. */
+	units_used: number;
+	/** Units left today (daily_limit - units_used, clamped at 0). */
+	units_remaining: number;
+	/** How many more conversions today's budget allows. */
+	articles_remaining: number;
+}
+
+/** `GET /api/config` bootstrap/delta-sync response. */
+export interface ConfigResponse {
+	settings: Settings;
+	articles: ArticleMeta[];
+	progress: Progress[];
+	/** markdown.new daily request-unit budget. */
+	markdown_budget: MarkdownBudget;
+	/** Server cursor to pass back as `?since=` on the next delta sync. */
+	cursor?: string;
+}
+
+/** `POST /api/articles` and `POST /api/articles/:id/reenrich` response. */
+export interface AddArticleResponse {
+	id: string;
+	status: Status;
+}
+
+/** `PUT /api/articles/:id/progress` request body. */
+export interface ProgressUpdate {
+	position: number;
+	is_read: boolean;
+	updated_at: string;
+}
