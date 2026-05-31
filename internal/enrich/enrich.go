@@ -15,6 +15,7 @@ import (
 	"html"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"deep-reader/internal/config"
@@ -396,6 +397,14 @@ func validateEnrichment(e *model.Enrichment, tokenCount int) error {
 				Message: fmt.Sprintf("token_index %d out of range", dw.TokenIndex),
 			}
 		}
+		if strings.TrimSpace(dw.Translation) == "" {
+			return &ValidationError{
+				Field:   "difficult_words",
+				Index:   i,
+				TokenN:  tokenCount,
+				Message: "empty translation",
+			}
+		}
 	}
 
 	for i, ph := range e.Phrases {
@@ -423,6 +432,14 @@ func validateEnrichment(e *model.Enrichment, tokenCount int) error {
 				Message: fmt.Sprintf("start_index %d > end_index %d", ph.StartIndex, ph.EndIndex),
 			}
 		}
+		if strings.TrimSpace(ph.Translation) == "" {
+			return &ValidationError{
+				Field:   "phrases",
+				Index:   i,
+				TokenN:  tokenCount,
+				Message: "empty translation",
+			}
+		}
 	}
 
 	for i, s := range e.Sentences {
@@ -448,6 +465,14 @@ func validateEnrichment(e *model.Enrichment, tokenCount int) error {
 				Index:   i,
 				TokenN:  tokenCount,
 				Message: fmt.Sprintf("start_index %d > end_index %d", s.StartIndex, s.EndIndex),
+			}
+		}
+		if strings.TrimSpace(s.Translation) == "" {
+			return &ValidationError{
+				Field:   "sentences",
+				Index:   i,
+				TokenN:  tokenCount,
+				Message: "empty translation",
 			}
 		}
 	}

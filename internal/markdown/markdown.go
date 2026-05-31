@@ -165,9 +165,18 @@ func (c *Client) Extract(ctx context.Context, rawURL string) (*ports.ExtractResu
 		canonical = rawURL
 	}
 
+	title := strings.TrimSpace(out.Title)
+	if isPlaceholderTitle(title) {
+		// markdown.new's degraded path returns a generic placeholder (or nothing)
+		// instead of the real title; recover it from the first Markdown heading.
+		if derived := titleFromMarkdown(out.Content); derived != "" {
+			title = derived
+		}
+	}
+
 	return &ports.ExtractResult{
 		CanonicalURL: canonical,
-		Title:        strings.TrimSpace(out.Title),
+		Title:        title,
 		Author:       "", // markdown.new does not return byline metadata
 		Domain:       hostOf(canonical),
 		Lang:         "", // markdown.new does not return a language code

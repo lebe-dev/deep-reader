@@ -3,6 +3,7 @@ package markdown
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // markdownToText converts the Markdown returned by markdown.new into plain prose
@@ -18,6 +19,7 @@ import (
 func markdownToText(md string) string {
 	md = stripFrontmatter(md)
 	md = strings.ReplaceAll(md, "\r\n", "\n")
+	md = unescapeMarkdown(md)
 
 	lines := strings.Split(md, "\n")
 	out := make([]string, 0, len(lines))
@@ -69,6 +71,74 @@ var (
 	tableDelimRe    = regexp.MustCompile(`^\|?[\s:|-]+\|[\s:|-]*$`)
 	blankRunRe      = regexp.MustCompile(`\n{3,}`)
 )
+
+// mdPunct is the set of ASCII punctuation characters CommonMark allows to be
+// backslash-escaped. A backslash before any of these denotes the literal
+// character, so the backslash is dropped.
+const mdPunct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+// unescapeMarkdown reverses CommonMark backslash escaping: `\#`→`#`, `\[`→`[`,
+// `\*`→`*`, and so on. markdown.new's degraded conversion path (observed as
+// method "Cloudflare Workers AI") escapes almost every punctuation character,
+// which otherwise defeats the structural cleanup below: an escaped `\#` heading,
+// `\*` list bullet, or `\[text\](url)` link would not match the regexes and
+// would leak into the reader verbatim. A backslash not followed by ASCII
+// punctuation (e.g. a hard line break `\` at end of line) is left intact.
+//
+// It operates on bytes: every relevant character (backslash and the punctuation
+// set) is single-byte ASCII, and multi-byte UTF-8 sequences pass through
+// untouched because their bytes are all >= 0x80.
+func unescapeMarkdown(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(mdPunct, s[i+1]) >= 0 {
+			b.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// markdownNewPlaceholderTitle is the generic title markdown.new returns from
+// its degraded conversion path when it cannot determine a real one.
+const markdownNewPlaceholderTitle = "Converted Content"
+
+// isPlaceholderTitle reports whether t is unusable as an article title: empty,
+// or the known markdown.new placeholder.
+func isPlaceholderTitle(t string) bool {
+	return t == "" || strings.EqualFold(t, markdownNewPlaceholderTitle)
+}
+
+// titleFromMarkdown derives a title from the first Markdown heading in content.
+// It is the fallback when markdown.new returns an empty or placeholder title.
+//
+// The heading line may carry inline list metadata flattened onto it — e.g.
+// LessWrong's Markdown API yields "# Title * By author * 33 points * Tag: ..."
+// on a single line — so only the text up to the first flattened bullet
+// separator (" * ") is kept. Returns "" when no heading is found.
+func titleFromMarkdown(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = unescapeMarkdown(line)
+		marker := headingRe.FindString(line)
+		if marker == "" {
+			continue
+		}
+		title := strings.TrimSpace(line[len(marker):])
+		if idx := strings.Index(title, " * "); idx >= 0 {
+			title = title[:idx]
+		}
+		if title = inlineClean(title); title != "" {
+			return title
+		}
+	}
+	return ""
+}
 
 // stripFrontmatter removes a leading YAML front-matter block (--- ... ---).
 func stripFrontmatter(md string) string {
@@ -135,14 +205,47 @@ func inlineClean(line string) string {
 	line = inlineLinkRe.ReplaceAllString(line, "$1")
 	line = referenceLinkRe.ReplaceAllString(line, "$1")
 	line = autolinkRe.ReplaceAllString(line, "")
-	// Emphasis / strikethrough / inline code markers. Single "_" is left intact
-	// so snake_case identifiers survive; markdown.new rarely emits "_italic_".
+	// Emphasis / strikethrough / inline code markers.
 	for _, marker := range []string{"**", "__", "~~", "`", "*"} {
 		line = strings.ReplaceAll(line, marker, "")
 	}
+	// Underscore emphasis (_italic_) is common once markdown.new's escaping is
+	// removed, but a bare "_" also appears inside snake_case identifiers we want
+	// to keep. Drop only boundary underscores, preserving intraword ones.
+	line = stripEmphasisUnderscores(line)
 	// Table cell pipes → spaces so adjacent cells don't fuse into one token.
 	line = strings.ReplaceAll(line, "|", " ")
 	return strings.TrimSpace(line)
+}
+
+// stripEmphasisUnderscores removes underscores that act as emphasis delimiters
+// while preserving underscores inside identifiers (snake_case). An underscore is
+// kept only when it sits between two word characters; otherwise it is dropped.
+func stripEmphasisUnderscores(line string) string {
+	if !strings.Contains(line, "_") {
+		return line
+	}
+	rs := []rune(line)
+	var b strings.Builder
+	b.Grow(len(line))
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	for i, r := range rs {
+		if r != '_' {
+			b.WriteRune(r)
+			continue
+		}
+		var prev, next rune
+		if i > 0 {
+			prev = rs[i-1]
+		}
+		if i < len(rs)-1 {
+			next = rs[i+1]
+		}
+		if isWord(prev) && isWord(next) {
+			b.WriteRune(r) // intraword underscore (snake_case): keep
+		}
+	}
+	return b.String()
 }
 
 // collapseBlankLines trims the document and collapses runs of 3+ newlines to a

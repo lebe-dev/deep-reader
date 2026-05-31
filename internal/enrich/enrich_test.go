@@ -777,6 +777,33 @@ func TestValidateEnrichmentValidPasses(t *testing.T) {
 	}
 }
 
+// TestValidateEnrichmentEmptyWordTranslation ensures a difficult word with an
+// empty translation is rejected, so a lazy/truncated LLM response is retried
+// rather than silently saved (the bug behind the all-empty-translations report).
+func TestValidateEnrichmentEmptyWordTranslation(t *testing.T) {
+	e := &model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 0, Lemma: "x", Translation: "", CEFRLevel: model.CEFRA2},
+		},
+	}
+	if err := validateEnrichmentExported(e, 5); err == nil {
+		t.Error("expected validation error for empty difficult_word translation")
+	}
+}
+
+// TestValidateEnrichmentEmptySentenceTranslation ensures a blank sentence
+// translation is rejected.
+func TestValidateEnrichmentEmptySentenceTranslation(t *testing.T) {
+	e := &model.Enrichment{
+		Sentences: []model.Sentence{
+			{StartIndex: 0, EndIndex: 1, Translation: "   "},
+		},
+	}
+	if err := validateEnrichmentExported(e, 5); err == nil {
+		t.Error("expected validation error for blank sentence translation")
+	}
+}
+
 // TestValidateEnrichmentNil ensures nil enrichment is rejected.
 func TestValidateEnrichmentNil(t *testing.T) {
 	if err := validateEnrichmentExported(nil, 5); err == nil {

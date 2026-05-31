@@ -53,9 +53,7 @@ export async function pull(): Promise<void> {
 			// Exclude articles that are pending deletion in the outbox — a concurrent
 			// pull must not re-insert an article the user just deleted optimistically.
 			const pendingDeletes = await db.outbox.where('kind').equals('delete_article').toArray();
-			const pendingDeleteIds = new Set(
-				pendingDeletes.map((e) => (e.payload as { id: string }).id)
-			);
+			const pendingDeleteIds = new Set(pendingDeletes.map((e) => (e.payload as { id: string }).id));
 
 			// Upsert server articles, skipping those pending local deletion.
 			const articlesToUpsert = response.articles.filter((a) => !pendingDeleteIds.has(a.id));
