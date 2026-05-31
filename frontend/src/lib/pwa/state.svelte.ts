@@ -20,6 +20,13 @@ export function dismissUpdate(): void {
 
 export function applyUpdate(): void {
 	if (!_waitingWorker) return;
+
+	// Register the reload BEFORE asking the worker to skip waiting, otherwise the
+	// controllerchange could fire before we are listening for it. `once` guards
+	// against a double reload if the event somehow fires twice.
+	navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), {
+		once: true
+	});
+
 	_waitingWorker.postMessage({ type: 'SKIP_WAITING' });
-	navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
 }

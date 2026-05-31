@@ -30,12 +30,20 @@ const SHELL_ASSETS = [...build, ...files];
 // ---------------------------------------------------------------------------
 
 self.addEventListener('install', (event: ExtendableEvent) => {
-	event.waitUntil(
-		caches
-			.open(SHELL_CACHE)
-			.then((cache) => cache.addAll(SHELL_ASSETS))
-			.then(() => self.skipWaiting())
-	);
+	// Note: we deliberately do NOT call skipWaiting() here. The new worker stays
+	// in the "waiting" state so the UpdateBanner can offer an explicit "Обновить".
+	// The page activates it on demand via the SKIP_WAITING message below.
+	event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)));
+});
+
+// ---------------------------------------------------------------------------
+// Message — let the page activate a waiting worker on demand.
+// ---------------------------------------------------------------------------
+
+self.addEventListener('message', (event: ExtendableMessageEvent) => {
+	if (event.data?.type === 'SKIP_WAITING') {
+		self.skipWaiting();
+	}
 });
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,9 @@
 		"vitest": "^4.1.7"
 	},
 	"dependencies": {
+		"@fontsource/libre-baskerville": "^5.2.10",
+		"@fontsource/merriweather": "^5.2.11",
+		"@fontsource/pt-serif": "^5.2.8",
 		"dexie": "^4.4.3"
 	}
 }

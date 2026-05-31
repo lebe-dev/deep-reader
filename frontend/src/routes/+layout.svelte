@@ -83,9 +83,9 @@
 					title="Toggle theme"
 				>
 					{#if mode.current === 'dark'}
-						<MoonIcon class="size-5" />
+						<MoonIcon class="size-4" />
 					{:else}
-						<SunIcon class="size-5" />
+						<SunIcon class="size-4" />
 					{/if}
 				</Button>
 			</div>

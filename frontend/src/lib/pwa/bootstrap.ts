@@ -50,6 +50,13 @@ async function registerServiceWorker(): Promise<void> {
 			type: 'module'
 		});
 
+		// A new version may already be waiting (e.g. the user reopened the app after
+		// it was downloaded last time) — `updatefound` won't fire for it, so surface
+		// it explicitly. The controller check ensures we don't prompt on first install.
+		if (registration.waiting && navigator.serviceWorker.controller) {
+			signalUpdateAvailable(registration.waiting);
+		}
+
 		registration.addEventListener('updatefound', () => {
 			const installing = registration.installing;
 			if (!installing) return;
