@@ -1,4 +1,4 @@
-<!-- Settings page — three-tab layout: Reading / Device / Storage.
+<!-- Settings page — four-tab layout: Reading / Device / Storage / Server.
      Spec §8 (settings model), §9 (PATCH /api/settings, device setup), §10 (persist).
 -->
 <script lang="ts">
@@ -6,6 +6,7 @@
 	import ReadingSettings from '$lib/components/settings/ReadingSettings.svelte';
 	import DeviceSettings from '$lib/components/settings/DeviceSettings.svelte';
 	import StorageSettings from '$lib/components/settings/StorageSettings.svelte';
+	import ServerSettings from '$lib/components/settings/ServerSettings.svelte';
 </script>
 
 <svelte:head>
@@ -25,6 +26,7 @@
 			<Tabs.Trigger value="reading" class="flex-1">Reading</Tabs.Trigger>
 			<Tabs.Trigger value="device" class="flex-1">Device</Tabs.Trigger>
 			<Tabs.Trigger value="storage" class="flex-1">Storage</Tabs.Trigger>
+			<Tabs.Trigger value="server" class="flex-1">Server</Tabs.Trigger>
 		</Tabs.List>
 
 		<Tabs.Content value="reading" class="mt-4">
@@ -37,6 +39,10 @@
 
 		<Tabs.Content value="storage" class="mt-4">
 			<StorageSettings />
+		</Tabs.Content>
+
+		<Tabs.Content value="server" class="mt-4">
+			<ServerSettings />
 		</Tabs.Content>
 	</Tabs.Root>
 </div>

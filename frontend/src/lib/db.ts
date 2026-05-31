@@ -10,6 +10,7 @@ import type {
 	ArticlePayload,
 	MarkdownBudget,
 	Progress,
+	ServerInfo,
 	Settings,
 	SettingsPatch,
 	ProgressUpdate
@@ -59,6 +60,8 @@ export interface SyncState {
 	settings?: Settings;
 	/** Locally cached markdown.new budget from the last successful pull. */
 	markdownBudget?: MarkdownBudget;
+	/** Locally cached non-secret server config from the last successful pull. */
+	serverInfo?: ServerInfo;
 }
 
 // ---------------------------------------------------------------------------

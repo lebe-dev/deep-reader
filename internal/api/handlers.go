@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/version"
@@ -49,6 +50,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 		Articles:       metas,
 		Progress:       progress,
 		MarkdownBudget: budget,
+		ServerInfo:     serverInfoFromConfig(s.cfg),
 		ServerTime:     time.Now().UTC(),
 	})
 }
@@ -249,6 +251,28 @@ func (s *Server) getStats(c fiber.Ctx) error {
 // the store so it stays a cheap liveness probe for docker-compose healthcheck.
 func (s *Server) healthz(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "version": version.Version})
+}
+
+// serverInfoFromConfig maps non-secret config fields into the wire type.
+func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
+	return model.ServerInfo{
+		HTTPPort:               cfg.HTTPPort,
+		DatabasePath:           cfg.DatabasePath,
+		LLMAPIBaseURL:          cfg.LLMAPIBaseURL,
+		LLMModel:               cfg.LLMModel,
+		LLMMaxConcurrent:       cfg.LLMMaxConcurrent,
+		LLMRequestTimeout:      cfg.LLMRequestTimeout.String(),
+		LLMMaxRetries:          cfg.LLMMaxRetries,
+		ReadabilityTimeout:     cfg.ReadabilityTimeout.String(),
+		EnrichmentVersion:      cfg.EnrichmentVersion,
+		MarkdownEnabled:        cfg.MarkdownEnabled,
+		MarkdownBaseURL:        cfg.MarkdownBaseURL,
+		MarkdownTimeout:        cfg.MarkdownTimeout.String(),
+		MarkdownDailyLimit:     cfg.MarkdownDailyLimit,
+		MarkdownCostPerArticle: cfg.MarkdownCostPerArticle,
+		LogLevel:               cfg.LogLevel,
+		LogFormat:              cfg.LogFormat,
+	}
 }
 
 // progressRequest is the PUT /api/articles/:id/progress body. ArticleID comes

@@ -24,12 +24,15 @@
 	});
 
 	// Position the panel just below (or above if close to viewport bottom).
+	// The panel is `position: fixed`, so coordinates are viewport-relative —
+	// getBoundingClientRect() already returns viewport-relative values, so we
+	// must NOT add window.scrollY (doing so pushed the panel off-screen by the
+	// scroll amount once the user scrolled down — it looked like "no tooltip").
 	let style = $derived.by(() => {
 		if (!rect) return '';
 		const vw = window.innerWidth;
 		const vh = window.innerHeight;
 		const panelW = Math.min(288, vw - 24); // w-72 = 288px, respect viewport
-		const scrollY = window.scrollY;
 
 		// Horizontal: align left edge with token, clamp to viewport.
 		let left = rect.left;
@@ -38,14 +41,27 @@
 
 		// Vertical: below token by default; above if insufficient space.
 		const spaceBelow = vh - rect.bottom;
-		const topBelow = rect.bottom + scrollY + 6;
-		const topAbove = rect.top + scrollY - 6; // we'll translate up in CSS
-
 		const isAbove = spaceBelow < 160;
 
 		return isAbove
-			? `left:${left}px;top:${topAbove}px;transform:translateY(-100%)`
-			: `left:${left}px;top:${topBelow}px`;
+			? `left:${left}px;top:${rect.top - 6}px;transform:translateY(-100%)`
+			: `left:${left}px;top:${rect.bottom + 6}px`;
+	});
+
+	// Close when clicking outside the popover. We use a window listener instead
+	// of a full-screen backdrop so that clicking a *different* token re-targets
+	// the popover in a single click (a backdrop would swallow that click and
+	// force a second tap).
+	$effect(() => {
+		if (!content || !anchorEl) return;
+		function onPointerDown(e: PointerEvent) {
+			const t = e.target as HTMLElement | null;
+			// Token clicks are handled by the renderer (re-target / sentence).
+			if (t?.closest('.token') || t?.closest('[role="tooltip"]')) return;
+			onclose();
+		}
+		window.addEventListener('pointerdown', onPointerDown, true);
+		return () => window.removeEventListener('pointerdown', onPointerDown, true);
 	});
 
 	const phraseTypeLabel: Record<string, string> = {
@@ -53,20 +69,9 @@
 		phrasal_verb: 'Phrasal verb',
 		term: 'Term'
 	};
-
-	// Close when clicking outside.
-	function handleBackdropClick(e: MouseEvent) {
-		e.stopPropagation();
-		onclose();
-	}
 </script>
 
 {#if content && anchorEl}
-	<!-- Transparent full-screen backdrop to catch outside clicks -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="fixed inset-0 z-40" onclick={handleBackdropClick} aria-hidden="true"></div>
-
 	<!-- Floating panel -->
 	<div
 		class={cn(

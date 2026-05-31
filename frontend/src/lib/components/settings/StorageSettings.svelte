@@ -14,6 +14,8 @@
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 	import SmartphoneIcon from '@lucide/svelte/icons/smartphone';
 	import CheckCircle2Icon from '@lucide/svelte/icons/circle-check';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import Loader2Icon from '@lucide/svelte/icons/loader-2';
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -23,6 +25,7 @@
 	let persistGranted = $state<boolean | null>(null);
 	let isPersistApiAvailable = $state(false);
 	let isRequesting = $state(false);
+	let isClearingCache = $state(false);
 
 	/** True when running on iOS Safari in normal browser mode (not standalone). */
 	let showIosHint = $state(false);
@@ -58,17 +61,34 @@
 	// Handlers
 	// ---------------------------------------------------------------------------
 
+	async function handleClearCache() {
+		isClearingCache = true;
+		try {
+			if ('caches' in window) {
+				const keys = await caches.keys();
+				await Promise.all(keys.map((k) => caches.delete(k)));
+			}
+			if ('serviceWorker' in navigator) {
+				const registrations = await navigator.serviceWorker.getRegistrations();
+				await Promise.all(registrations.map((r) => r.unregister()));
+			}
+			toast('Cache cleared. Reloading…');
+			setTimeout(() => window.location.reload(), 800);
+		} catch {
+			toast.error('Failed to clear cache.');
+			isClearingCache = false;
+		}
+	}
+
 	async function handleRequestPersist() {
 		isRequesting = true;
 		try {
 			const granted = await requestPersistentStorage();
 			persistGranted = granted;
 			if (granted) {
-				toast.success('Persistent storage granted');
+				toast('Persistent storage granted');
 			} else {
-				toast.info(
-					'Persistent storage not granted by the browser. Try adding the app to your Home Screen.'
-				);
+				toast('Persistent storage not granted by the browser. Try adding the app to your Home Screen.');
 			}
 		} finally {
 			isRequesting = false;
@@ -120,6 +140,32 @@
 					Home Screen to increase the chance of approval.
 				</p>
 			{/if}
+		</div>
+
+		<!-- PWA cache reset -->
+		<div class="border-t pt-4">
+			<div class="flex items-center justify-between gap-4">
+				<div class="min-w-0">
+					<p class="text-sm font-medium leading-none">Clear App Cache</p>
+					<p class="text-muted-foreground mt-1 text-xs">
+						Removes cached app files and reloads. Your library data and settings are preserved.
+					</p>
+				</div>
+				<Button
+					size="sm"
+					variant="outline"
+					onclick={handleClearCache}
+					disabled={isClearingCache}
+					class="shrink-0 gap-2"
+				>
+					{#if isClearingCache}
+						<Loader2Icon class="size-4 animate-spin" />
+					{:else}
+						<Trash2Icon class="size-4" />
+					{/if}
+					{isClearingCache ? 'Clearing…' : 'Clear Cache'}
+				</Button>
+			</div>
 		</div>
 
 		<!-- iOS Add to Home Screen hint -->

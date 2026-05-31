@@ -72,7 +72,7 @@
 		syncing = true;
 		try {
 			await sync();
-			toast.success('Library synced.');
+			toast('Library synced.');
 		} catch {
 			toast.error('Sync failed — check your connection.');
 		} finally {

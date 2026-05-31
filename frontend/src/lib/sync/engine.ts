@@ -44,15 +44,22 @@ export async function pull(): Promise<void> {
 
 	await db.transaction(
 		'rw',
-		[db.articles_meta, db.articles_payload, db.progress, db.sync_state],
+		[db.articles_meta, db.articles_payload, db.progress, db.sync_state, db.outbox],
 		async () => {
 			// --- articles_meta ---
 			const serverIds = new Set(response.articles.map((a) => a.id));
 			const localMetas = await db.articles_meta.toArray();
-			const localIds = new Set(localMetas.map((a) => a.id));
 
-			// Upsert all server articles.
-			await db.articles_meta.bulkPut(response.articles);
+			// Exclude articles that are pending deletion in the outbox — a concurrent
+			// pull must not re-insert an article the user just deleted optimistically.
+			const pendingDeletes = await db.outbox.where('kind').equals('delete_article').toArray();
+			const pendingDeleteIds = new Set(
+				pendingDeletes.map((e) => (e.payload as { id: string }).id)
+			);
+
+			// Upsert server articles, skipping those pending local deletion.
+			const articlesToUpsert = response.articles.filter((a) => !pendingDeleteIds.has(a.id));
+			await db.articles_meta.bulkPut(articlesToUpsert);
 
 			// Remove articles that are no longer on the server.
 			// Only delete what was previously synced (not newly locally added pending items).
@@ -70,10 +77,11 @@ export async function pull(): Promise<void> {
 				}
 			}
 
-			// --- settings + markdown.new budget ---
+			// --- settings + markdown.new budget + server info ---
 			await updateSyncState({
 				settings: response.settings,
 				markdownBudget: response.markdown_budget,
+				serverInfo: response.server_info,
 				cursor: response.cursor
 			});
 		}

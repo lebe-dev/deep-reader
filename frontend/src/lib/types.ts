@@ -184,6 +184,29 @@ export type SettingsPatch = Partial<
 // ---------------------------------------------------------------------------
 
 /**
+ * Non-secret server deployment configuration returned on bootstrap.
+ * Secrets (AUTH_TOKEN, LLM_API_KEY) are intentionally omitted.
+ */
+export interface ServerInfo {
+	http_port: number;
+	database_path: string;
+	llm_api_base_url: string;
+	llm_model: string;
+	llm_max_concurrent: number;
+	llm_request_timeout: string;
+	llm_max_retries: number;
+	readability_timeout: string;
+	enrichment_version: number;
+	markdown_enabled: boolean;
+	markdown_base_url: string;
+	markdown_timeout: string;
+	markdown_daily_limit: number;
+	markdown_cost_per_article: number;
+	log_level: string;
+	log_format: string;
+}
+
+/**
  * markdown.new daily request-unit budget (spec §11 "Стоимость и rate limiting").
  * Surfaced so the UI can show remaining capacity and warn before the free-plan
  * limit is hit. When markdown.new is disabled, `enabled` is false.
@@ -209,6 +232,8 @@ export interface ConfigResponse {
 	progress: Progress[];
 	/** markdown.new daily request-unit budget. */
 	markdown_budget: MarkdownBudget;
+	/** Non-secret server deployment configuration. */
+	server_info: ServerInfo;
 	/** Server cursor to pass back as `?since=` on the next delta sync. */
 	cursor?: string;
 }

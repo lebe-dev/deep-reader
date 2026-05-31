@@ -58,6 +58,30 @@
 	const phraseMap = $derived(buildPhraseMap(enrichment));
 	const difficultSet = $derived(new Set(enrichment.difficult_words.map((d) => d.token_index)));
 
+	// Static per-token class (difficult/phrase styling). Depends only on the
+	// enrichment maps, so it's computed once per article — NOT on every click.
+	// Highlight styling is appended cheaply in tokenClass(); previously every
+	// click ran tailwind-merge (via cn()) across *all* tokens, which lagged.
+	const baseTokenClass = $derived.by(() => {
+		const map = new Map<number, string>();
+		for (const token of tokens) {
+			const isDifficult = difficultSet.has(token.index);
+			const isPhrase = phraseMap.has(token.index);
+			map.set(
+				token.index,
+				cn(
+					'token cursor-pointer rounded-sm px-[1px] transition-colors duration-100',
+					isDifficult &&
+						'underline decoration-dotted decoration-amber-500/70 decoration-1 underline-offset-3 dark:decoration-amber-400/60',
+					isPhrase &&
+						!isDifficult &&
+						'underline decoration-solid decoration-sky-400/60 decoration-1 underline-offset-3 dark:decoration-sky-500/50'
+				)
+			);
+		}
+		return map;
+	});
+
 	// ---------------------------------------------------------------------------
 	// Render segments
 	// ---------------------------------------------------------------------------
@@ -145,8 +169,19 @@
 			el?.scrollIntoView({ block: 'center', behavior: 'instant' });
 		}
 
+		// Skip the initial IntersectionObserver batch that fires for all observed
+		// elements at once. That batch reflects the viewport state on mount (not
+		// actual reading), and if the article fits in the viewport it would advance
+		// furthestSeen to the last token — causing every subsequent open to scroll
+		// to the end of the page.
+		let settling = true;
+
 		observer = new IntersectionObserver(
 			(entries) => {
+				if (settling) {
+					settling = false;
+					return;
+				}
 				let changed = false;
 				for (const entry of entries) {
 					if (!entry.isIntersecting) continue;
@@ -300,23 +335,17 @@
 	// ---------------------------------------------------------------------------
 
 	function tokenClass(index: number): string {
-		const isDifficult = difficultSet.has(index);
-		const isPhrase = phraseMap.has(index);
+		const base = baseTokenClass.get(index) ?? 'token cursor-pointer rounded-sm px-[1px]';
 		const isHighlightedPhrase =
 			highlightedPhraseRange !== null &&
 			index >= highlightedPhraseRange.start &&
 			index <= highlightedPhraseRange.end;
 		const isHighlightedWord = highlightedWordIndex === index;
 
-		return cn(
-			'token cursor-pointer rounded-sm px-[1px] transition-colors duration-100',
-			isDifficult &&
-				'underline decoration-dotted decoration-amber-500/70 decoration-1 underline-offset-3 dark:decoration-amber-400/60',
-			isPhrase &&
-				!isDifficult &&
-				'underline decoration-solid decoration-sky-400/60 decoration-1 underline-offset-3 dark:decoration-sky-500/50',
-			(isHighlightedPhrase || isHighlightedWord) && 'bg-primary/15 text-primary rounded'
-		);
+		// Cheap string append in the hot path — no tailwind-merge per click.
+		return isHighlightedPhrase || isHighlightedWord
+			? `${base} bg-primary/15 text-primary rounded`
+			: base;
 	}
 </script>
 

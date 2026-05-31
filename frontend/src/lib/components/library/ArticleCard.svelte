@@ -84,14 +84,14 @@
 			// do nothing on card click; user uses the Retry button
 			return;
 		}
-		toast.info('Still processing — check back in a moment.');
+		toast('Still processing — check back in a moment.');
 	}
 
 	async function handleRetry(e: MouseEvent) {
 		e.stopPropagation();
 		try {
 			await enqueueRetry(article.id);
-			toast.success('Retry queued.');
+			toast('Retry queued.');
 		} catch {
 			toast.error('Failed to queue retry.');
 		}

@@ -52,7 +52,7 @@
 		submitting = true;
 		try {
 			await enqueueAddArticle(trimmed);
-			toast.success('Article added — syncing in the background.');
+			toast('Article added — syncing in the background.');
 			url = '';
 			open = false;
 		} catch {

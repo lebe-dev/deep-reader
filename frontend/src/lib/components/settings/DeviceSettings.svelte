@@ -81,7 +81,7 @@
 		isSyncing = true;
 		try {
 			await sync();
-			toast.success('Sync successful');
+			toast('Sync successful');
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			toast.error(`Sync failed: ${msg}`);

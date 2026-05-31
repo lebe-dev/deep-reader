@@ -212,6 +212,31 @@ type ArticlePayload struct {
 	EnrichmentVersion int         `json:"enrichment_version"`
 }
 
+// ServerInfo holds the non-secret deployment configuration sent to the client
+// on bootstrap. Secrets (AUTH_TOKEN, LLM_API_KEY) are intentionally omitted.
+type ServerInfo struct {
+	HTTPPort     int    `json:"http_port"`
+	DatabasePath string `json:"database_path"`
+
+	LLMAPIBaseURL     string `json:"llm_api_base_url"`
+	LLMModel          string `json:"llm_model"`
+	LLMMaxConcurrent  int    `json:"llm_max_concurrent"`
+	LLMRequestTimeout string `json:"llm_request_timeout"`
+	LLMMaxRetries     int    `json:"llm_max_retries"`
+
+	ReadabilityTimeout string `json:"readability_timeout"`
+	EnrichmentVersion  int    `json:"enrichment_version"`
+
+	MarkdownEnabled        bool   `json:"markdown_enabled"`
+	MarkdownBaseURL        string `json:"markdown_base_url"`
+	MarkdownTimeout        string `json:"markdown_timeout"`
+	MarkdownDailyLimit     int    `json:"markdown_daily_limit"`
+	MarkdownCostPerArticle int    `json:"markdown_cost_per_article"`
+
+	LogLevel  string `json:"log_level"`
+	LogFormat string `json:"log_format"`
+}
+
 // ConfigResponse is the single bootstrap/delta-sync response from
 // GET /api/config. ServerTime is the authoritative clock the client should use
 // as the next sync cursor.
@@ -220,6 +245,7 @@ type ConfigResponse struct {
 	Articles       []ArticleMeta  `json:"articles"`
 	Progress       []Progress     `json:"progress"`
 	MarkdownBudget MarkdownBudget `json:"markdown_budget"`
+	ServerInfo     ServerInfo     `json:"server_info"`
 	ServerTime     time.Time      `json:"server_time"`
 }
 

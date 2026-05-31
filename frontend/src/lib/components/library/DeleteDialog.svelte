@@ -19,7 +19,7 @@
 		deleting = true;
 		try {
 			await enqueueDelete(articleId);
-			toast.success('Article deleted.');
+			toast('Article deleted.');
 			open = false;
 		} catch {
 			toast.error('Failed to delete article.');
