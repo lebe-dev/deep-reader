@@ -1,6 +1,6 @@
 # --- Variables ---
 version := `tr -d '[:space:]' < VERSION 2>/dev/null || echo "0.0.0"`
-imageName := 'deep-reader'
+imageName := 'tinyops/deep-reader'
 
 # --- Utility ---
 default:
@@ -75,10 +75,6 @@ run-backend:
 run-frontend:
     cd frontend && npm run dev
 
-# --- Docker ---
-build-image: test && lint
-    docker build --progress=plain --platform linux/amd64 -t {{ imageName }}:{{ version }} .
-
 start-env: stop-env
     docker compose up -d
 
@@ -91,3 +87,14 @@ logs:
 reset-env: stop-env
     @rm -rf data
     @echo "Dev environment data removed. Run 'just start-env' to restart."
+
+# --- Image ---
+build-image: test && lint
+    docker build --progress=plain --platform linux/amd64 -t {{ imageName }}:{{ version }} .
+
+push-image:
+    docker push {{ imageName }}:{{ version }}
+
+release-image: build-image && push-image
+
+release: release-image
