@@ -19,6 +19,7 @@
 	import SentenceSheet from '$lib/components/reader/SentenceSheet.svelte';
 	import type { PopoverContent, SentenceSheetContent } from '$lib/components/reader/reader-utils';
 	import { debounce } from '$lib/components/reader/reader-utils';
+	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Skeleton } from '$lib/components/ui/skeleton';
@@ -240,7 +241,10 @@
 	<!-- Article header -->
 	<div class="mb-6 flex flex-col gap-3">
 		<div class="flex items-start justify-between gap-3">
-			<h1 class="text-xl font-semibold leading-snug sm:text-2xl">
+			<h1
+				class="text-xl font-semibold leading-snug sm:text-2xl"
+				style="font-family: {getReaderFontCss(readerFont.value)}"
+			>
 				{meta?.title ?? 'Article'}
 			</h1>
 			<Button
@@ -292,15 +296,17 @@
 	</div>
 
 	<!-- Token renderer -->
-	<TokenRenderer
-		tokens={payload.tokens}
-		originalText={payload.original_text}
-		enrichment={payload.enrichment}
-		initialPosition={progress?.position ?? 0}
-		onProgress={handleProgress}
-		onWordClick={handleWordClick}
-		onSentenceSelect={handleSentenceSelect}
-	/>
+	<div style="font-family: {getReaderFontCss(readerFont.value)}">
+		<TokenRenderer
+			tokens={payload.tokens}
+			originalText={payload.original_text}
+			enrichment={payload.enrichment}
+			initialPosition={progress?.position ?? 0}
+			onProgress={handleProgress}
+			onWordClick={handleWordClick}
+			onSentenceSelect={handleSentenceSelect}
+		/>
+	</div>
 
 	<!-- Glossary (if any) -->
 	{#if payload.enrichment.glossary.length > 0}

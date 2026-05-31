@@ -15,6 +15,12 @@
 	import { enqueueSettings } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
 	import type { CefrLevel, Settings } from '$lib/types';
+	import {
+		readerFont,
+		setReaderFont,
+		READER_FONT_OPTIONS,
+		type ReaderFont
+	} from '$lib/reader-font.svelte';
 
 	// ---------------------------------------------------------------------------
 	// Constants
@@ -91,6 +97,11 @@
 		patchField({ target_language: value });
 	}
 
+	function handleFontChange(value: string | undefined) {
+		if (!value) return;
+		setReaderFont(value as ReaderFont);
+	}
+
 	function handleMinDifficultyChange(value: string | undefined) {
 		if (!value || !settings) return;
 		patchField({ min_difficulty_to_highlight: value as CefrLevel });
@@ -125,6 +136,24 @@
 		{:else if !settings}
 			<p class="text-muted-foreground text-sm">Loading settings…</p>
 		{:else}
+			<!-- Reader font -->
+			<div class="grid gap-1.5">
+				<Label for="font-select">Reader font</Label>
+				<Select.Root type="single" value={readerFont.value} onValueChange={handleFontChange}>
+					<Select.Trigger id="font-select" class="w-full">
+						<SelectPrimitive.Value placeholder="Select font" />
+					</Select.Trigger>
+					<Select.Content>
+						{#each READER_FONT_OPTIONS as opt (opt.value)}
+							<Select.Item value={opt.value} label={opt.label} />
+						{/each}
+					</Select.Content>
+				</Select.Root>
+				<p class="text-muted-foreground text-xs">
+					Font used in the article reader. Stored locally on this device.
+				</p>
+			</div>
+
 			<!-- CEFR level -->
 			<div class="grid gap-1.5">
 				<Label for="cefr-select">Your English level (CEFR)</Label>

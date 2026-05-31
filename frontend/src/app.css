@@ -2,6 +2,15 @@
 @import 'tw-animate-css';
 @import 'shadcn-svelte/tailwind.css';
 @import '@fontsource-variable/inter';
+@import '@fontsource/pt-serif/400.css';
+@import '@fontsource/pt-serif/400-italic.css';
+@import '@fontsource/pt-serif/700.css';
+@import '@fontsource/libre-baskerville/400.css';
+@import '@fontsource/libre-baskerville/400-italic.css';
+@import '@fontsource/libre-baskerville/700.css';
+@import '@fontsource/merriweather/400.css';
+@import '@fontsource/merriweather/400-italic.css';
+@import '@fontsource/merriweather/700.css';
 
 @custom-variant dark (&:is(.dark *));
 @plugin '@tailwindcss/typography';
