@@ -34,7 +34,22 @@
 	// Derived
 	// ---------------------------------------------------------------------------
 
-	const promptPlaceholder = $derived(serverInfo?.enrichment_prompt_default ?? '');
+	// The built-in default template, shown as the textarea value when the user
+	// has no custom prompt of their own.
+	const defaultPrompt = $derived(serverInfo?.enrichment_prompt_default ?? '');
+
+	// The value to persist: an exact match of the default is stored as "" so the
+	// server keeps tracking its built-in default rather than a frozen copy.
+	const promptToStore = $derived(promptDraft === defaultPrompt ? '' : promptDraft);
+
+	// There are unsaved changes when the value-to-store differs from what's saved.
+	const promptDirty = $derived((settings?.enrichment_prompt ?? '') !== promptToStore);
+
+	// Already on the default (nothing to reset) when the saved value is empty and
+	// the draft still equals the default template.
+	const isDefaultPrompt = $derived(
+		(settings?.enrichment_prompt ?? '') === '' && promptDraft === defaultPrompt
+	);
 
 	// ---------------------------------------------------------------------------
 	// Lifecycle — subscribe to the sync_state singleton (settings + serverInfo).
@@ -46,9 +61,12 @@
 				if (state?.serverInfo) serverInfo = state.serverInfo;
 				if (!state?.settings) return;
 				settings = state.settings;
-				// Seed the prompt draft once, before the user starts editing.
+				// Seed the draft with the saved prompt, or the default template when
+				// none is set — so the textarea is always populated, never blank.
+				// Re-seeds on later syncs until the user starts editing.
 				if (!promptTouched) {
-					promptDraft = state.settings.enrichment_prompt || '';
+					promptDraft =
+						state.settings.enrichment_prompt || (state.serverInfo?.enrichment_prompt_default ?? '');
 				}
 			},
 			error(err) {
@@ -91,15 +109,15 @@
 	}
 
 	function savePrompt() {
-		if (!settings) return;
-		if (promptDraft === settings.enrichment_prompt) return;
-		patchField({ enrichment_prompt: promptDraft });
+		if (!settings || !promptDirty) return;
+		patchField({ enrichment_prompt: promptToStore });
 		promptTouched = false;
 	}
 
 	function resetPrompt() {
-		// Empty string = use the built-in server default.
-		promptDraft = '';
+		// Restore the built-in default into the editor and clear the saved
+		// override (empty = the server keeps using its default template).
+		promptDraft = defaultPrompt;
 		promptTouched = false;
 		if (settings && settings.enrichment_prompt !== '') {
 			patchField({ enrichment_prompt: '' });
@@ -150,30 +168,18 @@
 					id="enrichment-prompt"
 					rows={14}
 					class="font-mono text-xs"
-					placeholder={promptPlaceholder}
 					value={promptDraft}
 					oninput={(e) => handlePromptInput(e.currentTarget.value)}
 				/>
 				<p class="text-muted-foreground text-xs">
-					System prompt for article enrichment. Leave empty to use the server default. Supported
-					placeholders:
+					System prompt for article enrichment. Pre-filled with the default template — edit it to
+					customise. Supported placeholders:
 					<code>{'{{target_language}}'}</code>, <code>{'{{cefr_level}}'}</code>,
 					<code>{'{{min_difficulty}}'}</code>, <code>{'{{enrichment_version}}'}</code>.
 				</p>
 				<div class="flex gap-2 pt-1">
-					<Button
-						size="sm"
-						onclick={savePrompt}
-						disabled={promptDraft === settings.enrichment_prompt}
-					>
-						Save prompt
-					</Button>
-					<Button
-						size="sm"
-						variant="outline"
-						onclick={resetPrompt}
-						disabled={settings.enrichment_prompt === '' && promptDraft === ''}
-					>
+					<Button size="sm" onclick={savePrompt} disabled={!promptDirty}>Save prompt</Button>
+					<Button size="sm" variant="outline" onclick={resetPrompt} disabled={isDefaultPrompt}>
 						Reset to default
 					</Button>
 				</div>

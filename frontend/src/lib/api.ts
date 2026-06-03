@@ -60,13 +60,7 @@ async function resolveBaseUrl(): Promise<string> {
 }
 
 /** Fetch cache modes (avoids relying on the DOM lib's RequestCache global). */
-type FetchCache =
-	| 'default'
-	| 'no-store'
-	| 'reload'
-	| 'no-cache'
-	| 'force-cache'
-	| 'only-if-cached';
+type FetchCache = 'default' | 'no-store' | 'reload' | 'no-cache' | 'force-cache' | 'only-if-cached';
 
 interface RequestOptions {
 	method?: string;
