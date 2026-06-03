@@ -24,8 +24,6 @@
 		article.status === 'fetch_failed' || article.status === 'enrich_failed'
 	);
 
-	const isNew = $derived(article.status === 'enriched');
-
 	const statusVariant = $derived.by(() => {
 		if (article.status === 'enriched') return 'default' as const;
 		if (isFailed) return 'destructive' as const;

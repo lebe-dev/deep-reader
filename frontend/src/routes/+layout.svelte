@@ -86,7 +86,7 @@
 		role="progressbar"
 		aria-label="Loading"
 	>
-		<div class="nav-bar bg-primary absolute h-full w-1/2" />
+		<div class="nav-bar bg-primary absolute h-full w-1/2"></div>
 	</div>
 {/if}
 
