@@ -161,6 +161,16 @@ type GlossaryItem struct {
 	Definition string `json:"definition"`
 }
 
+// User is the single built-in account. PasswordHash is a bcrypt hash and is
+// never serialised to the client (no JSON tags are sent over the wire for it;
+// the type is server-side only).
+type User struct {
+	Username     string
+	PasswordHash string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 // Settings is the singleton user-settings row. Persisted in the DB (not env),
 // since these are user-tunable.
 type Settings struct {
@@ -230,7 +240,7 @@ type ArticlePayload struct {
 }
 
 // ServerInfo holds the non-secret deployment configuration sent to the client
-// on bootstrap. Secrets (AUTH_TOKEN, LLM_API_KEY) are intentionally omitted.
+// on bootstrap. Secrets (LLM_API_KEY, password hashes) are intentionally omitted.
 type ServerInfo struct {
 	HTTPPort     int    `json:"http_port"`
 	DatabasePath string `json:"database_path"`
@@ -254,16 +264,54 @@ type ServerInfo struct {
 	LogFormat string `json:"log_format"`
 }
 
+// AuthStatus is the authentication state the client needs to route the user:
+// to /setup when the service is not yet initialized, to /login when it is but
+// the request is unauthenticated, or into the app when authenticated. It is
+// carried by GET /api/config (the only endpoint reachable before login).
+type AuthStatus struct {
+	// Initialized is true once the single built-in account has been created.
+	Initialized bool `json:"initialized"`
+	// Authenticated is true when the request carried a valid session token.
+	Authenticated bool `json:"authenticated"`
+}
+
 // ConfigResponse is the single bootstrap/delta-sync response from
 // GET /api/config. ServerTime is the authoritative clock the client should use
 // as the next sync cursor.
+//
+// Auth is always populated. When the caller is not authenticated (or the service
+// is not initialized) the heavy library fields are left empty — the client only
+// needs Auth to decide where to route — so unauthenticated callers never receive
+// library data.
 type ConfigResponse struct {
+	Auth           AuthStatus     `json:"auth"`
 	Settings       Settings       `json:"settings"`
 	Articles       []ArticleMeta  `json:"articles"`
 	Progress       []Progress     `json:"progress"`
 	MarkdownBudget MarkdownBudget `json:"markdown_budget"`
 	ServerInfo     ServerInfo     `json:"server_info"`
 	ServerTime     time.Time      `json:"server_time"`
+}
+
+// SetupRequest is the POST /api/setup body: the credentials for the single
+// built-in account, set once during first-run initialization.
+type SetupRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// LoginRequest is the POST /api/login body.
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// AuthResponse is returned by POST /api/setup and POST /api/login. Token is the
+// opaque session bearer token the client stores and sends as Authorization:
+// Bearer on subsequent requests.
+type AuthResponse struct {
+	Token    string `json:"token"`
+	Username string `json:"username"`
 }
 
 // MarkdownBudget reports the markdown.new daily request-unit budget so the

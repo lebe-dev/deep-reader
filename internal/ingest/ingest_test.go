@@ -114,6 +114,15 @@ func (f *fakeStore) TryConsumeMarkdownUnits(_ context.Context, _, _ int) (bool, 
 }
 func (f *fakeStore) RefundMarkdownUnits(_ context.Context, _ int) error { return nil }
 
+func (f *fakeStore) IsInitialized(_ context.Context) (bool, error)   { return true, nil }
+func (f *fakeStore) CreateUser(_ context.Context, _, _ string) error { return nil }
+func (f *fakeStore) GetUser(_ context.Context) (*model.User, error)  { return nil, ports.ErrNotFound }
+func (f *fakeStore) CreateSession(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+func (f *fakeStore) SessionExists(_ context.Context, _ string) (bool, error) { return false, nil }
+func (f *fakeStore) DeleteSession(_ context.Context, _ string) error         { return nil }
+
 // fakeWorker counts Notify calls.
 type fakeWorker struct {
 	notified atomic.Int32
@@ -130,7 +139,6 @@ func defaultCfg() *config.Config {
 	return &config.Config{
 		EnrichmentVersion:  1,
 		ReadabilityTimeout: 20 * time.Second,
-		AuthToken:          "test",
 		LLMAPIKey:          "test",
 		DatabasePath:       "/tmp/test.db",
 		HTTPPort:           8080,

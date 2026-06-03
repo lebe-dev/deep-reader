@@ -851,3 +851,74 @@ func TestMarkdownBudgetUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// ── Auth: user + sessions ───────────────────────────────────────────────────
+
+func TestUserLifecycle(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Fresh DB is not initialized and has no user.
+	if ok, err := s.IsInitialized(ctx); err != nil || ok {
+		t.Fatalf("IsInitialized on fresh db = (%v, %v), want (false, nil)", ok, err)
+	}
+	if _, err := s.GetUser(ctx); err != ports.ErrNotFound {
+		t.Fatalf("GetUser on fresh db err = %v, want ErrNotFound", err)
+	}
+
+	if err := s.CreateUser(ctx, "alice", "bcrypt-hash"); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	if ok, err := s.IsInitialized(ctx); err != nil || !ok {
+		t.Fatalf("IsInitialized after create = (%v, %v), want (true, nil)", ok, err)
+	}
+	u, err := s.GetUser(ctx)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if u.Username != "alice" || u.PasswordHash != "bcrypt-hash" {
+		t.Errorf("user = %+v, want alice/bcrypt-hash", u)
+	}
+	if u.CreatedAt.IsZero() || u.UpdatedAt.IsZero() {
+		t.Error("timestamps should be set")
+	}
+
+	// Setup is one-time: a second CreateUser is rejected.
+	if err := s.CreateUser(ctx, "bob", "other"); err != ports.ErrAlreadyInitialized {
+		t.Fatalf("second CreateUser err = %v, want ErrAlreadyInitialized", err)
+	}
+}
+
+func TestSessionLifecycle(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	const hash = "deadbeef"
+	if ok, err := s.SessionExists(ctx, hash); err != nil || ok {
+		t.Fatalf("SessionExists before create = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	if err := s.CreateSession(ctx, hash, time.Now().UTC()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Idempotent — creating the same session twice is fine.
+	if err := s.CreateSession(ctx, hash, time.Now().UTC()); err != nil {
+		t.Fatalf("CreateSession (repeat): %v", err)
+	}
+
+	if ok, err := s.SessionExists(ctx, hash); err != nil || !ok {
+		t.Fatalf("SessionExists after create = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	if err := s.DeleteSession(ctx, hash); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if ok, _ := s.SessionExists(ctx, hash); ok {
+		t.Error("session should be gone after delete")
+	}
+	// Deleting a missing session is a no-op, not an error.
+	if err := s.DeleteSession(ctx, "missing"); err != nil {
+		t.Errorf("DeleteSession(missing) = %v, want nil", err)
+	}
+}

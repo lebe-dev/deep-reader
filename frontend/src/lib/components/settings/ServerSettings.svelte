@@ -1,6 +1,6 @@
 <!-- Server settings card.
      Shows non-secret deployment configuration received from GET /api/config.
-     Secrets (AUTH_TOKEN, LLM_API_KEY) are never sent by the server and are not shown.
+     Secrets (LLM_API_KEY, password hashes) are never sent by the server and are not shown.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';

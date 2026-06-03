@@ -15,6 +15,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	"deep-reader/internal/auth"
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
@@ -40,6 +41,12 @@ type fakeStore struct {
 	lastUpsert     model.Progress
 	lastSinceMeta  time.Time
 	markdownUsed   int
+
+	// auth
+	initialized   bool
+	sessions      map[string]bool
+	user          *model.User
+	createUserErr error
 }
 
 func (f *fakeStore) GetSettings(context.Context) (model.Settings, error) { return f.settings, nil }
@@ -103,6 +110,41 @@ func (f *fakeStore) TryConsumeMarkdownUnits(context.Context, int, int) (bool, in
 
 func (f *fakeStore) RefundMarkdownUnits(context.Context, int) error { return nil }
 
+func (f *fakeStore) IsInitialized(context.Context) (bool, error) { return f.initialized, nil }
+
+func (f *fakeStore) CreateUser(_ context.Context, username, hash string) error {
+	if f.createUserErr != nil {
+		return f.createUserErr
+	}
+	f.user = &model.User{Username: username, PasswordHash: hash}
+	f.initialized = true
+	return nil
+}
+
+func (f *fakeStore) GetUser(context.Context) (*model.User, error) {
+	if f.user == nil {
+		return nil, ports.ErrNotFound
+	}
+	return f.user, nil
+}
+
+func (f *fakeStore) CreateSession(_ context.Context, tokenHash string, _ time.Time) error {
+	if f.sessions == nil {
+		f.sessions = map[string]bool{}
+	}
+	f.sessions[tokenHash] = true
+	return nil
+}
+
+func (f *fakeStore) SessionExists(_ context.Context, tokenHash string) (bool, error) {
+	return f.sessions[tokenHash], nil
+}
+
+func (f *fakeStore) DeleteSession(_ context.Context, tokenHash string) error {
+	delete(f.sessions, tokenHash)
+	return nil
+}
+
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
 	add        func(string) (*model.Article, error)
@@ -130,10 +172,19 @@ func (f *fakeIngestor) Retry(_ context.Context, id string) error {
 func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		AuthToken: testToken,
 		HTTPPort:  8080,
 		LogLevel:  "info",
 		LogFormat: "json",
+	}
+	// Seed the common case: an initialized service with a valid session for
+	// testToken, so existing protected-route tests authenticate with that bearer.
+	// Auth-flow tests (setup/login) reset these fields after construction.
+	if fs, ok := st.(*fakeStore); ok {
+		fs.initialized = true
+		if fs.sessions == nil {
+			fs.sessions = map[string]bool{}
+		}
+		fs.sessions[auth.HashToken(testToken)] = true
 	}
 	siteFS := fstest.MapFS{
 		"index.html":    &fstest.MapFile{Data: []byte("<!doctype html><title>app</title>")},
@@ -191,6 +242,7 @@ func TestHealthzNoAuth(t *testing.T) {
 }
 
 func TestAPIAuth(t *testing.T) {
+	// /api/stats is behind requireAuth; only a valid session token passes.
 	s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
 
 	cases := []struct {
@@ -204,11 +256,183 @@ func TestAPIAuth(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := doReq(t, s, http.MethodGet, "/api/config", nil, tc.token)
+			resp := doReq(t, s, http.MethodGet, "/api/stats", nil, tc.token)
 			if resp.StatusCode != tc.want {
-				t.Fatalf("config status = %d, want %d", resp.StatusCode, tc.want)
+				t.Fatalf("stats status = %d, want %d", resp.StatusCode, tc.want)
 			}
 		})
+	}
+}
+
+// TestConfigPublicAuthFlag verifies /api/config is reachable without a token and
+// reports the setup/auth flags so the client can route to /setup or /login.
+func TestConfigPublicAuthFlag(t *testing.T) {
+	t.Run("uninitialized", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		st.initialized = false
+		st.sessions = map[string]bool{}
+
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decode[model.ConfigResponse](t, resp)
+		if got.Auth.Initialized || got.Auth.Authenticated {
+			t.Errorf("auth = %+v, want both false", got.Auth)
+		}
+	})
+
+	t.Run("initialized but unauthenticated", func(t *testing.T) {
+		st := &fakeStore{metas: []model.ArticleMeta{{ID: "a1"}}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decode[model.ConfigResponse](t, resp)
+		if !got.Auth.Initialized || got.Auth.Authenticated {
+			t.Errorf("auth = %+v, want initialized && !authenticated", got.Auth)
+		}
+		if len(got.Articles) != 0 {
+			t.Errorf("unauthenticated config leaked %d articles", len(got.Articles))
+		}
+	})
+
+	t.Run("authenticated", func(t *testing.T) {
+		st := &fakeStore{metas: []model.ArticleMeta{{ID: "a1"}}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decode[model.ConfigResponse](t, resp)
+		if !got.Auth.Initialized || !got.Auth.Authenticated {
+			t.Errorf("auth = %+v, want both true", got.Auth)
+		}
+		if len(got.Articles) != 1 {
+			t.Errorf("articles = %d, want 1", len(got.Articles))
+		}
+	})
+}
+
+func TestSetup(t *testing.T) {
+	t.Run("first run creates user and returns token", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		st.initialized = false
+		st.sessions = map[string]bool{}
+
+		body := model.SetupRequest{Username: "alice", Password: "hunter2!!"}
+		resp := doReq(t, s, http.MethodPost, "/api/setup", body, "")
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("status = %d, want 201", resp.StatusCode)
+		}
+		got := decode[model.AuthResponse](t, resp)
+		if got.Token == "" || got.Username != "alice" {
+			t.Fatalf("response = %+v", got)
+		}
+		// The returned token must authenticate subsequent requests.
+		ok, _ := st.SessionExists(context.Background(), auth.HashToken(got.Token))
+		if !ok {
+			t.Error("issued token was not persisted as a session")
+		}
+		if st.user == nil || st.user.Username != "alice" || st.user.PasswordHash == "hunter2!!" {
+			t.Errorf("user not stored with a hashed password: %+v", st.user)
+		}
+	})
+
+	t.Run("rejects short password", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		st.initialized = false
+
+		body := model.SetupRequest{Username: "alice", Password: "short"}
+		resp := doReq(t, s, http.MethodPost, "/api/setup", body, "")
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("conflict when already initialized", func(t *testing.T) {
+		st := &fakeStore{createUserErr: ports.ErrAlreadyInitialized}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		body := model.SetupRequest{Username: "alice", Password: "hunter2!!"}
+		resp := doReq(t, s, http.MethodPost, "/api/setup", body, "")
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("status = %d, want 409", resp.StatusCode)
+		}
+	})
+}
+
+func TestLogin(t *testing.T) {
+	hash, err := auth.HashPassword("hunter2!!")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+
+	t.Run("valid credentials issue a token", func(t *testing.T) {
+		st := &fakeStore{user: &model.User{Username: "alice", PasswordHash: hash}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		body := model.LoginRequest{Username: "alice", Password: "hunter2!!"}
+		resp := doReq(t, s, http.MethodPost, "/api/login", body, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decode[model.AuthResponse](t, resp)
+		if got.Token == "" {
+			t.Fatal("expected a token")
+		}
+		ok, _ := st.SessionExists(context.Background(), auth.HashToken(got.Token))
+		if !ok {
+			t.Error("issued token was not persisted as a session")
+		}
+	})
+
+	t.Run("wrong password is 401", func(t *testing.T) {
+		st := &fakeStore{user: &model.User{Username: "alice", PasswordHash: hash}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		body := model.LoginRequest{Username: "alice", Password: "nope"}
+		resp := doReq(t, s, http.MethodPost, "/api/login", body, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("unknown user is 401", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		st.user = nil
+
+		body := model.LoginRequest{Username: "bob", Password: "whatever1"}
+		resp := doReq(t, s, http.MethodPost, "/api/login", body, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", resp.StatusCode)
+		}
+	})
+}
+
+func TestLogout(t *testing.T) {
+	st := &fakeStore{}
+	s := newTestServer(t, st, &fakeIngestor{})
+
+	resp := doReq(t, s, http.MethodPost, "/api/logout", nil, testToken)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	// The session must be gone after logout.
+	if ok, _ := st.SessionExists(context.Background(), auth.HashToken(testToken)); ok {
+		t.Error("session still present after logout")
+	}
+	// And a subsequent protected request with the same token is rejected.
+	resp2 := doReq(t, s, http.MethodGet, "/api/stats", nil, testToken)
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-logout stats status = %d, want 401", resp2.StatusCode)
 	}
 }
 

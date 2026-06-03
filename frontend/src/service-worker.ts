@@ -6,7 +6,7 @@
 //
 // Caching strategy:
 //  - App shell (build + files + prerendered) → PRECACHE on install, CACHE-FIRST at runtime.
-//  - GET /api/config → STALE-WHILE-REVALIDATE.
+//  - GET /api/config → NETWORK-ONLY (carries the auth flag; must never be stale).
 //  - GET /api/articles/:id → CACHE-FIRST (articles are immutable once enriched).
 //  - SPA navigations (non-API) → serve cached index.html shell offline.
 //  - Write methods (POST/PUT/PATCH/DELETE) → always pass through to network.
@@ -78,11 +78,10 @@ self.addEventListener('fetch', (event: FetchEvent) => {
 
 	const path = url.pathname;
 
-	// --- GET /api/config → stale-while-revalidate ---
-	if (path === '/api/config') {
-		event.respondWith(staleWhileRevalidate(request, API_CACHE));
-		return;
-	}
+	// --- GET /api/config → network-only ---
+	// It carries the auth/setup flag, so a stale cached copy could keep a
+	// logged-out client looking authenticated. Let it hit the network directly.
+	if (path === '/api/config') return;
 
 	// --- GET /api/articles/:id → cache-first (immutable after enrichment) ---
 	if (/^\/api\/articles\/[^/]+$/.test(path)) {
@@ -110,28 +109,6 @@ async function cacheFirst(request: Request, cacheName: string): Promise<Response
 	const fresh = await fetch(request);
 	if (fresh.ok) cache.put(request, fresh.clone());
 	return fresh;
-}
-
-/** Stale-while-revalidate: return cache immediately; refresh in background. */
-async function staleWhileRevalidate(request: Request, cacheName: string): Promise<Response> {
-	const cache = await caches.open(cacheName);
-	const cached = await cache.match(request);
-
-	// Kick off a background refresh regardless of cache hit.
-	const networkPromise = fetch(request)
-		.then((fresh) => {
-			if (fresh.ok) cache.put(request, fresh.clone());
-			return fresh;
-		})
-		.catch(() => null);
-
-	if (cached) return cached;
-
-	// Nothing cached yet — wait for the network.
-	const fresh = await networkPromise;
-	if (fresh) return fresh;
-
-	return new Response('Service Unavailable', { status: 503 });
 }
 
 /**

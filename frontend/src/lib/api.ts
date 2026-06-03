@@ -11,6 +11,7 @@ import { getSyncState } from './db';
 import type {
 	AddArticleResponse,
 	ArticlePayload,
+	AuthResponse,
 	ConfigResponse,
 	Progress,
 	ProgressUpdate,
@@ -114,6 +115,41 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 /** `GET /api/config` — bootstrap / delta sync. Pass `since` for a delta cursor. */
 export function getConfig(since?: string, signal?: AbortSignal): Promise<ConfigResponse> {
 	return request<ConfigResponse>('/api/config', { query: { since }, signal });
+}
+
+// ---------------------------------------------------------------------------
+// Auth endpoints
+// ---------------------------------------------------------------------------
+
+/** `POST /api/setup` — first-run creation of the single built-in account. */
+export function setup(
+	username: string,
+	password: string,
+	signal?: AbortSignal
+): Promise<AuthResponse> {
+	return request<AuthResponse>('/api/setup', {
+		method: 'POST',
+		body: { username, password },
+		signal
+	});
+}
+
+/** `POST /api/login` — verify credentials and obtain a session token. */
+export function login(
+	username: string,
+	password: string,
+	signal?: AbortSignal
+): Promise<AuthResponse> {
+	return request<AuthResponse>('/api/login', {
+		method: 'POST',
+		body: { username, password },
+		signal
+	});
+}
+
+/** `POST /api/logout` — end the current session server-side. */
+export function logout(signal?: AbortSignal): Promise<void> {
+	return request<void>('/api/logout', { method: 'POST', signal });
 }
 
 /** `GET /api/articles/:id` — full immutable article payload. */

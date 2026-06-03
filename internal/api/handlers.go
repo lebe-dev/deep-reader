@@ -22,6 +22,21 @@ import (
 func (s *Server) getConfig(c fiber.Ctx) error {
 	ctx := c.Context()
 
+	initialized, err := s.store.IsInitialized(ctx)
+	if err != nil {
+		return s.serverError(c, "is initialized", err)
+	}
+	authed := initialized && s.authenticate(c)
+
+	// Unauthenticated (or uninitialized) callers receive only the auth flag so
+	// the client can route to /setup or /login; no library data leaks.
+	if !authed {
+		return c.JSON(model.ConfigResponse{
+			Auth:       model.AuthStatus{Initialized: initialized, Authenticated: false},
+			ServerTime: time.Now().UTC(),
+		})
+	}
+
 	since, err := parseSince(c.Query("since"))
 	if err != nil {
 		return sendError(c, fiber.StatusBadRequest, "invalid since: expected RFC3339 timestamp")
@@ -46,6 +61,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	}
 
 	return c.JSON(model.ConfigResponse{
+		Auth:           model.AuthStatus{Initialized: true, Authenticated: true},
 		Settings:       settings,
 		Articles:       metas,
 		Progress:       progress,

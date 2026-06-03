@@ -6,7 +6,11 @@
 // Route map (architecture spec §9), all JSON unless noted:
 //
 //	GET    /healthz                         (no auth) liveness
-//	GET    /api/config                      bootstrap / delta sync (?since=RFC3339)
+//	GET    /api/config                      (no auth) bootstrap / delta sync; carries the
+//	                                        setup/auth flag, library data only when authed
+//	POST   /api/setup                       (no auth) first-run account creation -> {token}
+//	POST   /api/login                       (no auth) credentials -> {token}
+//	POST   /api/logout                      end the current session
 //	GET    /api/articles/:id                full enriched payload (409 if not enriched)
 //	POST   /api/articles                    {url} -> {id,status} (rate limited)
 //	DELETE /api/articles/:id                remove from library
@@ -125,10 +129,19 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	// Operational, unauthenticated.
 	app.Get("/healthz", s.healthz)
 
-	// All /api/* routes require the bearer token.
-	api := app.Group("/api", newAuthMiddleware(s.cfg.AuthToken))
+	// Public auth/bootstrap endpoints, reachable before login. They are
+	// registered directly on the app (ahead of the protected /api group below) so
+	// the group's requireAuth middleware does not apply to them. /api/config
+	// carries the setup/auth flag and only returns library data when the request
+	// is authenticated.
+	app.Get("/api/config", s.getConfig)
+	app.Post("/api/setup", s.setup)
+	app.Post("/api/login", s.login)
 
-	api.Get("/config", s.getConfig)
+	// All other /api/* routes require a valid session token.
+	api := app.Group("/api", s.requireAuth)
+
+	api.Post("/logout", s.logout)
 	api.Get("/stats", s.getStats)
 
 	api.Get("/articles/:id", s.getArticle)

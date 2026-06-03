@@ -4,6 +4,7 @@
 // Named exports only; no default export.
 
 import { db, enqueueOutbox, getSyncState, updateSyncState, type OutboxEntry } from '$lib/db';
+import { clearSession } from '$lib/auth/store.svelte';
 import {
 	addArticle as apiAddArticle,
 	deleteArticle as apiDeleteArticle,
@@ -34,6 +35,13 @@ import type { Progress, ProgressUpdate, SettingsPatch } from '$lib/types';
 export async function pull(): Promise<void> {
 	const state = await getSyncState();
 	const response = await getConfig(state.cursor);
+
+	// The session expired or was revoked server-side — drop it and stop. The
+	// layout guard reacts to the cleared auth state and routes to /login.
+	if (!response.auth?.authenticated) {
+		await clearSession();
+		return;
+	}
 
 	await db.transaction(
 		'rw',
@@ -117,6 +125,12 @@ export async function flushOutbox(): Promise<void> {
 			await db.outbox.delete(entry.id!);
 		} catch (err) {
 			if (err instanceof OfflineError) return; // stop; retry later
+
+			if (err instanceof ApiError && err.status === 401) {
+				// Session lost — keep the entry for after re-login and stop draining.
+				await clearSession();
+				return;
+			}
 
 			if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
 				// Permanent client error — drop to avoid infinite retry.

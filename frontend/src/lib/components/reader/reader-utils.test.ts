@@ -54,7 +54,9 @@ describe('buildPhraseMap', () => {
 	it('maps every token index in a phrase range to that phrase', () => {
 		const map = buildPhraseMap({
 			...emptyEnrichment,
-			phrases: [{ start_index: 3, end_index: 5, type: 'idiom', text: 'phrase', translation: 'идиома' }]
+			phrases: [
+				{ start_index: 3, end_index: 5, type: 'idiom', text: 'phrase', translation: 'идиома' }
+			]
 		});
 		expect(map.get(3)?.translation).toBe('идиома');
 		expect(map.get(4)?.translation).toBe('идиома');
@@ -168,7 +170,15 @@ describe('resolveClickContent', () => {
 		// Token 4 is a difficult word; add an overlapping phrase to assert priority.
 		const overlapping = buildPhraseMap({
 			...emptyEnrichment,
-			phrases: [{ start_index: 4, end_index: 4, type: 'idiom', text: 'phrase', translation: 'фраза-приоритет' }]
+			phrases: [
+				{
+					start_index: 4,
+					end_index: 4,
+					type: 'idiom',
+					text: 'phrase',
+					translation: 'фраза-приоритет'
+				}
+			]
 		});
 		const content = resolveClickContent(4, tokens, text, difficultWordMap, overlapping);
 		expect(content?.kind).toBe('phrase');

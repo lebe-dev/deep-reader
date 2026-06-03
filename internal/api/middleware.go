@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"log/slog"
 	"strings"
 	"time"
@@ -9,33 +8,53 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+
+	"deep-reader/internal/auth"
 )
 
 // bearerPrefix is the case-insensitive scheme expected in the Authorization
 // header for API requests.
 const bearerPrefix = "bearer "
 
-// newAuthMiddleware returns middleware that enforces the shared bearer token.
-//
-// It is mounted on the /api group only; /healthz and the embedded static assets
-// are intentionally left unauthenticated. The token comparison is
-// constant-time to avoid leaking it through timing.
-func newAuthMiddleware(token string) fiber.Handler {
-	want := []byte(token)
-	return func(c fiber.Ctx) error {
-		header := c.Get(fiber.HeaderAuthorization)
-		if header == "" {
-			return sendError(c, fiber.StatusUnauthorized, "missing Authorization header")
-		}
-		if len(header) <= len(bearerPrefix) || !strings.EqualFold(header[:len(bearerPrefix)], bearerPrefix) {
-			return sendError(c, fiber.StatusUnauthorized, "Authorization header must use the Bearer scheme")
-		}
-		got := []byte(header[len(bearerPrefix):])
-		if subtle.ConstantTimeCompare(got, want) != 1 {
-			return sendError(c, fiber.StatusUnauthorized, "invalid token")
-		}
-		return c.Next()
+// bearerToken extracts the raw token from a "Bearer <token>" Authorization
+// header, returning ("", false) when the header is absent or not a bearer token.
+func bearerToken(c fiber.Ctx) (string, bool) {
+	header := c.Get(fiber.HeaderAuthorization)
+	if len(header) <= len(bearerPrefix) || !strings.EqualFold(header[:len(bearerPrefix)], bearerPrefix) {
+		return "", false
 	}
+	token := header[len(bearerPrefix):]
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+// authenticate reports whether the request carries a valid session token. It is
+// the shared check used both by the auth middleware (to gate protected routes)
+// and by getConfig (to decide whether to include library data and set the
+// authenticated flag). A store error is treated as unauthenticated and logged.
+func (s *Server) authenticate(c fiber.Ctx) bool {
+	token, ok := bearerToken(c)
+	if !ok {
+		return false
+	}
+	exists, err := s.store.SessionExists(c.Context(), auth.HashToken(token))
+	if err != nil {
+		s.log.Error("session lookup failed", slog.Any("error", err))
+		return false
+	}
+	return exists
+}
+
+// requireAuth is middleware that rejects requests without a valid session token.
+// It guards the /api group; /healthz, the public auth endpoints (/api/config,
+// /api/setup, /api/login) and the embedded static assets are left open.
+func (s *Server) requireAuth(c fiber.Ctx) error {
+	if !s.authenticate(c) {
+		return sendError(c, fiber.StatusUnauthorized, "authentication required")
+	}
+	return c.Next()
 }
 
 // newRequestLogger returns middleware that logs one structured line per request

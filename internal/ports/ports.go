@@ -70,8 +70,9 @@
 //
 //	func New(cfg *config.Config, st ports.Store, ing ports.Ingestor) *api.Server   // wiring TBD by api agent
 //	    // The api package serves the embedded PWA via web.FS() (import
-//	    // "deep-reader/web"); there is NO STATIC_DIR. /healthz is unauthenticated;
-//	    // all /api/* routes require the AUTH_TOKEN bearer.
+//	    // "deep-reader/web"); there is NO STATIC_DIR. /healthz and the public auth
+//	    // endpoints (/api/config, /api/setup, /api/login) are unauthenticated; all
+//	    // other /api/* routes require a valid session bearer token.
 package ports
 
 import (
@@ -91,12 +92,41 @@ var (
 	// ErrDuplicate is returned by CreateArticle when the url_hash already
 	// exists. Ingestion treats this as a dedup signal, not a failure.
 	ErrDuplicate = errors.New("duplicate")
+	// ErrAlreadyInitialized is returned by CreateUser when the single built-in
+	// account already exists. The setup flow maps it to 409 Conflict.
+	ErrAlreadyInitialized = errors.New("already initialized")
 )
 
 // Store is the persistence boundary. The source of truth is SQLite; all methods
 // that touch the DB take a context for cancellation/timeouts. Concrete
 // constructor: store.NewSQLite(ctx, cfg) (*store.SQLite, error).
 type Store interface {
+	// IsInitialized reports whether the single built-in account has been created.
+	// The service is "initialized" once a user exists; until then the client is
+	// directed to the setup flow.
+	IsInitialized(ctx context.Context) (bool, error)
+
+	// CreateUser creates the single built-in account with the given username and
+	// bcrypt password hash. It returns ErrAlreadyInitialized if an account
+	// already exists (setup is a one-time operation).
+	CreateUser(ctx context.Context, username, passwordHash string) error
+
+	// GetUser returns the built-in account, or ErrNotFound if the service is not
+	// yet initialized.
+	GetUser(ctx context.Context) (*model.User, error)
+
+	// CreateSession persists a login session keyed by the SHA-256 hash of its
+	// bearer token, stamped with createdAt.
+	CreateSession(ctx context.Context, tokenHash string, createdAt time.Time) error
+
+	// SessionExists reports whether a session with the given token hash exists.
+	// It is the hot path for the auth middleware.
+	SessionExists(ctx context.Context, tokenHash string) (bool, error)
+
+	// DeleteSession removes the session with the given token hash (logout). It is
+	// a no-op if the session does not exist.
+	DeleteSession(ctx context.Context, tokenHash string) error
+
 	// GetSettings returns the singleton settings row, seeding defaults if it
 	// was never written.
 	GetSettings(ctx context.Context) (model.Settings, error)

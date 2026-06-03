@@ -192,6 +192,15 @@ func (f *fakeStore) TryConsumeMarkdownUnits(_ context.Context, _, _ int) (bool, 
 }
 func (f *fakeStore) RefundMarkdownUnits(_ context.Context, _ int) error { return nil }
 
+func (f *fakeStore) IsInitialized(_ context.Context) (bool, error)   { return true, nil }
+func (f *fakeStore) CreateUser(_ context.Context, _, _ string) error { return nil }
+func (f *fakeStore) GetUser(_ context.Context) (*model.User, error)  { return nil, ports.ErrNotFound }
+func (f *fakeStore) CreateSession(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+func (f *fakeStore) SessionExists(_ context.Context, _ string) (bool, error) { return false, nil }
+func (f *fakeStore) DeleteSession(_ context.Context, _ string) error         { return nil }
+
 // status is a helper for tests to read article status without the mutex.
 func (f *fakeStore) status(id string) string {
 	f.mu.Lock()
@@ -344,7 +353,6 @@ func (f *fakeLLM) calls() int {
 func testCfg(maxConcurrent, maxRetries int) *config.Config {
 	return &config.Config{
 		HTTPPort:           8080,
-		AuthToken:          "test",
 		DatabasePath:       "/tmp/test.db",
 		LLMAPIBaseURL:      "http://localhost",
 		LLMAPIKey:          "key",

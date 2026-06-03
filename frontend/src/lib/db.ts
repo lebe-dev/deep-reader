@@ -54,7 +54,7 @@ export interface SyncState {
 	cursor?: string;
 	/** Backend base URL (used when the PWA is not served by the backend). */
 	serverUrl?: string;
-	/** Shared bearer token entered during device setup. */
+	/** Session bearer token obtained from login/setup; sent as Authorization. */
 	authToken?: string;
 	/** Locally cached copy of the latest settings. */
 	settings?: Settings;

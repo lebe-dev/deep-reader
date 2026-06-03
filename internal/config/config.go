@@ -22,9 +22,6 @@ import (
 type Config struct {
 	// HTTPPort is the port the HTTP server listens on. Env: HTTP_PORT (8080).
 	HTTPPort int
-	// AuthToken is the shared bearer token guarding the API. Env: AUTH_TOKEN
-	// (required).
-	AuthToken string
 	// DatabasePath is the filesystem path to the SQLite file. Env:
 	// DATABASE_PATH (/data/deep-reader.db).
 	DatabasePath string
@@ -103,7 +100,6 @@ func Load() (*Config, error) {
 	}
 	cfg.HTTPPort = port
 
-	cfg.AuthToken = os.Getenv("AUTH_TOKEN")
 	cfg.DatabasePath = envStr("DATABASE_PATH", "/data/deep-reader.db")
 
 	cfg.LLMAPIBaseURL = os.Getenv("LLM_API_BASE_URL")
@@ -178,9 +174,6 @@ func Load() (*Config, error) {
 func (c *Config) validate() error {
 	var errs []error
 
-	if c.AuthToken == "" {
-		errs = append(errs, errors.New("AUTH_TOKEN is required"))
-	}
 	if c.LLMAPIKey == "" {
 		errs = append(errs, errors.New("LLM_API_KEY is required"))
 	}

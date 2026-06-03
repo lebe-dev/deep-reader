@@ -4,11 +4,13 @@ A self-hosted PWA for reading English-language articles with partial AI-assisted
 
 ## Local development
 
-Copy the env template and fill in at minimum `AUTH_TOKEN`, `LLM_API_KEY`, and `LLM_API_BASE_URL`:
+Copy the env template and fill in at minimum `LLM_API_KEY` and `LLM_API_BASE_URL`:
 
 ```sh
 cp .env.example .env
 ```
+
+Authentication is not configured via env. On first launch the app redirects to `/setup`, where you create the single built-in account (username + password). The password is stored as a bcrypt hash in the database, and every device signs in with that same account.
 
 Run the backend (Go, from the repo root):
 
@@ -38,7 +40,7 @@ just build          # fe-build -> embed -> be-build
 ## Deploy with Docker Compose
 
 ```sh
-cp .env.example .env   # set AUTH_TOKEN, LLM_API_KEY, etc.
+cp .env.example .env   # set LLM_API_KEY, LLM_API_BASE_URL, etc.
 just docker-build      # builds the multi-stage image
 just up                # docker compose up -d
 just logs              # tail logs

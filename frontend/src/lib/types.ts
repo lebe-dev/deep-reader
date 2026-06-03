@@ -200,7 +200,7 @@ export type SettingsPatch = Partial<
 
 /**
  * Non-secret server deployment configuration returned on bootstrap.
- * Secrets (AUTH_TOKEN, LLM_API_KEY) are intentionally omitted.
+ * Secrets (LLM_API_KEY, password hashes) are intentionally omitted.
  */
 export interface ServerInfo {
 	http_port: number;
@@ -240,8 +240,34 @@ export interface MarkdownBudget {
 	articles_remaining: number;
 }
 
-/** `GET /api/config` bootstrap/delta-sync response. */
+/**
+ * Authentication state carried by `GET /api/config` — the only endpoint
+ * reachable before login. The client routes on it: `/setup` when not
+ * initialized, `/login` when initialized but unauthenticated, into the app when
+ * authenticated.
+ */
+export interface AuthStatus {
+	/** True once the single built-in account has been created. */
+	initialized: boolean;
+	/** True when the request carried a valid session token. */
+	authenticated: boolean;
+}
+
+/** Response of `POST /api/setup` and `POST /api/login`. */
+export interface AuthResponse {
+	/** Opaque session bearer token to store and send as `Authorization: Bearer`. */
+	token: string;
+	username: string;
+}
+
+/**
+ * `GET /api/config` bootstrap/delta-sync response.
+ *
+ * When the caller is unauthenticated only `auth` and `server_time` are
+ * populated; the library fields are present only on an authenticated response.
+ */
 export interface ConfigResponse {
+	auth: AuthStatus;
 	settings: Settings;
 	articles: ArticleMeta[];
 	progress: Progress[];

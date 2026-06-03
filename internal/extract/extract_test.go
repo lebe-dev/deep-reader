@@ -18,7 +18,6 @@ import (
 func minimalConfig(timeout time.Duration) *config.Config {
 	return &config.Config{
 		ReadabilityTimeout: timeout,
-		AuthToken:          "test",
 		LLMAPIKey:          "test",
 		DatabasePath:       "/tmp/test.db",
 		HTTPPort:           8080,
