@@ -84,6 +84,10 @@ const DefaultMarkdownWarnThreshold = 5
 // MaxMarkdownWarnThreshold is the accepted upper bound for the warn threshold.
 const MaxMarkdownWarnThreshold = 100
 
+// MaxEnrichmentPromptLen is the accepted upper bound (in bytes) for a custom
+// enrichment prompt template submitted via PATCH /api/settings.
+const MaxEnrichmentPromptLen = 8000
+
 // Token is a single deterministic token produced by the tokenizer. Start and
 // End are byte offsets into Article.OriginalText such that
 // OriginalText[Start:End] == Text. Index is the token's position in the token
@@ -191,8 +195,11 @@ type Settings struct {
 	MinDifficultyToHighlight string `json:"min_difficulty_to_highlight"`
 	// MarkdownWarnThreshold is the remaining-conversions count at or below which
 	// the client shows a low-budget warning banner. 0 disables the warning.
-	MarkdownWarnThreshold int       `json:"markdown_warn_threshold"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	MarkdownWarnThreshold int `json:"markdown_warn_threshold"`
+	// EnrichmentPrompt is the user's custom enrichment system-prompt template.
+	// Empty means use the built-in default (llm.DefaultEnrichmentPromptTemplate).
+	EnrichmentPrompt string    `json:"enrichment_prompt"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -204,6 +211,7 @@ type SettingsPatch struct {
 	LLMModel                 *string `json:"llm_model,omitempty"`
 	MinDifficultyToHighlight *string `json:"min_difficulty_to_highlight,omitempty"`
 	MarkdownWarnThreshold    *int    `json:"markdown_warn_threshold,omitempty"`
+	EnrichmentPrompt         *string `json:"enrichment_prompt,omitempty"`
 }
 
 // Progress is the reading progress for a single article. It is synced with LWW
@@ -278,6 +286,9 @@ type ServerInfo struct {
 
 	ReadabilityTimeout string `json:"readability_timeout"`
 	EnrichmentVersion  int    `json:"enrichment_version"`
+	// EnrichmentPromptDefault is the built-in enrichment prompt template the
+	// client pre-fills the editor with and resets to. It is non-secret.
+	EnrichmentPromptDefault string `json:"enrichment_prompt_default"`
 
 	MarkdownEnabled        bool   `json:"markdown_enabled"`
 	MarkdownBaseURL        string `json:"markdown_base_url"`

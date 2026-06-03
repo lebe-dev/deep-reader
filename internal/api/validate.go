@@ -26,5 +26,10 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.MarkdownWarnThreshold != nil && (*patch.MarkdownWarnThreshold < 0 || *patch.MarkdownWarnThreshold > model.MaxMarkdownWarnThreshold) {
 		return "markdown_warn_threshold must be between 0 and 100", false
 	}
+	// enrichment_prompt may be empty (= use the built-in default); only the
+	// upper length bound is enforced.
+	if patch.EnrichmentPrompt != nil && len(*patch.EnrichmentPrompt) > model.MaxEnrichmentPromptLen {
+		return "enrichment_prompt is too long", false
+	}
 	return "", true
 }

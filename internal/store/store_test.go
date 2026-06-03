@@ -122,6 +122,48 @@ func TestUpdateSettings_MarkdownWarnThreshold(t *testing.T) {
 	}
 }
 
+func TestUpdateSettings_EnrichmentPrompt(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Default is empty (use built-in template).
+	got, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got.EnrichmentPrompt != "" {
+		t.Errorf("default EnrichmentPrompt: got %q, want empty", got.EnrichmentPrompt)
+	}
+
+	prompt := "Custom prompt with {{cefr_level}} placeholder"
+	got, err = s.UpdateSettings(ctx, model.SettingsPatch{EnrichmentPrompt: &prompt})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.EnrichmentPrompt != prompt {
+		t.Errorf("EnrichmentPrompt after update: got %q, want %q", got.EnrichmentPrompt, prompt)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.EnrichmentPrompt != prompt {
+		t.Errorf("EnrichmentPrompt after reload: got %q, want %q", got2.EnrichmentPrompt, prompt)
+	}
+
+	// Empty string resets to the built-in default.
+	empty := ""
+	got3, err := s.UpdateSettings(ctx, model.SettingsPatch{EnrichmentPrompt: &empty})
+	if err != nil {
+		t.Fatalf("UpdateSettings reset: %v", err)
+	}
+	if got3.EnrichmentPrompt != "" {
+		t.Errorf("EnrichmentPrompt after reset: got %q, want empty", got3.EnrichmentPrompt)
+	}
+}
+
 // ── Articles ──────────────────────────────────────────────────────────────────
 
 func TestCreateArticle_And_GetByHash(t *testing.T) {

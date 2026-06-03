@@ -564,3 +564,74 @@ func TestEnrich_EnrichmentVersionInPrompt(t *testing.T) {
 		t.Error("system prompts for version 1 and version 2 are identical; expected them to differ")
 	}
 }
+
+// captureSystemPrompt runs Enrich against a fake server and returns the system
+// message the client sent.
+func captureSystemPrompt(t *testing.T, settings model.Settings, version int) string {
+	t.Helper()
+	var systemPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		for _, m := range body.Messages {
+			if m.Role == "system" {
+				systemPrompt = m.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buildCannedResponse(t))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, version); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	return systemPrompt
+}
+
+// TestEnrich_UsesDefaultPromptWhenUnset asserts that an empty
+// settings.EnrichmentPrompt falls back to the built-in default template (and
+// that its placeholders are substituted, not sent literally).
+func TestEnrich_UsesDefaultPromptWhenUnset(t *testing.T) {
+	settings := testSettings()
+	settings.EnrichmentPrompt = ""
+
+	got := captureSystemPrompt(t, settings, 2)
+
+	if !strings.Contains(got, "language-learning assistant") {
+		t.Errorf("default prompt not used; got %q", got)
+	}
+	if strings.Contains(got, "{{target_language}}") || strings.Contains(got, "{{cefr_level}}") {
+		t.Errorf("placeholders were not substituted in default prompt: %q", got)
+	}
+	if !strings.Contains(got, settings.CEFRLevel) {
+		t.Errorf("default prompt missing CEFR level %q", settings.CEFRLevel)
+	}
+}
+
+// TestEnrich_UsesCustomPromptWithPlaceholders asserts that a configured
+// enrichment prompt replaces the default and that its placeholders are
+// substituted from settings and the enrichment version.
+func TestEnrich_UsesCustomPromptWithPlaceholders(t *testing.T) {
+	settings := testSettings()
+	settings.EnrichmentPrompt = "CUSTOM v{{enrichment_version}} lang={{target_language}} level={{cefr_level}} min={{min_difficulty}}"
+
+	got := captureSystemPrompt(t, settings, 7)
+
+	want := "CUSTOM v7 lang=" + settings.TargetLanguage +
+		" level=" + settings.CEFRLevel + " min=" + settings.MinDifficultyToHighlight
+	if got != want {
+		t.Errorf("custom prompt mismatch:\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "language-learning assistant") {
+		t.Error("default prompt leaked into custom prompt output")
+	}
+}

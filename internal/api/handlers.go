@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"deep-reader/internal/config"
+	"deep-reader/internal/llm"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/version"
@@ -302,21 +303,22 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		LoginAttemptWindow:   cfg.LoginAttemptWindow.String(),
 		LoginLockoutDuration: cfg.LoginLockoutDuration.String(),
 
-		LLMAPIBaseURL:          cfg.LLMAPIBaseURL,
-		LLMModel:               cfg.LLMModel,
-		LLMMaxConcurrent:       cfg.LLMMaxConcurrent,
-		LLMRequestTimeout:      cfg.LLMRequestTimeout.String(),
-		LLMMaxRetries:          cfg.LLMMaxRetries,
-		ReadabilityTimeout:     cfg.ReadabilityTimeout.String(),
-		EnrichmentVersion:      cfg.EnrichmentVersion,
-		MarkdownEnabled:        cfg.MarkdownEnabled,
-		MarkdownBaseURL:        cfg.MarkdownBaseURL,
-		MarkdownTimeout:        cfg.MarkdownTimeout.String(),
-		MarkdownDailyLimit:     cfg.MarkdownDailyLimit,
-		MarkdownCostPerArticle: cfg.MarkdownCostPerArticle,
-		LogLevel:               cfg.LogLevel,
-		LogFormat:              cfg.LogFormat,
-		Version:                version.Version,
+		LLMAPIBaseURL:           cfg.LLMAPIBaseURL,
+		LLMModel:                cfg.LLMModel,
+		LLMMaxConcurrent:        cfg.LLMMaxConcurrent,
+		LLMRequestTimeout:       cfg.LLMRequestTimeout.String(),
+		LLMMaxRetries:           cfg.LLMMaxRetries,
+		ReadabilityTimeout:      cfg.ReadabilityTimeout.String(),
+		EnrichmentVersion:       cfg.EnrichmentVersion,
+		EnrichmentPromptDefault: llm.DefaultEnrichmentPromptTemplate,
+		MarkdownEnabled:         cfg.MarkdownEnabled,
+		MarkdownBaseURL:         cfg.MarkdownBaseURL,
+		MarkdownTimeout:         cfg.MarkdownTimeout.String(),
+		MarkdownDailyLimit:      cfg.MarkdownDailyLimit,
+		MarkdownCostPerArticle:  cfg.MarkdownCostPerArticle,
+		LogLevel:                cfg.LogLevel,
+		LogFormat:               cfg.LogFormat,
+		Version:                 version.Version,
 	}
 }
 

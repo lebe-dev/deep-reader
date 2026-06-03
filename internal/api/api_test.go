@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -723,6 +724,35 @@ func TestPatchSettings(t *testing.T) {
 		}
 		if applied.MarkdownWarnThreshold == nil || *applied.MarkdownWarnThreshold != 0 {
 			t.Errorf("patch not forwarded: %+v", applied)
+		}
+	})
+
+	t.Run("enrichment prompt valid (including empty)", func(t *testing.T) {
+		var applied model.SettingsPatch
+		st := &fakeStore{
+			updateSettings: func(p model.SettingsPatch) (model.Settings, error) {
+				applied = p
+				return model.Settings{EnrichmentPrompt: *p.EnrichmentPrompt}, nil
+			},
+		}
+		s := newTestServer(t, st, &fakeIngestor{})
+		// Empty string is accepted (= reset to the built-in default).
+		empty := ""
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{EnrichmentPrompt: &empty}, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("empty prompt: status = %d, want 200", resp.StatusCode)
+		}
+		if applied.EnrichmentPrompt == nil || *applied.EnrichmentPrompt != "" {
+			t.Errorf("patch not forwarded: %+v", applied)
+		}
+	})
+
+	t.Run("enrichment prompt too long", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		long := strings.Repeat("x", model.MaxEnrichmentPromptLen+1)
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{EnrichmentPrompt: &long}, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}
 	})
 }

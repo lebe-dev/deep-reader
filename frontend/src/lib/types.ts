@@ -190,6 +190,8 @@ export interface Settings {
 	min_difficulty_to_highlight: CefrLevel;
 	/** Show the low-budget banner when ≤ N markdown.new conversions remain (0 = off). */
 	markdown_warn_threshold: number;
+	/** Custom enrichment system-prompt template. Empty = use the server default. */
+	enrichment_prompt: string;
 	updated_at: string;
 }
 
@@ -202,6 +204,7 @@ export type SettingsPatch = Partial<
 		| 'llm_model'
 		| 'min_difficulty_to_highlight'
 		| 'markdown_warn_threshold'
+		| 'enrichment_prompt'
 	>
 >;
 
@@ -228,6 +231,8 @@ export interface ServerInfo {
 	llm_max_retries: number;
 	readability_timeout: string;
 	enrichment_version: number;
+	/** Built-in enrichment prompt template the client pre-fills / resets to. */
+	enrichment_prompt_default: string;
 	markdown_enabled: boolean;
 	markdown_base_url: string;
 	markdown_timeout: string;

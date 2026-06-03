@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,42 +151,53 @@ const enrichmentSchema = `{
   }
 }`
 
-// buildPrompt returns the system and user messages for the enrichment call.
-// The enrichmentVersion parameter is captured in the system prompt so that
-// prompt changes can be traced via the version number.
-func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion int) (system, user string) {
-	var sb strings.Builder
+// DefaultEnrichmentPromptTemplate is the built-in system-prompt template used
+// when the user has not configured a custom one via settings. The placeholders
+// {{enrichment_version}}, {{target_language}}, {{cefr_level}} and
+// {{min_difficulty}} are substituted by renderPrompt at request time. The JSON
+// schema itself is enforced separately via response_format, not by this text.
+const DefaultEnrichmentPromptTemplate = "You are a language-learning assistant (enrichment schema v{{enrichment_version}}).\n" +
+	"Your task is to analyse an English article and produce structured annotations " +
+	"for a reader whose target translation language is {{target_language}} and whose CEFR proficiency level is {{cefr_level}}.\n\n" +
+	"Rules:\n" +
+	"1. difficult_words: list every token whose CEFR level is AT OR ABOVE {{min_difficulty}} (the user's min_difficulty_to_highlight). " +
+	"Include the token's dictionary lemma, a contextual translation into {{target_language}}, and the CEFR level. " +
+	"Use token_index from the input array.\n" +
+	"2. phrases: identify idioms, phrasal verbs, and domain terms as contiguous token ranges. " +
+	"Provide start_index and end_index (inclusive) from the input array, the phrase type " +
+	"(idiom | phrasal_verb | term), the exact phrase text, and a translation/definition into {{target_language}}. " +
+	"The text field MUST be the verbatim concatenation of exactly the tokens from start_index to " +
+	"end_index (joined by single spaces) and nothing more — start_index and end_index must delimit " +
+	"precisely that phrase, not the surrounding sentence. Keep term ranges tight (usually 1–4 tokens).\n" +
+	"3. sentences: for every sentence provide start_index and end_index (inclusive) of its " +
+	"tokens and a fluent translation into {{target_language}}.\n" +
+	"4. glossary: for domain-specific terms that deserve a definition rather than a plain translation, " +
+	"add an entry with the English term and an explanation in {{target_language}}.\n" +
+	"5. Return ONLY the JSON object matching the provided schema. No markdown, no prose.\n"
 
-	// System prompt.
-	fmt.Fprintf(&sb,
-		"You are a language-learning assistant (enrichment schema v%d).\n"+
-			"Your task is to analyse an English article and produce structured annotations "+
-			"for a reader whose target translation language is %s and whose CEFR proficiency level is %s.\n\n"+
-			"Rules:\n"+
-			"1. difficult_words: list every token whose CEFR level is AT OR ABOVE %s (the user's min_difficulty_to_highlight). "+
-			"Include the token's dictionary lemma, a contextual translation into %s, and the CEFR level. "+
-			"Use token_index from the input array.\n"+
-			"2. phrases: identify idioms, phrasal verbs, and domain terms as contiguous token ranges. "+
-			"Provide start_index and end_index (inclusive) from the input array, the phrase type "+
-			"(idiom | phrasal_verb | term), the exact phrase text, and a translation/definition into %s. "+
-			"The text field MUST be the verbatim concatenation of exactly the tokens from start_index to "+
-			"end_index (joined by single spaces) and nothing more — start_index and end_index must delimit "+
-			"precisely that phrase, not the surrounding sentence. Keep term ranges tight (usually 1–4 tokens).\n"+
-			"3. sentences: for every sentence provide start_index and end_index (inclusive) of its "+
-			"tokens and a fluent translation into %s.\n"+
-			"4. glossary: for domain-specific terms that deserve a definition rather than a plain translation, "+
-			"add an entry with the English term and an explanation in %s.\n"+
-			"5. Return ONLY the JSON object matching the provided schema. No markdown, no prose.\n",
-		enrichmentVersion,
-		settings.TargetLanguage,
-		settings.CEFRLevel,
-		settings.MinDifficultyToHighlight,
-		settings.TargetLanguage,
-		settings.TargetLanguage,
-		settings.TargetLanguage,
-		settings.TargetLanguage,
+// renderPrompt substitutes the supported placeholders in template with the
+// per-request settings and enrichment version.
+func renderPrompt(template string, settings model.Settings, enrichmentVersion int) string {
+	r := strings.NewReplacer(
+		"{{enrichment_version}}", strconv.Itoa(enrichmentVersion),
+		"{{target_language}}", settings.TargetLanguage,
+		"{{cefr_level}}", settings.CEFRLevel,
+		"{{min_difficulty}}", settings.MinDifficultyToHighlight,
 	)
-	system = sb.String()
+	return r.Replace(template)
+}
+
+// buildPrompt returns the system and user messages for the enrichment call.
+// The system prompt comes from the user's configured enrichment prompt
+// template, falling back to DefaultEnrichmentPromptTemplate when unset. The
+// enrichmentVersion is substituted into the template so that prompt changes can
+// be traced via the version number.
+func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion int) (system, user string) {
+	template := settings.EnrichmentPrompt
+	if template == "" {
+		template = DefaultEnrichmentPromptTemplate
+	}
+	system = renderPrompt(template, settings, enrichmentVersion)
 
 	// User prompt: indexed token array.
 	type indexedToken struct {

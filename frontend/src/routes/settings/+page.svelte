@@ -4,6 +4,7 @@
 <script lang="ts">
 	import * as Tabs from '$lib/components/ui/tabs';
 	import ReadingSettings from '$lib/components/settings/ReadingSettings.svelte';
+	import LlmSettings from '$lib/components/settings/LlmSettings.svelte';
 	import DeviceSettings from '$lib/components/settings/DeviceSettings.svelte';
 	import StorageSettings from '$lib/components/settings/StorageSettings.svelte';
 	import ServerSettings from '$lib/components/settings/ServerSettings.svelte';
@@ -39,6 +40,7 @@
 	<Tabs.Root value="reading">
 		<Tabs.List class="w-full">
 			<Tabs.Trigger value="reading" class="flex-1">Reading</Tabs.Trigger>
+			<Tabs.Trigger value="llm" class="flex-1">LLM</Tabs.Trigger>
 			<Tabs.Trigger value="device" class="flex-1">Device</Tabs.Trigger>
 			<Tabs.Trigger value="storage" class="flex-1">Storage</Tabs.Trigger>
 			<Tabs.Trigger value="server" class="flex-1">Server</Tabs.Trigger>
@@ -46,6 +48,10 @@
 
 		<Tabs.Content value="reading" class="mt-4">
 			<ReadingSettings />
+		</Tabs.Content>
+
+		<Tabs.Content value="llm" class="mt-4">
+			<LlmSettings />
 		</Tabs.Content>
 
 		<Tabs.Content value="device" class="mt-4">
