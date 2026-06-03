@@ -67,6 +67,10 @@ async function registerServiceWorker(): Promise<void> {
 				}
 			});
 		});
+
+		// For long-lived SPA sessions the browser won't re-check the SW on its own
+		// until 24 h have passed. Poll every hour so updates surface promptly.
+		setInterval(() => registration.update(), 60 * 60 * 1000);
 	} catch (err) {
 		// SW registration failure is non-fatal — the app still works online.
 		console.warn('[PWA] Service worker registration failed:', err);
