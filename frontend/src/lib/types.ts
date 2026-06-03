@@ -248,6 +248,12 @@ export interface ServerInfo {
 	markdown_cost_per_article: number;
 	log_level: string;
 	log_format: string;
+	/** Masked backend Sentry DSN (asterisks); empty when unset. */
+	sentry_dsn: string;
+	/** Masked browser Sentry DSN (asterisks); empty when unset. */
+	sentry_frontend_dsn: string;
+	/** Sentry environment tag (verbatim); empty when unset. */
+	sentry_environment: string;
 	version: string;
 }
 

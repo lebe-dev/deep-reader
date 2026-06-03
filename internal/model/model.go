@@ -323,6 +323,14 @@ type ServerInfo struct {
 	LogLevel  string `json:"log_level"`
 	LogFormat string `json:"log_format"`
 
+	// SentryDSN and SentryFrontendDSN are MASKED for display in the settings UI —
+	// the raw values never leave the server. SentryEnvironment is shown verbatim.
+	// Empty strings mean the variable is unset. (The functional, unmasked browser
+	// DSN is delivered separately via ConfigResponse.Sentry.)
+	SentryDSN         string `json:"sentry_dsn"`
+	SentryFrontendDSN string `json:"sentry_frontend_dsn"`
+	SentryEnvironment string `json:"sentry_environment"`
+
 	Version string `json:"version"`
 }
 

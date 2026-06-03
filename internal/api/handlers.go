@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -367,8 +368,31 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		MarkdownCostPerArticle:  cfg.MarkdownCostPerArticle,
 		LogLevel:                cfg.LogLevel,
 		LogFormat:               cfg.LogFormat,
+		SentryDSN:               maskSecret(cfg.SentryDSN),
+		SentryFrontendDSN:       maskSecret(cfg.SentryFrontendDSN),
+		SentryEnvironment:       cfg.SentryEnvironment,
 		Version:                 version.Version,
 	}
+}
+
+// maskSecret returns a display-safe rendering of a secret-ish value: an empty
+// input stays empty (the UI shows it as unset), otherwise only the last few
+// characters survive and the rest become asterisks, so the operator can
+// recognise the value without it being readable or leaving the server in full.
+// The asterisk run is capped so very long values don't render unwieldy.
+func maskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	const visible = 4
+	if len(s) <= visible {
+		return strings.Repeat("*", len(s))
+	}
+	stars := len(s) - visible
+	if stars > 12 {
+		stars = 12
+	}
+	return strings.Repeat("*", stars) + s[len(s)-visible:]
 }
 
 // progressRequest is the PUT /api/articles/:id/progress body. ArticleID comes

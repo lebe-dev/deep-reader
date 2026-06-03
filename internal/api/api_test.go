@@ -25,10 +25,13 @@ import (
 
 const testToken = "secret-token"
 
-// Browser Sentry config the test server advertises via GET /api/config.
+// Sentry config the test server advertises via GET /api/config. The backend DSN
+// is masked for display; the frontend DSN is sent verbatim in ConfigResponse and
+// masked in ServerInfo.
 const (
-	testSentryDSN = "https://public@example.ingest.sentry.io/1"
-	testSentryEnv = "test"
+	testSentryBackendDSN = "https://secretkey@example.ingest.sentry.io/9"
+	testSentryDSN        = "https://public@example.ingest.sentry.io/1"
+	testSentryEnv        = "test"
 )
 
 // --- fakes -----------------------------------------------------------------
@@ -205,6 +208,7 @@ func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 		HTTPPort:          8080,
 		LogLevel:          "info",
 		LogFormat:         "json",
+		SentryDSN:         testSentryBackendDSN,
 		SentryFrontendDSN: testSentryDSN,
 		SentryEnvironment: testSentryEnv,
 	}
@@ -388,7 +392,40 @@ func TestConfigSentry(t *testing.T) {
 		resp := doReq(t, s, http.MethodGet, "/api/config", nil, testToken)
 		got := decode[model.ConfigResponse](t, resp)
 		assertSentry(t, got.Sentry)
+
+		// ServerInfo carries the same vars for the settings UI, but with MASKED
+		// DSNs — the raw secrets must never appear there.
+		si := got.ServerInfo
+		if strings.Contains(si.SentryDSN, "secretkey") || !strings.Contains(si.SentryDSN, "*") {
+			t.Errorf("server_info.sentry_dsn = %q, want masked", si.SentryDSN)
+		}
+		if strings.Contains(si.SentryFrontendDSN, "public@") || !strings.Contains(si.SentryFrontendDSN, "*") {
+			t.Errorf("server_info.sentry_frontend_dsn = %q, want masked", si.SentryFrontendDSN)
+		}
+		if si.SentryEnvironment != testSentryEnv {
+			t.Errorf("server_info.sentry_environment = %q, want %q", si.SentryEnvironment, testSentryEnv)
+		}
 	})
+}
+
+func TestMaskSecret(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty stays empty", "", ""},
+		{"short fully masked", "abcd", "****"},
+		{"reveals last four", "abcdefgh", "****efgh"},
+		{"caps the asterisk run", "0123456789abcdefghijklmnop", "************mnop"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := maskSecret(tc.in); got != tc.want {
+				t.Errorf("maskSecret(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSetup(t *testing.T) {

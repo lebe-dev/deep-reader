@@ -104,6 +104,15 @@
 					{ label: 'LOG_LEVEL', value: s.log_level },
 					{ label: 'LOG_FORMAT', value: s.log_format }
 				]
+			},
+			{
+				title: 'Sentry',
+				// DSNs arrive already masked from the server; environment is verbatim.
+				rows: [
+					{ label: 'SENTRY_DSN', value: s.sentry_dsn },
+					{ label: 'SENTRY_FRONTEND_DSN', value: s.sentry_frontend_dsn },
+					{ label: 'SENTRY_ENVIRONMENT', value: s.sentry_environment }
+				]
 			}
 		];
 	}
@@ -111,7 +120,7 @@
 	function displayValue(v: string | number | boolean | string[]): string {
 		if (Array.isArray(v)) return v.length > 0 ? v.join(', ') : '—';
 		if (typeof v === 'boolean') return v ? 'true' : 'false';
-		return String(v);
+		return v === '' ? '—' : String(v);
 	}
 </script>
 
