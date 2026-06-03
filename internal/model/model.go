@@ -281,6 +281,8 @@ type ServerInfo struct {
 
 	LogLevel  string `json:"log_level"`
 	LogFormat string `json:"log_format"`
+
+	Version string `json:"version"`
 }
 
 // AuthStatus is the authentication state the client needs to route the user:

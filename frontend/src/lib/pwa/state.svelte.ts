@@ -18,6 +18,12 @@ export function dismissUpdate(): void {
 	_updateAvailable = false;
 }
 
+export async function checkForUpdate(): Promise<void> {
+	if (!('serviceWorker' in navigator)) return;
+	const registration = await navigator.serviceWorker.getRegistration();
+	await registration?.update();
+}
+
 export function applyUpdate(): void {
 	if (!_waitingWorker) return;
 

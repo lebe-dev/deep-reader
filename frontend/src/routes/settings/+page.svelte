@@ -7,6 +7,8 @@
 	import DeviceSettings from '$lib/components/settings/DeviceSettings.svelte';
 	import StorageSettings from '$lib/components/settings/StorageSettings.svelte';
 	import ServerSettings from '$lib/components/settings/ServerSettings.svelte';
+	import pkg from '../../../package.json';
+	import { checkForUpdate } from '$lib/pwa/state.svelte';
 </script>
 
 <svelte:head>
@@ -45,4 +47,15 @@
 			<ServerSettings />
 		</Tabs.Content>
 	</Tabs.Root>
+
+	<p class="text-muted-foreground mt-6 text-center text-xs">
+		Client v{pkg.version}
+		·
+		<button
+			onclick={checkForUpdate}
+			class="text-muted-foreground cursor-pointer underline"
+		>
+			Check for updates
+		</button>
+	</p>
 </div>

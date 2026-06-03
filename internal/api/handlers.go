@@ -296,6 +296,7 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		MarkdownCostPerArticle: cfg.MarkdownCostPerArticle,
 		LogLevel:               cfg.LogLevel,
 		LogFormat:              cfg.LogFormat,
+		Version:                version.Version,
 	}
 }
 

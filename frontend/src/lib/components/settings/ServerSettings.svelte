@@ -51,6 +51,10 @@
 	function buildSections(s: ServerInfo): Section[] {
 		return [
 			{
+				title: 'Server',
+				rows: [{ label: 'VERSION', value: s.version || '—' }]
+			},
+			{
 				title: 'HTTP',
 				rows: [
 					{ label: 'HTTP_PORT', value: s.http_port },

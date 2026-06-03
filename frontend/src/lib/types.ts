@@ -233,6 +233,7 @@ export interface ServerInfo {
 	markdown_cost_per_article: number;
 	log_level: string;
 	log_format: string;
+	version: string;
 }
 
 /**
