@@ -99,5 +99,8 @@ release-image: build-image && push-image
 
 release: release-image
 
+deploy:
+    ssh kaiman "cd /opt/deep-reader && sed -i 's|{{ imageName }}:[^\"]*|{{ imageName }}:{{ version }}|' docker-compose.yml && docker compose pull && docker compose down && docker compose up -d"
+
 ssh:
     ssh kaiman
