@@ -415,6 +415,54 @@ func TestLogin(t *testing.T) {
 			t.Fatalf("status = %d, want 401", resp.StatusCode)
 		}
 	})
+
+	t.Run("brute-force lockout after repeated failures", func(t *testing.T) {
+		st := &fakeStore{user: &model.User{Username: "alice", PasswordHash: hash}}
+		s := newTestServer(t, st, &fakeIngestor{})
+		// Enable the guard with a small threshold (the test cfg disables it).
+		s.loginGuard = newLoginGuard(3, 15*time.Minute, 15*time.Minute)
+
+		bad := model.LoginRequest{Username: "alice", Password: "nope"}
+		for i := range 3 {
+			resp := doReq(t, s, http.MethodPost, "/api/login", bad, "")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("failure %d: status = %d, want 401", i+1, resp.StatusCode)
+			}
+		}
+
+		// The 4th attempt is locked out, even with the *correct* password.
+		good := model.LoginRequest{Username: "alice", Password: "hunter2!!"}
+		resp := doReq(t, s, http.MethodPost, "/api/login", good, "")
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("locked attempt: status = %d, want 429", resp.StatusCode)
+		}
+		if ra := resp.Header.Get("Retry-After"); ra == "" {
+			t.Error("expected a Retry-After header on lockout")
+		}
+	})
+
+	t.Run("successful login resets the failure streak", func(t *testing.T) {
+		st := &fakeStore{user: &model.User{Username: "alice", PasswordHash: hash}}
+		s := newTestServer(t, st, &fakeIngestor{})
+		s.loginGuard = newLoginGuard(3, 15*time.Minute, 15*time.Minute)
+
+		bad := model.LoginRequest{Username: "alice", Password: "nope"}
+		for range 2 {
+			doReq(t, s, http.MethodPost, "/api/login", bad, "")
+		}
+		// A success clears the 2 prior failures.
+		good := model.LoginRequest{Username: "alice", Password: "hunter2!!"}
+		if resp := doReq(t, s, http.MethodPost, "/api/login", good, ""); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		// Two more failures must NOT lock out (streak was reset to zero).
+		for i := range 2 {
+			resp := doReq(t, s, http.MethodPost, "/api/login", bad, "")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("post-reset failure %d: status = %d, want 401", i+1, resp.StatusCode)
+			}
+		}
+	})
 }
 
 func TestLogout(t *testing.T) {

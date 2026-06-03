@@ -44,11 +44,12 @@ import (
 // Server wires the Fiber app, dependencies, and configuration for the HTTP
 // layer. Construct it with New.
 type Server struct {
-	cfg    *config.Config
-	store  ports.Store
-	ingest ports.Ingestor
-	log    *slog.Logger
-	app    *fiber.App
+	cfg        *config.Config
+	store      ports.Store
+	ingest     ports.Ingestor
+	log        *slog.Logger
+	loginGuard *loginGuard
+	app        *fiber.App
 }
 
 // Option customises Server construction. It exists primarily so tests can
@@ -84,10 +85,11 @@ func New(cfg *config.Config, st ports.Store, ing ports.Ingestor, opts ...Option)
 	}
 
 	s := &Server{
-		cfg:    cfg,
-		store:  st,
-		ingest: ing,
-		log:    o.log,
+		cfg:        cfg,
+		store:      st,
+		ingest:     ing,
+		log:        o.log,
+		loginGuard: newLoginGuard(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow, cfg.LoginLockoutDuration),
 	}
 	s.app = s.buildApp(o.siteFS)
 	return s
@@ -116,6 +118,12 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName:      "deep-reader",
 		ErrorHandler: s.errorHandler,
+		// When deployed behind a reverse proxy (the documented setup), trust its
+		// forwarded header so c.IP() — and therefore the per-IP login guard and
+		// request logger — sees the real client address rather than the proxy's.
+		TrustProxy:       s.cfg.TrustProxy,
+		TrustProxyConfig: s.trustProxyConfig(),
+		ProxyHeader:      fiber.HeaderXForwardedFor,
 	})
 
 	// Global middleware: recover first so panics in anything below become 500s,
@@ -163,6 +171,18 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 // CORS. We key this off LOG_LEVEL=debug per the task brief.
 func (s *Server) devMode() bool {
 	return s.cfg.LogLevel == "debug"
+}
+
+// trustProxyConfig builds the Fiber trusted-proxy allowlist. With an explicit
+// TRUSTED_PROXIES list we trust exactly those peers; with none we fall back to
+// trusting the loopback, private, and link-local ranges, which covers the
+// documented reverse-proxy-on-loopback / Docker deployment without extra config.
+// It is only consulted by Fiber when cfg.TrustProxy is true.
+func (s *Server) trustProxyConfig() fiber.TrustProxyConfig {
+	if len(s.cfg.TrustedProxies) > 0 {
+		return fiber.TrustProxyConfig{Proxies: s.cfg.TrustedProxies}
+	}
+	return fiber.TrustProxyConfig{Loopback: true, Private: true, LinkLocal: true}
 }
 
 // ingestRateLimiter limits POST /api/articles to a modest rate. The user is

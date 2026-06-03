@@ -26,6 +26,31 @@ type Config struct {
 	// DATABASE_PATH (/data/deep-reader.db).
 	DatabasePath string
 
+	// TrustProxy enables reading the client IP from the proxy header (default
+	// X-Forwarded-For) when the immediate peer is a trusted proxy. Required for
+	// the per-IP login brute-force guard to see real client IPs behind a reverse
+	// proxy; without it every request appears to originate from the proxy. Env:
+	// TRUST_PROXY (false).
+	TrustProxy bool
+	// TrustedProxies is the allowlist of proxy IPs/CIDRs whose forwarded headers
+	// are trusted. Only consulted when TrustProxy is true. When empty (and
+	// TrustProxy is true) the loopback, private, and link-local ranges are
+	// trusted, which covers the documented reverse-proxy-on-loopback / Docker
+	// deployment. Env: TRUSTED_PROXIES (comma-separated, empty).
+	TrustedProxies []string
+
+	// LoginMaxAttempts is the number of consecutive failed logins from one client
+	// IP that trips a lockout. 0 disables the brute-force guard entirely. Env:
+	// LOGIN_MAX_ATTEMPTS (5).
+	LoginMaxAttempts int
+	// LoginAttemptWindow is the rolling window over which failed logins are
+	// counted; failures older than this are forgotten. Env: LOGIN_ATTEMPT_WINDOW
+	// (15m).
+	LoginAttemptWindow time.Duration
+	// LoginLockoutDuration is how long a client IP is locked out after reaching
+	// LoginMaxAttempts. Env: LOGIN_LOCKOUT_DURATION (15m).
+	LoginLockoutDuration time.Duration
+
 	// LLMAPIBaseURL is the OpenAI-compatible API base URL. Env:
 	// LLM_API_BASE_URL.
 	LLMAPIBaseURL string
@@ -101,6 +126,31 @@ func Load() (*Config, error) {
 	cfg.HTTPPort = port
 
 	cfg.DatabasePath = envStr("DATABASE_PATH", "/data/deep-reader.db")
+
+	trustProxy, err := envBool("TRUST_PROXY", false)
+	if err != nil {
+		return nil, err
+	}
+	cfg.TrustProxy = trustProxy
+	cfg.TrustedProxies = envStrings("TRUSTED_PROXIES")
+
+	loginMaxAttempts, err := envInt("LOGIN_MAX_ATTEMPTS", 5)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LoginMaxAttempts = loginMaxAttempts
+
+	loginWindow, err := envDuration("LOGIN_ATTEMPT_WINDOW", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LoginAttemptWindow = loginWindow
+
+	loginLockout, err := envDuration("LOGIN_LOCKOUT_DURATION", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LoginLockoutDuration = loginLockout
 
 	cfg.LLMAPIBaseURL = os.Getenv("LLM_API_BASE_URL")
 	cfg.LLMAPIKey = os.Getenv("LLM_API_KEY")
@@ -192,6 +242,17 @@ func (c *Config) validate() error {
 	if c.EnrichmentVersion < 1 {
 		errs = append(errs, fmt.Errorf("ENRICHMENT_VERSION must be >= 1, got %d", c.EnrichmentVersion))
 	}
+	if c.LoginMaxAttempts < 0 {
+		errs = append(errs, fmt.Errorf("LOGIN_MAX_ATTEMPTS must be >= 0, got %d", c.LoginMaxAttempts))
+	}
+	if c.LoginMaxAttempts > 0 {
+		if c.LoginAttemptWindow <= 0 {
+			errs = append(errs, fmt.Errorf("LOGIN_ATTEMPT_WINDOW must be > 0, got %s", c.LoginAttemptWindow))
+		}
+		if c.LoginLockoutDuration <= 0 {
+			errs = append(errs, fmt.Errorf("LOGIN_LOCKOUT_DURATION must be > 0, got %s", c.LoginLockoutDuration))
+		}
+	}
 	if c.MarkdownEnabled {
 		if c.MarkdownBaseURL == "" {
 			errs = append(errs, errors.New("MARKDOWN_BASE_URL must not be empty when MARKDOWN_ENABLED"))
@@ -226,6 +287,22 @@ func envStr(key, def string) string {
 		return def
 	}
 	return v
+}
+
+// envStrings parses a comma-separated env var into a slice of trimmed,
+// non-empty values, returning nil when unset/empty.
+func envStrings(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for part := range strings.SplitSeq(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // envInt parses an integer env var, returning def when unset/empty.

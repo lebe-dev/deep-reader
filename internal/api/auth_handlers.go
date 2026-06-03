@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,15 @@ func (s *Server) setup(c fiber.Ctx) error {
 // token. To avoid leaking which part was wrong, every failure (unknown user or
 // bad password) returns the same 401.
 func (s *Server) login(c fiber.Ctx) error {
+	// Brute-force guard: reject locked-out clients before touching the store or
+	// running the (deliberately slow) bcrypt comparison.
+	ip := c.IP()
+	if locked, wait := s.loginGuard.retryAfter(ip); locked {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(int(wait.Seconds())))
+		s.log.Warn("login locked out", slog.String("ip", ip), slog.Duration("retry_after", wait))
+		return sendError(c, fiber.StatusTooManyRequests, "too many login attempts; try again later")
+	}
+
 	var req model.LoginRequest
 	if err := c.Bind().Body(&req); err != nil {
 		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
@@ -76,14 +86,28 @@ func (s *Server) login(c fiber.Ctx) error {
 	}
 
 	if strings.TrimSpace(req.Username) != user.Username || !auth.VerifyPassword(user.PasswordHash, req.Password) {
+		s.registerLoginFailure(ip)
 		return sendError(c, fiber.StatusUnauthorized, "invalid username or password")
 	}
 
+	s.loginGuard.recordSuccess(ip)
 	resp, err := s.issueSession(c.Context(), user.Username)
 	if err != nil {
 		return s.serverError(c, "issue session", err)
 	}
 	return c.JSON(resp)
+}
+
+// registerLoginFailure records a failed login for the client IP and logs when
+// the failure trips the lockout, so operators can see brute-force activity.
+func (s *Server) registerLoginFailure(ip string) {
+	if s.loginGuard.recordFailure(ip) {
+		s.log.Warn("login lockout engaged",
+			slog.String("ip", ip),
+			slog.Int("max_attempts", s.cfg.LoginMaxAttempts),
+			slog.Duration("lockout", s.cfg.LoginLockoutDuration),
+		)
+	}
 }
 
 // logout handles POST /api/logout — removes the current session. It is mounted
