@@ -34,6 +34,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	if !authed {
 		return c.JSON(model.ConfigResponse{
 			Auth:       model.AuthStatus{Initialized: initialized, Authenticated: false},
+			Sentry:     sentryConfigFromConfig(s.cfg),
 			ServerTime: time.Now().UTC(),
 		})
 	}
@@ -68,6 +69,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 		Progress:       progress,
 		MarkdownBudget: budget,
 		ServerInfo:     serverInfoFromConfig(s.cfg),
+		Sentry:         sentryConfigFromConfig(s.cfg),
 		ServerTime:     time.Now().UTC(),
 	})
 }
@@ -324,6 +326,17 @@ func (s *Server) getStats(c fiber.Ctx) error {
 // the store so it stays a cheap liveness probe for docker-compose healthcheck.
 func (s *Server) healthz(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "version": version.Version})
+}
+
+// sentryConfigFromConfig maps the browser Sentry settings into the wire type.
+// The release is the server version so frontend events line up with backend
+// releases. An empty DSN tells the client to skip Sentry initialisation.
+func sentryConfigFromConfig(cfg *config.Config) model.SentryConfig {
+	return model.SentryConfig{
+		DSN:         cfg.SentryFrontendDSN,
+		Environment: cfg.SentryEnvironment,
+		Release:     version.Version,
+	}
 }
 
 // serverInfoFromConfig maps non-secret config fields into the wire type.

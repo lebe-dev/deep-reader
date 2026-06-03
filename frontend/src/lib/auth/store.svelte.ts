@@ -13,6 +13,7 @@ import {
 	OfflineError
 } from '$lib/api';
 import { getSyncState, updateSyncState } from '$lib/db';
+import { initSentry } from '$lib/sentry';
 
 export interface AuthState {
 	/**
@@ -41,6 +42,10 @@ export const authState = $state<AuthState>({ authenticated: false, checked: fals
 export async function refreshAuth(): Promise<void> {
 	try {
 		const cfg = await getConfig();
+		// Configure Sentry from the server-provided DSN as early as possible — this
+		// is the first call on startup and runs before auth routing, so reporting is
+		// live on /login and /setup too. Idempotent; no-op when the DSN is empty.
+		initSentry(cfg.sentry);
 		authState.initialized = cfg.auth.initialized;
 		authState.authenticated = cfg.auth.authenticated;
 	} catch (err) {

@@ -19,6 +19,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/getsentry/sentry-go"
+
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
@@ -93,6 +95,16 @@ func (p *Pool) Start(ctx context.Context) {
 	for i := 0; i < n; i++ {
 		go func(workerID int) {
 			defer func() { done <- struct{}{} }()
+			// Report a worker panic to Sentry before letting it propagate, so the
+			// crash is still loud (process dies) but observable. No-op when Sentry
+			// is not configured.
+			defer func() {
+				if r := recover(); r != nil {
+					sentry.CurrentHub().Recover(r)
+					sentry.Flush(2 * time.Second)
+					panic(r)
+				}
+			}()
 			p.runWorker(ctx, workerID)
 		}(i)
 	}

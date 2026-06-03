@@ -61,3 +61,17 @@ The free markdown.new plan grants **500 request units per day per IP**, resettin
 | `MARKDOWN_TIMEOUT` | `45s` | Timeout for a single conversion. |
 | `MARKDOWN_DAILY_LIMIT` | `500` | Request-unit budget per UTC day (`0` = unlimited). |
 | `MARKDOWN_COST_PER_ARTICLE` | `50` | Request units charged per article conversion. |
+
+## Error tracking (Sentry)
+
+Sentry is optional and **off by default** — it reports errors and panics only (no performance tracing) and is enabled per side by setting a DSN. Backend and frontend are typically separate Sentry projects.
+
+The frontend DSN is delivered to the browser at runtime via `GET /api/config`, not baked at build time: the static PWA is built once and embedded in the binary, so configuration must come from the deployment's environment. Browser DSNs are public by design, so this is not a secret. Because of the runtime handshake, errors thrown during the very first page load (before `/api/config` returns) are not captured.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SENTRY_DSN` | empty | Backend (Go) DSN. Empty disables backend reporting. |
+| `SENTRY_FRONTEND_DSN` | empty | Browser DSN, sent to the client via `GET /api/config`. Empty disables frontend reporting. |
+| `SENTRY_ENVIRONMENT` | empty | Environment tag (e.g. `production`) applied to both. |
+
+The release for both SDKs is the server version, so frontend and backend events line up with the same release.

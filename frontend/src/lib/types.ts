@@ -305,8 +305,21 @@ export interface ConfigResponse {
 	markdown_budget: MarkdownBudget;
 	/** Non-secret server deployment configuration. */
 	server_info: ServerInfo;
+	/** Browser Sentry config; `dsn` empty when frontend reporting is disabled. */
+	sentry: SentryConfig;
 	/** Server cursor to pass back as `?since=` on the next delta sync. */
 	cursor?: string;
+}
+
+/**
+ * Browser Sentry configuration delivered on bootstrap. The DSN is public by
+ * design (browser SDKs embed it), so this carries no secret. An empty `dsn`
+ * means frontend error reporting is disabled.
+ */
+export interface SentryConfig {
+	dsn: string;
+	environment: string;
+	release: string;
 }
 
 /** `POST /api/articles` and `POST /api/articles/:id/retry` response. */

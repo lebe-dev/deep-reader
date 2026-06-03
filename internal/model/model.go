@@ -352,7 +352,20 @@ type ConfigResponse struct {
 	Progress       []Progress     `json:"progress"`
 	MarkdownBudget MarkdownBudget `json:"markdown_budget"`
 	ServerInfo     ServerInfo     `json:"server_info"`
-	ServerTime     time.Time      `json:"server_time"`
+	// Sentry carries the non-secret browser Sentry configuration. It is present
+	// even for unauthenticated callers so error reporting works on the /login and
+	// /setup pages; DSN is empty when frontend reporting is disabled.
+	Sentry     SentryConfig `json:"sentry"`
+	ServerTime time.Time    `json:"server_time"`
+}
+
+// SentryConfig is the browser Sentry configuration delivered to the client on
+// bootstrap. The DSN is public by design (browser SDKs embed it), so this
+// carries no secret. An empty DSN means frontend error reporting is disabled.
+type SentryConfig struct {
+	DSN         string `json:"dsn"`
+	Environment string `json:"environment"`
+	Release     string `json:"release"`
 }
 
 // SetupRequest is the POST /api/setup body: the credentials for the single

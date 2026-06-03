@@ -103,6 +103,19 @@ type Config struct {
 	LogLevel string
 	// LogFormat is one of json|text. Env: LOG_FORMAT (json).
 	LogFormat string
+
+	// SentryDSN is the backend (Go SDK) Sentry DSN. Empty disables backend error
+	// reporting entirely. Env: SENTRY_DSN (empty).
+	SentryDSN string
+	// SentryFrontendDSN is the browser SDK DSN. It is non-secret (browser DSNs
+	// are public by design) and delivered to the client via GET /api/config.
+	// Empty disables frontend error reporting. Usually a separate Sentry project
+	// from SentryDSN. Env: SENTRY_FRONTEND_DSN (empty).
+	SentryFrontendDSN string
+	// SentryEnvironment is the environment tag (e.g. production|staging) applied
+	// to both backend and frontend events. Empty leaves it unset. Env:
+	// SENTRY_ENVIRONMENT (empty).
+	SentryEnvironment string
 }
 
 // Load reads configuration from the process environment, applies defaults, and
@@ -213,6 +226,10 @@ func Load() (*Config, error) {
 
 	cfg.LogLevel = envStr("LOG_LEVEL", "info")
 	cfg.LogFormat = envStr("LOG_FORMAT", "json")
+
+	cfg.SentryDSN = envStr("SENTRY_DSN", "")
+	cfg.SentryFrontendDSN = envStr("SENTRY_FRONTEND_DSN", "")
+	cfg.SentryEnvironment = envStr("SENTRY_ENVIRONMENT", "")
 
 	if err := cfg.validate(); err != nil {
 		return nil, err

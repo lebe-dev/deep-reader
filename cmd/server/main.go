@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+
 	"deep-reader/internal/api"
 	"deep-reader/internal/config"
 	"deep-reader/internal/enrich"
@@ -62,6 +64,22 @@ func run() error {
 		slog.String("log_level", cfg.LogLevel),
 		slog.String("log_format", cfg.LogFormat),
 	)
+
+	// Error tracking: only initialise Sentry when a DSN is configured; otherwise
+	// the global hub stays client-less and every CaptureException/Recover call
+	// elsewhere is a safe no-op. Flush on shutdown so buffered events are sent.
+	if cfg.SentryDSN != "" {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:           cfg.SentryDSN,
+			Environment:   cfg.SentryEnvironment,
+			Release:       version.Version,
+			EnableTracing: false,
+		}); err != nil {
+			return err
+		}
+		defer sentry.Flush(2 * time.Second)
+		log.Info("sentry error tracking enabled", slog.String("environment", cfg.SentryEnvironment))
+	}
 
 	// rootCtx is cancelled on the first SIGINT/SIGTERM; it drives both the
 	// worker pool lifetime and the shutdown sequence.

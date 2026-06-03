@@ -55,6 +55,7 @@
 		"@fontsource/libre-baskerville": "^5.2.10",
 		"@fontsource/merriweather": "^5.2.11",
 		"@fontsource/pt-serif": "^5.2.8",
+		"@sentry/sveltekit": "^10.56.0",
 		"dexie": "^4.4.3"
 	}
 }

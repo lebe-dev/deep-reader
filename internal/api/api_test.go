@@ -20,9 +20,16 @@ import (
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
+	"deep-reader/internal/version"
 )
 
 const testToken = "secret-token"
+
+// Browser Sentry config the test server advertises via GET /api/config.
+const (
+	testSentryDSN = "https://public@example.ingest.sentry.io/1"
+	testSentryEnv = "test"
+)
 
 // --- fakes -----------------------------------------------------------------
 
@@ -195,9 +202,11 @@ func (f *fakeIngestor) ReEnrich(_ context.Context, id, mode string) error {
 func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		HTTPPort:  8080,
-		LogLevel:  "info",
-		LogFormat: "json",
+		HTTPPort:          8080,
+		LogLevel:          "info",
+		LogFormat:         "json",
+		SentryFrontendDSN: testSentryDSN,
+		SentryEnvironment: testSentryEnv,
 	}
 	// Seed the common case: an initialized service with a valid session for
 	// testToken, so existing protected-route tests authenticate with that bearer.
@@ -342,6 +351,43 @@ func TestConfigPublicAuthFlag(t *testing.T) {
 		if len(got.Articles) != 1 {
 			t.Errorf("articles = %d, want 1", len(got.Articles))
 		}
+	})
+}
+
+// TestConfigSentry verifies the browser Sentry block is delivered via
+// /api/config to BOTH unauthenticated and authenticated callers (so reporting
+// works on /login and /setup), carrying the configured DSN/environment and the
+// server version as the release.
+func TestConfigSentry(t *testing.T) {
+	assertSentry := func(t *testing.T, got model.SentryConfig) {
+		t.Helper()
+		if got.DSN != testSentryDSN {
+			t.Errorf("sentry.dsn = %q, want %q", got.DSN, testSentryDSN)
+		}
+		if got.Environment != testSentryEnv {
+			t.Errorf("sentry.environment = %q, want %q", got.Environment, testSentryEnv)
+		}
+		if got.Release != version.Version {
+			t.Errorf("sentry.release = %q, want %q", got.Release, version.Version)
+		}
+	}
+
+	t.Run("unauthenticated", func(t *testing.T) {
+		st := &fakeStore{metas: []model.ArticleMeta{{ID: "a1"}}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, "")
+		got := decode[model.ConfigResponse](t, resp)
+		assertSentry(t, got.Sentry)
+	})
+
+	t.Run("authenticated", func(t *testing.T) {
+		st := &fakeStore{metas: []model.ArticleMeta{{ID: "a1"}}}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, testToken)
+		got := decode[model.ConfigResponse](t, resp)
+		assertSentry(t, got.Sentry)
 	})
 }
 

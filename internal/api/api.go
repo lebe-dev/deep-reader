@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 
@@ -218,6 +219,15 @@ func (s *Server) errorHandler(c fiber.Ctx, err error) error {
 	}
 	if status >= 500 {
 		s.log.Error("unhandled error", slog.String("path", c.Path()), slog.Any("error", err))
+		// Report to Sentry, tagging the request for triage. This is a no-op when
+		// Sentry is not configured (the global hub has no client). It captures
+		// both explicit 500s and handler panics, which the recover middleware
+		// surfaces here as a *fiber.Error with code 500.
+		sentry.WithScope(func(scope *sentry.Scope) {
+			scope.SetTag("path", c.Path())
+			scope.SetTag("method", c.Method())
+			sentry.CaptureException(err)
+		})
 	}
 	return sendError(c, status, msg)
 }
