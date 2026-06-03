@@ -659,6 +659,96 @@ func TestRetryArticle_NotFound(t *testing.T) {
 	}
 }
 
+// ── SetPinned ──────────────────────────────────────────────────────────────
+
+func TestSetPinned(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/pin")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	// Fresh articles default to unpinned.
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Pinned {
+		t.Fatalf("new article should be unpinned")
+	}
+
+	// Pin it.
+	if err := s.SetPinned(ctx, a.ID, true); err != nil {
+		t.Fatalf("SetPinned(true): %v", err)
+	}
+	got, err = s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after pin: %v", err)
+	}
+	if !got.Pinned {
+		t.Errorf("article should be pinned after SetPinned(true)")
+	}
+
+	// The pinned flag also surfaces in the library projection.
+	metas, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta: %v", err)
+	}
+	if len(metas) != 1 || !metas[0].Pinned {
+		t.Errorf("ListArticleMeta should report pinned=true, got %+v", metas)
+	}
+
+	// Unpin it.
+	if err := s.SetPinned(ctx, a.ID, false); err != nil {
+		t.Fatalf("SetPinned(false): %v", err)
+	}
+	got, err = s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after unpin: %v", err)
+	}
+	if got.Pinned {
+		t.Errorf("article should be unpinned after SetPinned(false)")
+	}
+}
+
+func TestSetPinned_BumpsUpdatedAtForDeltaSync(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/pin-delta")
+	// Backdate updated_at so the pin write produces a strictly newer timestamp,
+	// proving the change rides a delta sync keyed on updated_at.
+	a.UpdatedAt = time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	since := a.UpdatedAt
+	if err := s.SetPinned(ctx, a.ID, true); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+
+	// A delta list from the pre-pin cursor must include the just-pinned article.
+	metas, err := s.ListArticleMeta(ctx, since)
+	if err != nil {
+		t.Fatalf("ListArticleMeta(since): %v", err)
+	}
+	if len(metas) != 1 || metas[0].ID != a.ID || !metas[0].Pinned {
+		t.Errorf("delta sync should carry the pin change, got %+v", metas)
+	}
+}
+
+func TestSetPinned_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	if err := s.SetPinned(ctx, "no-such-id", true); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
 // ── ListWork ───────────────────────────────────────────────────────────────
 
 func TestListWork(t *testing.T) {

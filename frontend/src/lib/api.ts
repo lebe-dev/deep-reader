@@ -193,6 +193,15 @@ export function putProgress(p: Progress, signal?: AbortSignal): Promise<void> {
 	});
 }
 
+/** `PUT /api/articles/:id/pin` — toggle the library pin flag. */
+export function pinArticle(id: string, pinned: boolean, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/articles/${encodeURIComponent(id)}/pin`, {
+		method: 'PUT',
+		body: { pinned },
+		signal
+	});
+}
+
 /** `PATCH /api/settings` — update user settings (partial). */
 export function patchSettings(partial: SettingsPatch, signal?: AbortSignal): Promise<Settings> {
 	return request<Settings>('/api/settings', { method: 'PATCH', body: partial, signal });

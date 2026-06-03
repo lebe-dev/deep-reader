@@ -186,6 +186,17 @@ func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.Pinned = pinned
+	return nil
+}
+
 func (f *fakeStore) MarkdownUnitsUsedToday(_ context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) TryConsumeMarkdownUnits(_ context.Context, _, _ int) (bool, int, error) {
 	return true, 0, nil

@@ -16,6 +16,7 @@
 //	DELETE /api/articles/:id                remove from library
 //	POST   /api/articles/:id/retry          resume failed article from its stage
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
+//	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
 //	PATCH  /api/settings                    partial settings update
 //	GET    /api/stats                        library counters
 //	GET    /*                               embedded PWA (no auth, SPA fallback)
@@ -157,6 +158,7 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Delete("/articles/:id", s.deleteArticle)
 	api.Post("/articles/:id/retry", s.retryArticle)
 	api.Put("/articles/:id/progress", s.putProgress)
+	api.Put("/articles/:id/pin", s.setPinned)
 
 	api.Patch("/settings", s.patchSettings)
 

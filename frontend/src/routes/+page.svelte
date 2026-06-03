@@ -6,6 +6,7 @@
 	import { sync } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
 	import { ArticleCard, AddArticleDialog } from '$lib/components/library';
+	import { sortLibrary, readingProgressPercent } from '$lib/components/library/library-utils';
 	import { Button } from '$lib/components/ui/button';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import { toast } from 'svelte-sonner';
@@ -19,6 +20,7 @@
 
 	let articles = $state<ArticleMeta[]>([]);
 	let readSet = $state<Set<string>>(new Set());
+	let progressMap = $state<Map<string, number>>(new Map());
 	let initialLoading = $state(true);
 
 	onMount(() => {
@@ -28,16 +30,24 @@
 				db.progress.toArray()
 			]);
 			const read = new Set(progress.filter((p) => p.is_read).map((p) => p.article_id));
-			const sorted = [...all].sort((a, b) => {
-				const aRead = read.has(a.id) ? 1 : 0;
-				const bRead = read.has(b.id) ? 1 : 0;
-				return aRead - bRead;
-			});
-			return { sorted, read };
+			const byId = new Map(all.map((a) => [a.id, a]));
+			// Reading-progress percentage per article (unread only; read articles
+			// show no bar). Keyed by id so the card can look it up cheaply.
+			const percents = new Map<string, number>();
+			for (const p of progress) {
+				if (read.has(p.article_id)) continue;
+				const meta = byId.get(p.article_id);
+				if (!meta) continue;
+				const percent = readingProgressPercent(p.position, meta.token_count);
+				if (percent > 0) percents.set(p.article_id, percent);
+			}
+			const sorted = sortLibrary(all, read);
+			return { sorted, read, percents };
 		}).subscribe({
-			next({ sorted, read }) {
+			next({ sorted, read, percents }) {
 				articles = sorted;
 				readSet = read;
+				progressMap = percents;
 				initialLoading = false;
 			},
 			error(err) {
@@ -135,6 +145,7 @@
 					{article}
 					articleHref="/article/{article.id}"
 					isRead={readSet.has(article.id)}
+					progressPercent={progressMap.get(article.id) ?? 0}
 				/>
 			{/each}
 		</div>

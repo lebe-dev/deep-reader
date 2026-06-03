@@ -262,7 +262,7 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 func (s *SQLite) GetArticleByHash(ctx context.Context, urlHash string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at
+                      created_at, enriched_at, updated_at, pinned
                FROM articles WHERE url_hash = ?`
 	row := s.db.QueryRowContext(ctx, q, urlHash)
 	a, err := scanArticle(row)
@@ -283,12 +283,12 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		err  error
 	)
 	if since.IsZero() {
-		const q = `SELECT id, source_url, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
+		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
                           json_array_length(tokens), enrichment_coverage
                    FROM articles ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q)
 	} else {
-		const q = `SELECT id, source_url, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
+		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
                           json_array_length(tokens), enrichment_coverage
                    FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
@@ -302,11 +302,13 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	for rows.Next() {
 		var m model.ArticleMeta
 		var createdAtStr, enrichedAtStr string
+		var pinned int
 		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
-			&m.Status, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
+			&m.Status, &pinned, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
 			&m.EnrichmentCoverage); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
 		}
+		m.Pinned = pinned == 1
 		if m.CreatedAt, err = parseTime(createdAtStr); err != nil {
 			return nil, err
 		}
@@ -328,7 +330,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at
+                      created_at, enriched_at, updated_at, pinned
                FROM articles WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, q, id)
 	a, err := scanArticle(row)
@@ -504,7 +506,7 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at
+                      created_at, enriched_at, updated_at, pinned
                FROM articles
                WHERE status IN ('queued','fetching','fetched','enriching')
                ORDER BY created_at ASC LIMIT ?`
@@ -591,6 +593,30 @@ func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 		return ports.ErrNotFound
 	}
 	slog.Debug("store: article queued for retry", "article_id", id)
+	return nil
+}
+
+// SetPinned sets the article's pinned flag and bumps updated_at so the change
+// rides the next delta sync. Returns [ports.ErrNotFound] if the article does not
+// exist.
+func (s *SQLite) SetPinned(ctx context.Context, id string, pinned bool) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	pinnedInt := 0
+	if pinned {
+		pinnedInt = 1
+	}
+	const q = `UPDATE articles SET pinned=?, updated_at=? WHERE id=?`
+	res, err := s.write.ExecContext(ctx, q, pinnedInt, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: SetPinned: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article pin updated", "article_id", id, "pinned", pinned)
 	return nil
 }
 
@@ -781,13 +807,15 @@ func (s *SQLite) ListProgress(ctx context.Context, since time.Time) ([]model.Pro
 func scanArticle(row *sql.Row) (*model.Article, error) {
 	var a model.Article
 	var tokJSON, createdAtStr, enrichedAtStr, updatedAtStr string
+	var pinned int
 	if err := row.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
 		&a.OriginalText, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
-		&createdAtStr, &enrichedAtStr, &updatedAtStr,
+		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned,
 	); err != nil {
 		return nil, err // let caller handle sql.ErrNoRows
 	}
+	a.Pinned = pinned == 1
 	return finishArticle(&a, tokJSON, createdAtStr, enrichedAtStr, updatedAtStr)
 }
 
@@ -795,13 +823,15 @@ func scanArticle(row *sql.Row) (*model.Article, error) {
 func scanArticleRow(rows *sql.Rows) (*model.Article, error) {
 	var a model.Article
 	var tokJSON, createdAtStr, enrichedAtStr, updatedAtStr string
+	var pinned int
 	if err := rows.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
 		&a.OriginalText, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
-		&createdAtStr, &enrichedAtStr, &updatedAtStr,
+		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned,
 	); err != nil {
 		return nil, fmt.Errorf("store: scanArticleRow: %w", err)
 	}
+	a.Pinned = pinned == 1
 	return finishArticle(&a, tokJSON, createdAtStr, enrichedAtStr, updatedAtStr)
 }
 

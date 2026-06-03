@@ -11,7 +11,7 @@
 	import { browser } from '$app/environment';
 	import { db } from '$lib/db';
 	import { getArticle } from '$lib/api';
-	import { enqueueProgress } from '$lib/sync/engine';
+	import { enqueueProgress, enqueuePin } from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
 	import type { ArticleMeta, ArticlePayload, Progress } from '$lib/types';
 	import TokenRenderer from '$lib/components/reader/TokenRenderer.svelte';
@@ -26,6 +26,8 @@
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import BookOpenCheckIcon from '@lucide/svelte/icons/book-open-check';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
+	import PinIcon from '@lucide/svelte/icons/pin';
+	import PinOffIcon from '@lucide/svelte/icons/pin-off';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
 	import AlertCircleIcon from '@lucide/svelte/icons/circle-alert';
@@ -140,6 +142,22 @@
 	// ---------------------------------------------------------------------------
 	// Mark as read toggle
 	// ---------------------------------------------------------------------------
+
+	// ---------------------------------------------------------------------------
+	// Pin toggle
+	// ---------------------------------------------------------------------------
+
+	async function togglePin() {
+		if (!meta) return;
+		const next = !meta.pinned;
+		// Optimistic UI; enqueuePin persists + syncs the change.
+		meta = { ...meta, pinned: next };
+		try {
+			await enqueuePin(meta.id, next);
+		} catch {
+			meta = { ...meta, pinned: !next };
+		}
+	}
 
 	function toggleRead() {
 		if (!articleId) return;
@@ -257,20 +275,34 @@
 			>
 				{meta?.title ?? 'Article'}
 			</h1>
-			<Button
-				variant="ghost"
-				size="icon"
-				class="mt-0.5 shrink-0"
-				onclick={toggleRead}
-				aria-label={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
-				title={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
-			>
-				{#if progress?.is_read}
-					<BookOpenCheckIcon class="text-primary size-5" />
-				{:else}
-					<BookOpenIcon class="text-muted-foreground size-5" />
-				{/if}
-			</Button>
+			<div class="mt-0.5 flex shrink-0 items-center">
+				<Button
+					variant="ghost"
+					size="icon"
+					onclick={togglePin}
+					aria-label={meta?.pinned ? 'Unpin article' : 'Pin article'}
+					title={meta?.pinned ? 'Unpin' : 'Pin to top'}
+				>
+					{#if meta?.pinned}
+						<PinOffIcon class="text-primary size-5" />
+					{:else}
+						<PinIcon class="text-muted-foreground size-5" />
+					{/if}
+				</Button>
+				<Button
+					variant="ghost"
+					size="icon"
+					onclick={toggleRead}
+					aria-label={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
+					title={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
+				>
+					{#if progress?.is_read}
+						<BookOpenCheckIcon class="text-primary size-5" />
+					{:else}
+						<BookOpenIcon class="text-muted-foreground size-5" />
+					{/if}
+				</Button>
+			</div>
 		</div>
 
 		<div class="text-muted-foreground flex flex-wrap items-center gap-2 text-sm">

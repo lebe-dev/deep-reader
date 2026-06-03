@@ -4,19 +4,23 @@
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
-	import { enqueueRetry } from '$lib/sync/engine';
+	import { enqueueRetry, enqueuePin } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import PinIcon from '@lucide/svelte/icons/pin';
+	import PinOffIcon from '@lucide/svelte/icons/pin-off';
 
 	interface Props {
 		article: ArticleMeta;
 		articleHref: string;
 		isRead?: boolean;
+		/** Reading-progress percentage [0,100]; 0 hides the progress bar. */
+		progressPercent?: number;
 	}
 
-	let { article, articleHref, isRead = false }: Props = $props();
+	let { article, articleHref, isRead = false, progressPercent = 0 }: Props = $props();
 
 	let deleteOpen = $state(false);
 
@@ -76,6 +80,21 @@
 			toast.error('Failed to queue retry.');
 		}
 	}
+
+	async function handleTogglePin(e: MouseEvent) {
+		e.stopPropagation();
+		const next = !article.pinned;
+		try {
+			await enqueuePin(article.id, next);
+			toast(next ? 'Pinned to top.' : 'Unpinned.');
+		} catch {
+			toast.error('Failed to update pin.');
+		}
+	}
+
+	// Show the reading-progress bar only for partially-read, not-yet-finished
+	// articles (an unread article the user has started). Read articles show none.
+	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
 </script>
 
 <div class="border-border bg-card rounded-xl border px-4 py-3">
@@ -99,6 +118,9 @@
 			{/if}
 		</div>
 		<div class="flex shrink-0 items-center gap-1">
+			{#if article.pinned}
+				<PinIcon class="text-primary size-3.5" aria-label="Pinned" />
+			{/if}
 			{#if article.status === 'enriched' && article.enrichment_coverage < 1}
 				<CoverageBadge coverage={article.enrichment_coverage} />
 			{/if}
@@ -144,6 +166,20 @@
 			<Button
 				size="icon-sm"
 				variant="ghost"
+				onclick={handleTogglePin}
+				aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
+				title={article.pinned ? 'Unpin' : 'Pin to top'}
+				class={article.pinned ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}
+			>
+				{#if article.pinned}
+					<PinOffIcon class="size-4" />
+				{:else}
+					<PinIcon class="size-4" />
+				{/if}
+			</Button>
+			<Button
+				size="icon-sm"
+				variant="ghost"
 				onclick={() => (deleteOpen = true)}
 				aria-label="Delete article"
 				class="text-muted-foreground hover:text-destructive"
@@ -152,6 +188,20 @@
 			</Button>
 		</div>
 	</div>
+
+	{#if showProgress}
+		<!-- Reading-progress bar: how far the reader got before stopping. -->
+		<div
+			class="bg-muted mt-2.5 h-1 w-full overflow-hidden rounded-full"
+			role="progressbar"
+			aria-valuenow={progressPercent}
+			aria-valuemin={0}
+			aria-valuemax={100}
+			aria-label="Reading progress"
+		>
+			<div class="bg-primary/60 h-full rounded-full" style="width: {progressPercent}%"></div>
+		</div>
+	{/if}
 </div>
 
 <DeleteDialog bind:open={deleteOpen} articleId={article.id} articleTitle={article.title} />

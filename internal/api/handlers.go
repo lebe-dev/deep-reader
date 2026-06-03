@@ -221,6 +221,26 @@ func (s *Server) putProgress(c fiber.Ctx) error {
 	return c.JSON(progressResponse{Applied: applied})
 }
 
+// setPinned handles PUT /api/articles/:id/pin. Body: {pinned}. It flips the
+// article's library pin flag (bumping updated_at so the change syncs) and
+// returns 204. Unknown ids return 404.
+func (s *Server) setPinned(c fiber.Ctx) error {
+	id := c.Params("id")
+
+	var body pinRequest
+	if err := c.Bind().Body(&body); err != nil {
+		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
+	}
+
+	if err := s.store.SetPinned(c.Context(), id, body.Pinned); err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return sendError(c, fiber.StatusNotFound, "article not found")
+		}
+		return s.serverError(c, "set pinned", err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 // patchSettings handles PATCH /api/settings with a partial settings body. Nil
 // fields are left unchanged. It returns the resulting settings.
 func (s *Server) patchSettings(c fiber.Ctx) error {
@@ -311,6 +331,11 @@ type progressRequest struct {
 // progressResponse reports the LWW outcome of a progress upsert.
 type progressResponse struct {
 	Applied bool `json:"applied"`
+}
+
+// pinRequest is the PUT /api/articles/:id/pin body. The id comes from the path.
+type pinRequest struct {
+	Pinned bool `json:"pinned"`
 }
 
 // statsResponse is the GET /api/stats body. InProgress counts articles in any

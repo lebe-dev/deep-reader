@@ -192,6 +192,11 @@ type Store interface {
 	// does not exist.
 	RetryArticle(ctx context.Context, id string) error
 
+	// SetPinned sets the article's pinned flag (a user library flag) and bumps
+	// UpdatedAt so the change is carried by the next delta sync. Returns
+	// ErrNotFound if the article does not exist.
+	SetPinned(ctx context.Context, id string, pinned bool) error
+
 	// MarkdownUnitsUsedToday returns the number of markdown.new request units
 	// consumed during the current UTC day, for surfacing remaining budget. It
 	// returns 0 when no units have been spent today.

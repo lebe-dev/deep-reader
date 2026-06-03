@@ -41,6 +41,9 @@ type fakeStore struct {
 	lastUpsert     model.Progress
 	lastSinceMeta  time.Time
 	markdownUsed   int
+	setPinnedErr   error
+	lastPinID      string
+	lastPinned     bool
 
 	// auth
 	initialized   bool
@@ -99,6 +102,12 @@ func (f *fakeStore) ListProgress(context.Context, time.Time) ([]model.Progress, 
 	return f.progress, nil
 }
 func (f *fakeStore) RetryArticle(context.Context, string) error { return f.retryErr }
+
+func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
+	f.lastPinID = id
+	f.lastPinned = pinned
+	return f.setPinnedErr
+}
 
 func (f *fakeStore) MarkdownUnitsUsedToday(context.Context) (int, error) {
 	return f.markdownUsed, nil
@@ -750,6 +759,61 @@ func TestRetry(t *testing.T) {
 		resp := doReq(t, s, http.MethodPost, "/api/articles/missing/retry", nil, testToken)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+}
+
+func TestSetPinned(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/pin", map[string]bool{"pinned": true}, testToken)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", resp.StatusCode)
+		}
+		if st.lastPinID != "a1" || !st.lastPinned {
+			t.Errorf("store got id=%q pinned=%v, want a1/true", st.lastPinID, st.lastPinned)
+		}
+	})
+	t.Run("unpin", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/pin", map[string]bool{"pinned": false}, testToken)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", resp.StatusCode)
+		}
+		if st.lastPinned {
+			t.Errorf("store should have been called with pinned=false")
+		}
+	})
+	t.Run("not found", func(t *testing.T) {
+		st := &fakeStore{setPinnedErr: ports.ErrNotFound}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodPut, "/api/articles/missing/pin", map[string]bool{"pinned": true}, testToken)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+	t.Run("bad body", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		req, _ := http.NewRequest(http.MethodPut, "/api/articles/a1/pin", bytes.NewReader([]byte("{not json")))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := s.App().Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+	t.Run("requires auth", func(t *testing.T) {
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/pin", map[string]bool{"pinned": true}, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", resp.StatusCode)
 		}
 	})
 }

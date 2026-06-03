@@ -100,21 +100,24 @@ type Token struct {
 // text, the deterministic tokenization, and enrichment lifecycle fields. It is
 // the source of truth; the client mirrors a subset of it.
 type Article struct {
-	ID                string    `json:"id"`
-	SourceURL         string    `json:"source_url"`
-	URLHash           string    `json:"url_hash"`
-	Title             string    `json:"title"`
-	Author            string    `json:"author"`
-	SourceDomain      string    `json:"source_domain"`
-	Lang              string    `json:"lang"`
-	OriginalText      string    `json:"original_text"`
-	Tokens            []Token   `json:"tokens"`
-	Status            string    `json:"status"`
-	EnrichmentVersion int       `json:"enrichment_version"`
-	Error             string    `json:"error,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	EnrichedAt        time.Time `json:"enriched_at,omitzero"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string  `json:"id"`
+	SourceURL         string  `json:"source_url"`
+	URLHash           string  `json:"url_hash"`
+	Title             string  `json:"title"`
+	Author            string  `json:"author"`
+	SourceDomain      string  `json:"source_domain"`
+	Lang              string  `json:"lang"`
+	OriginalText      string  `json:"original_text"`
+	Tokens            []Token `json:"tokens"`
+	Status            string  `json:"status"`
+	EnrichmentVersion int     `json:"enrichment_version"`
+	Error             string  `json:"error,omitempty"`
+	// Pinned is a user flag keeping the article at the top of the library. It is
+	// synced as ordinary metadata (toggling it bumps UpdatedAt).
+	Pinned     bool      `json:"pinned"`
+	CreatedAt  time.Time `json:"created_at"`
+	EnrichedAt time.Time `json:"enriched_at,omitzero"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Enrichment is the LLM-produced annotation layer for an article. All token
@@ -216,12 +219,14 @@ type Progress struct {
 // GET /api/config. It deliberately omits the heavy original_text / tokens /
 // enrichment payload.
 type ArticleMeta struct {
-	ID                string    `json:"id"`
-	SourceURL         string    `json:"source_url"`
-	Title             string    `json:"title"`
-	Author            string    `json:"author"`
-	SourceDomain      string    `json:"source_domain"`
-	Status            string    `json:"status"`
+	ID           string `json:"id"`
+	SourceURL    string `json:"source_url"`
+	Title        string `json:"title"`
+	Author       string `json:"author"`
+	SourceDomain string `json:"source_domain"`
+	Status       string `json:"status"`
+	// Pinned keeps the article at the top of the library (see Article.Pinned).
+	Pinned            bool      `json:"pinned"`
 	CreatedAt         time.Time `json:"created_at"`
 	EnrichedAt        time.Time `json:"enriched_at,omitzero"`
 	EnrichmentVersion int       `json:"enrichment_version"`

@@ -13,6 +13,7 @@ import {
 	OfflineError,
 	ApiError,
 	patchSettings,
+	pinArticle as apiPinArticle,
 	putProgress,
 	retryArticle as apiRetryArticle
 } from '$lib/api';
@@ -181,6 +182,11 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 			await apiRetryArticle(id);
 			return;
 		}
+		case 'pin': {
+			const { id, pinned } = entry.payload as { id: string; pinned: boolean };
+			await apiPinArticle(id, pinned);
+			return;
+		}
 		default: {
 			// Exhaustiveness guard — drop unknown kinds.
 			const _exhaustive: never = entry.kind as never;
@@ -292,6 +298,24 @@ export async function enqueueRetry(id: string): Promise<void> {
 	}
 
 	await enqueueOutbox('retry', { id });
+
+	if (isOnline()) sync().catch(console.warn);
+}
+
+/**
+ * Enqueue a pin/unpin toggle and optimistically update the local article meta.
+ * The server stamps updated_at on the change, so the authoritative pinned state
+ * is reconciled on the next pull. flushOutbox runs before pull in each sync(),
+ * so the optimistic value is confirmed rather than overwritten in the online case.
+ */
+export async function enqueuePin(id: string, pinned: boolean): Promise<void> {
+	// Optimistic update.
+	const meta = await db.articles_meta.get(id);
+	if (meta) {
+		await db.articles_meta.put({ ...meta, pinned });
+	}
+
+	await enqueueOutbox('pin', { id, pinned });
 
 	if (isOnline()) sync().catch(console.warn);
 }

@@ -63,6 +63,15 @@ func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
+	a, ok := f.byID[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.Pinned = pinned
+	return nil
+}
+
 func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpdate) error {
 	a, ok := f.byID[id]
 	if !ok {

@@ -21,7 +21,13 @@ import type {
 // ---------------------------------------------------------------------------
 
 /** Discriminator for a queued offline write. */
-export type OutboxKind = 'progress' | 'settings' | 'add_article' | 'delete_article' | 'retry';
+export type OutboxKind =
+	| 'progress'
+	| 'settings'
+	| 'add_article'
+	| 'delete_article'
+	| 'retry'
+	| 'pin';
 
 /** Payload shapes keyed by outbox kind. */
 export interface OutboxPayloadMap {
@@ -30,6 +36,7 @@ export interface OutboxPayloadMap {
 	add_article: { url: string };
 	delete_article: { id: string };
 	retry: { id: string };
+	pin: { id: string; pinned: boolean };
 }
 
 /** A single queued offline write. `id` is the auto-increment insertion order. */

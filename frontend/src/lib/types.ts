@@ -123,6 +123,8 @@ export interface ArticleMeta {
 	source_domain: string;
 	lang: string;
 	status: Status;
+	/** User flag keeping the article at the top of the library. Synced as metadata. */
+	pinned: boolean;
 	enrichment_version: number;
 	/** Present when `status` is `fetch_failed` or `enrich_failed`. */
 	error?: string;
