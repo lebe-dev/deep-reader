@@ -38,12 +38,27 @@ const (
 	// retries; the reason is stored in Article.Error. Retry re-runs only the
 	// enrichment stage (the fetched content is preserved).
 	StatusEnrichFailed = "enrich_failed"
+	// StatusTopupQueued marks an already-enriched article that the user asked to
+	// "top up": only the token spans not yet covered by any sentence translation
+	// are re-sent to the LLM and the result is merged into the existing
+	// enrichment (see enrich.Pool.runTopUp). The existing enrichment blob is
+	// preserved until the merge completes.
+	StatusTopupQueued = "topup_queued"
 )
 
 // WorkStatuses is the set of statuses the enrichment worker picks up. It
 // includes the in-flight states so a stuck article (server crashed mid-stage)
-// is re-processed: queued/fetching need fetch, fetched/enriching need enrich.
-var WorkStatuses = []string{StatusQueued, StatusFetching, StatusFetched, StatusEnriching}
+// is re-processed: queued/fetching need fetch, fetched/enriching need enrich;
+// topup_queued needs an incremental (gap-filling) enrich.
+var WorkStatuses = []string{StatusQueued, StatusFetching, StatusFetched, StatusEnriching, StatusTopupQueued}
+
+// Re-enrichment modes for the user-triggered "improve translation" action (see
+// ports.Store.ReEnrich). Full re-translates the whole article; Topup fills only
+// the spans no sentence covers yet.
+const (
+	ReEnrichModeFull  = "full"
+	ReEnrichModeTopup = "topup"
+)
 
 // CEFR proficiency levels. These are the legal values for Settings.CEFRLevel
 // and Settings.MinDifficultyToHighlight, and for DifficultWord.CEFRLevel.
@@ -174,6 +189,15 @@ type Sentence struct {
 type GlossaryItem struct {
 	Term       string `json:"term"`
 	Definition string `json:"definition"`
+}
+
+// Span is a contiguous, inclusive range of token indices [Start, End]. It is
+// used to drive incremental ("top up") enrichment: the spans of tokens left
+// uncovered by the current sentence translations are the only ranges re-sent to
+// the LLM (see enrich.uncoveredSpans and llm.Client.EnrichSpans).
+type Span struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // User is the single built-in account. PasswordHash is a bcrypt hash and is
@@ -382,4 +406,11 @@ type AddArticleRequest struct {
 type AddArticleResponse struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+}
+
+// ReEnrichRequest is the POST /api/articles/:id/reenrich body. Mode selects a
+// full re-translate (ReEnrichModeFull) or an incremental gap fill
+// (ReEnrichModeTopup).
+type ReEnrichRequest struct {
+	Mode string `json:"mode"`
 }

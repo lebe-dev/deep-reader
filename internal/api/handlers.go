@@ -192,6 +192,42 @@ func (s *Server) retryArticle(c fiber.Ctx) error {
 	})
 }
 
+// reEnrichArticle handles POST /api/articles/:id/reenrich, re-running enrichment
+// for an already-enriched article. Body: {mode: "full"|"topup"}. "full"
+// re-translates the whole article from scratch (keeping the fetched content);
+// "topup" only fills the spans no sentence covers yet. It returns the article's
+// resulting status. Unknown ids return 404; an invalid mode returns 400.
+func (s *Server) reEnrichArticle(c fiber.Ctx) error {
+	id := c.Params("id")
+
+	var req model.ReEnrichRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Mode != model.ReEnrichModeFull && req.Mode != model.ReEnrichModeTopup {
+		return sendError(c, fiber.StatusBadRequest, "mode must be \"full\" or \"topup\"")
+	}
+
+	if err := s.ingest.ReEnrich(c.Context(), id, req.Mode); err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return sendError(c, fiber.StatusNotFound, "article not found")
+		}
+		return s.serverError(c, "re-enrich article", err)
+	}
+
+	// Reflect the post-trigger status (fetched for a full re-translate,
+	// topup_queued for an incremental fill) so the client can update its
+	// optimistic state.
+	status := model.StatusFetched
+	if a, err := s.store.GetArticle(c.Context(), id); err == nil {
+		status = a.Status
+	}
+	return c.Status(fiber.StatusAccepted).JSON(model.AddArticleResponse{
+		ID:     id,
+		Status: status,
+	})
+}
+
 // putProgress handles PUT /api/articles/:id/progress. Body:
 // {position,is_read,updated_at}. The store applies LWW on UpdatedAt; the
 // response reports whether the incoming record won via {applied: bool}.

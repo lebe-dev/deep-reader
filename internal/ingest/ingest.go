@@ -145,6 +145,19 @@ func (ing *Ingestor) Retry(ctx context.Context, id string) error {
 	return nil
 }
 
+// ReEnrich re-runs enrichment for an already-enriched article and notifies the
+// worker. mode "full" re-translates the whole article from scratch (keeping the
+// fetched content), mode "topup" only fills the spans left uncovered by the
+// current sentence translations. Returns [ports.ErrNotFound] for an unknown id.
+func (ing *Ingestor) ReEnrich(ctx context.Context, id, mode string) error {
+	if err := ing.store.ReEnrich(ctx, id, mode); err != nil {
+		return err // preserve ErrNotFound
+	}
+	slog.Info("ingest: article queued for re-enrich", "article_id", id, "mode", mode)
+	ing.worker.Notify()
+	return nil
+}
+
 // hostOf returns the host of a normalized URL, or "" if it cannot be parsed.
 // Used to seed SourceDomain before the fetch stage resolves the real domain.
 func hostOf(normalized string) string {

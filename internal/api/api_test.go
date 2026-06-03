@@ -37,6 +37,7 @@ type fakeStore struct {
 	getPayloadErr  error
 	deleteErr      error
 	retryErr       error
+	reEnrichErr    error
 	upsertApplied  bool
 	upsertErr      error
 	lastUpsert     model.Progress
@@ -104,6 +105,8 @@ func (f *fakeStore) ListProgress(context.Context, time.Time) ([]model.Progress, 
 }
 func (f *fakeStore) RetryArticle(context.Context, string) error { return f.retryErr }
 
+func (f *fakeStore) ReEnrich(context.Context, string, string) error { return f.reEnrichErr }
+
 func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
 	f.lastPinID = id
 	f.lastPinned = pinned
@@ -157,9 +160,11 @@ func (f *fakeStore) DeleteSession(_ context.Context, tokenHash string) error {
 
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
-	add        func(string) (*model.Article, error)
-	retry      func(string) error
-	lastAddURL string
+	add          func(string) (*model.Article, error)
+	retry        func(string) error
+	reEnrich     func(string, string) error
+	lastAddURL   string
+	lastReEnrich [2]string
 }
 
 func (f *fakeIngestor) Add(_ context.Context, rawURL string) (*model.Article, error) {
@@ -173,6 +178,14 @@ func (f *fakeIngestor) Add(_ context.Context, rawURL string) (*model.Article, er
 func (f *fakeIngestor) Retry(_ context.Context, id string) error {
 	if f.retry != nil {
 		return f.retry(id)
+	}
+	return nil
+}
+
+func (f *fakeIngestor) ReEnrich(_ context.Context, id, mode string) error {
+	f.lastReEnrich = [2]string{id, mode}
+	if f.reEnrich != nil {
+		return f.reEnrich(id, mode)
 	}
 	return nil
 }
@@ -787,6 +800,46 @@ func TestRetry(t *testing.T) {
 		ing := &fakeIngestor{retry: func(string) error { return ports.ErrNotFound }}
 		s := newTestServer(t, &fakeStore{}, ing)
 		resp := doReq(t, s, http.MethodPost, "/api/articles/missing/retry", nil, testToken)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+}
+
+func TestReEnrich(t *testing.T) {
+	t.Run("full ok", func(t *testing.T) {
+		ing := &fakeIngestor{}
+		s := newTestServer(t, &fakeStore{}, ing)
+		resp := doReq(t, s, http.MethodPost, "/api/articles/a1/reenrich", map[string]string{"mode": "full"}, testToken)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", resp.StatusCode)
+		}
+		if ing.lastReEnrich != [2]string{"a1", "full"} {
+			t.Errorf("ingestor got %v, want [a1 full]", ing.lastReEnrich)
+		}
+	})
+	t.Run("topup ok", func(t *testing.T) {
+		ing := &fakeIngestor{}
+		s := newTestServer(t, &fakeStore{}, ing)
+		resp := doReq(t, s, http.MethodPost, "/api/articles/a1/reenrich", map[string]string{"mode": "topup"}, testToken)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", resp.StatusCode)
+		}
+		if ing.lastReEnrich != [2]string{"a1", "topup"} {
+			t.Errorf("ingestor got %v, want [a1 topup]", ing.lastReEnrich)
+		}
+	})
+	t.Run("invalid mode", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodPost, "/api/articles/a1/reenrich", map[string]string{"mode": "bogus"}, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+	t.Run("not found", func(t *testing.T) {
+		ing := &fakeIngestor{reEnrich: func(string, string) error { return ports.ErrNotFound }}
+		s := newTestServer(t, &fakeStore{}, ing)
+		resp := doReq(t, s, http.MethodPost, "/api/articles/missing/reenrich", map[string]string{"mode": "full"}, testToken)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", resp.StatusCode)
 		}

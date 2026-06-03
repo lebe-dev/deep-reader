@@ -13,7 +13,8 @@ import type {
 	ServerInfo,
 	Settings,
 	SettingsPatch,
-	ProgressUpdate
+	ProgressUpdate,
+	ReEnrichMode
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,7 @@ export type OutboxKind =
 	| 'add_article'
 	| 'delete_article'
 	| 'retry'
+	| 'reenrich'
 	| 'pin';
 
 /** Payload shapes keyed by outbox kind. */
@@ -36,6 +38,7 @@ export interface OutboxPayloadMap {
 	add_article: { url: string };
 	delete_article: { id: string };
 	retry: { id: string };
+	reenrich: { id: string; mode: ReEnrichMode };
 	pin: { id: string; pinned: boolean };
 }
 

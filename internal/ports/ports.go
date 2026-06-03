@@ -192,6 +192,14 @@ type Store interface {
 	// does not exist.
 	RetryArticle(ctx context.Context, id string) error
 
+	// ReEnrich queues an already-enriched article for re-enrichment. mode
+	// model.ReEnrichModeFull resets status to fetched (re-translate the whole
+	// article, keeping the fetched content); mode model.ReEnrichModeTopup sets
+	// status to topup_queued and keeps the existing enrichment blob so the worker
+	// can merge in only the missing spans. Returns ErrNotFound if the article
+	// does not exist.
+	ReEnrich(ctx context.Context, id, mode string) error
+
 	// SetPinned sets the article's pinned flag (a user library flag) and bumps
 	// UpdatedAt so the change is carried by the next delta sync. Returns
 	// ErrNotFound if the article does not exist.
@@ -223,6 +231,13 @@ type LLMClient interface {
 	// enrichment payload and provider usage. It performs one attempt; retry and
 	// backoff are the caller's (enrich.Pool's) responsibility.
 	Enrich(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int) (*model.Enrichment, Usage, error)
+
+	// EnrichSpans performs a single incremental ("top up") enrichment call: it
+	// annotates only the supplied token spans (the ranges left uncovered by the
+	// current sentence translations), leaving the rest of the article untouched.
+	// The caller merges the returned partial enrichment into the existing one.
+	// Like Enrich, it performs exactly one attempt.
+	EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, Usage, error)
 }
 
 // Usage is the provider token-accounting for a single LLM call, logged for cost
@@ -278,6 +293,12 @@ type Ingestor interface {
 	// Retry resumes a failed article from the stage that failed (re-fetch or
 	// re-enrich) and notifies the worker. Returns ErrNotFound for an unknown id.
 	Retry(ctx context.Context, id string) error
+
+	// ReEnrich re-runs enrichment for an already-enriched article and notifies
+	// the worker. mode is model.ReEnrichModeFull (re-translate everything) or
+	// model.ReEnrichModeTopup (fill only the uncovered spans). Returns
+	// ErrNotFound for an unknown id.
+	ReEnrich(ctx context.Context, id, mode string) error
 }
 
 // EnrichmentWorker is the async enrichment worker pool. Concrete constructor:

@@ -167,7 +167,120 @@ func (p *Pool) processArticle(ctx context.Context, workerID int, a *model.Articl
 		}
 	}
 
+	if a.Status == model.StatusTopupQueued {
+		p.runTopUp(ctx, log, a)
+		return
+	}
+
 	p.runEnrich(ctx, log, a)
+}
+
+// runTopUp performs the incremental ("top up") enrichment stage: it loads the
+// existing enrichment, computes the token spans no sentence covers yet, asks the
+// LLM to annotate only those gaps, merges the result into the existing
+// enrichment, and persists it (status=enriched). When there are no gaps it just
+// restores the enriched state. On terminal failure it records
+// status=enrich_failed. Retries with back-off mirror runEnrich.
+func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article) {
+	settings, err := p.store.GetSettings(ctx)
+	if err != nil {
+		log.Error("enrich: topup get settings failed", "err", err)
+		return
+	}
+
+	payload, err := p.store.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			log.Info("enrich: article deleted before topup, skipping")
+			return
+		}
+		log.Error("enrich: topup get payload failed", "err", err)
+		return
+	}
+	var existing model.Enrichment
+	if payload.Enrichment != nil {
+		existing = *payload.Enrichment
+	}
+
+	tokens := a.Tokens
+	if len(tokens) == 0 {
+		tokens = payload.Tokens
+	}
+
+	spans := uncoveredSpans(existing, len(tokens))
+	if len(spans) == 0 {
+		// Already fully covered — nothing to add. Restore the enriched state so
+		// the article leaves the work queue (SaveEnrichment recomputes coverage).
+		if err := p.store.SaveEnrichment(ctx, a.ID, existing, time.Now().UTC()); err != nil && !errors.Is(err, ports.ErrNotFound) {
+			log.Error("enrich: topup save (no gaps) failed", "err", err)
+		}
+		log.Info("enrich: topup found no uncovered spans, nothing to do")
+		return
+	}
+
+	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
+
+	maxRetries := p.cfg.LLMMaxRetries
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return
+		}
+
+		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, spans)
+		if err != nil {
+			lastErr = err
+			if isRetryable(err) {
+				log.Warn("enrich: topup transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
+				continue
+			}
+			log.Error("enrich: topup permanent error", "err", err)
+			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+			return
+		}
+		if addition == nil {
+			addition = &model.Enrichment{}
+		}
+
+		merged := mergeEnrichment(existing, *addition)
+
+		// Validate the merged result (additions may carry out-of-range indices).
+		if valErr := validateEnrichment(&merged, tokens); valErr != nil {
+			lastErr = valErr
+			log.Warn("enrich: topup validation failed, will retry", "attempt", attempt, "max_retries", maxRetries, "err", valErr)
+			continue
+		}
+
+		if err := p.store.SaveEnrichment(ctx, a.ID, merged, time.Now().UTC()); err != nil {
+			if errors.Is(err, ports.ErrNotFound) {
+				log.Info("enrich: article deleted during topup, skipping")
+				return
+			}
+			lastErr = err
+			log.Error("enrich: topup save enrichment failed", "err", err)
+			if isRetryable(err) {
+				continue
+			}
+			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+			return
+		}
+
+		log.Info("enrich: article topped up (incremental)",
+			"spans", len(spans),
+			"prompt_tokens", usage.PromptTokens,
+			"completion_tokens", usage.CompletionTokens,
+			"total_tokens", usage.TotalTokens,
+		)
+		return
+	}
+
+	log.Error("enrich: topup retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
+	if lastErr != nil {
+		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
+	}
 }
 
 // runFetch performs the fetch/extract stage: it flips the article to
@@ -507,6 +620,127 @@ func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// uncoveredSpans returns the contiguous, inclusive token-index ranges in
+// [0, tokenCount) that no sentence in e covers. It mirrors
+// store.sentenceCoverage's covered-set computation (a token is covered when it
+// falls within at least one sentence range) and returns the complementary gaps —
+// the only ranges the incremental ("top up") enrich re-sends to the LLM. Returns
+// nil when tokenCount <= 0 or every token is already covered.
+func uncoveredSpans(e model.Enrichment, tokenCount int) []model.Span {
+	if tokenCount <= 0 {
+		return nil
+	}
+	covered := make([]bool, tokenCount)
+	for _, s := range e.Sentences {
+		start := max(s.StartIndex, 0)
+		end := min(s.EndIndex, tokenCount-1)
+		for i := start; i <= end; i++ {
+			covered[i] = true
+		}
+	}
+
+	var spans []model.Span
+	for i := 0; i < tokenCount; {
+		if covered[i] {
+			i++
+			continue
+		}
+		start := i
+		for i < tokenCount && !covered[i] {
+			i++
+		}
+		spans = append(spans, model.Span{Start: start, End: i - 1})
+	}
+	return spans
+}
+
+// mergeEnrichment combines an existing enrichment with the additions from an
+// incremental ("top up") enrich pass. It is additive and the existing data
+// always wins on conflict, so re-running a top up is idempotent:
+//   - difficult_words: append additions for token indices not already present.
+//   - phrases: append additions whose [start,end] range is not already present.
+//   - glossary: append additions for terms not already present.
+//   - sentences: append additions that do not overlap any token already covered
+//     by an existing sentence, keeping the sentence set non-overlapping (the
+//     reader maps each token to a single sentence).
+//
+// The returned enrichment uses fresh slices so the inputs are never mutated.
+func mergeEnrichment(existing, addition model.Enrichment) model.Enrichment {
+	merged := model.Enrichment{
+		DifficultWords: append([]model.DifficultWord(nil), existing.DifficultWords...),
+		Phrases:        append([]model.Phrase(nil), existing.Phrases...),
+		Sentences:      append([]model.Sentence(nil), existing.Sentences...),
+		Glossary:       append([]model.GlossaryItem(nil), existing.Glossary...),
+	}
+
+	seenWord := make(map[int]bool, len(existing.DifficultWords))
+	for _, w := range existing.DifficultWords {
+		seenWord[w.TokenIndex] = true
+	}
+	for _, w := range addition.DifficultWords {
+		if seenWord[w.TokenIndex] {
+			continue
+		}
+		seenWord[w.TokenIndex] = true
+		merged.DifficultWords = append(merged.DifficultWords, w)
+	}
+
+	type phraseKey struct{ start, end int }
+	seenPhrase := make(map[phraseKey]bool, len(existing.Phrases))
+	for _, ph := range existing.Phrases {
+		seenPhrase[phraseKey{ph.StartIndex, ph.EndIndex}] = true
+	}
+	for _, ph := range addition.Phrases {
+		key := phraseKey{ph.StartIndex, ph.EndIndex}
+		if seenPhrase[key] {
+			continue
+		}
+		seenPhrase[key] = true
+		merged.Phrases = append(merged.Phrases, ph)
+	}
+
+	seenTerm := make(map[string]bool, len(existing.Glossary))
+	for _, g := range existing.Glossary {
+		seenTerm[g.Term] = true
+	}
+	for _, g := range addition.Glossary {
+		if seenTerm[g.Term] {
+			continue
+		}
+		seenTerm[g.Term] = true
+		merged.Glossary = append(merged.Glossary, g)
+	}
+
+	covered := make(map[int]bool)
+	for _, s := range existing.Sentences {
+		for i := s.StartIndex; i <= s.EndIndex; i++ {
+			covered[i] = true
+		}
+	}
+	for _, s := range addition.Sentences {
+		if sentenceOverlaps(covered, s) {
+			continue
+		}
+		merged.Sentences = append(merged.Sentences, s)
+		for i := s.StartIndex; i <= s.EndIndex; i++ {
+			covered[i] = true
+		}
+	}
+
+	return merged
+}
+
+// sentenceOverlaps reports whether any token in s's inclusive range is already
+// marked covered.
+func sentenceOverlaps(covered map[int]bool, s model.Sentence) bool {
+	for i := s.StartIndex; i <= s.EndIndex; i++ {
+		if covered[i] {
+			return true
+		}
+	}
+	return false
+}
 
 // joinTokenText concatenates the text of tokens [start, end] (inclusive) with a
 // single space between each. The range is assumed valid (callers validate

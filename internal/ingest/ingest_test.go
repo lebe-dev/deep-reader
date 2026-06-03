@@ -63,6 +63,19 @@ func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) ReEnrich(_ context.Context, id, mode string) error {
+	a, ok := f.byID[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	if mode == model.ReEnrichModeTopup {
+		a.Status = model.StatusTopupQueued
+	} else {
+		a.Status = model.StatusFetched
+	}
+	return nil
+}
+
 func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
 	a, ok := f.byID[id]
 	if !ok {

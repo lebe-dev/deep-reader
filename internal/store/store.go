@@ -512,7 +512,7 @@ func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, erro
                       original_text, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned
                FROM articles
-               WHERE status IN ('queued','fetching','fetched','enriching')
+               WHERE status IN ('queued','fetching','fetched','enriching','topup_queued')
                ORDER BY created_at ASC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, limit)
 	if err != nil {
@@ -597,6 +597,36 @@ func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 		return ports.ErrNotFound
 	}
 	slog.Debug("store: article queued for retry", "article_id", id)
+	return nil
+}
+
+// ReEnrich queues an already-enriched article for re-enrichment. For
+// model.ReEnrichModeTopup it sets status=topup_queued and KEEPS the existing
+// enrichment blob (the worker merges in only the uncovered spans). For any other
+// mode (the full re-translate) it resets status=fetched and clears enriched_at —
+// the fetched content is preserved but the enrichment is regenerated and
+// replaced wholesale by SaveEnrichment. In both cases the error is cleared and
+// updated_at bumped so the change rides the next delta sync. Returns
+// [ports.ErrNotFound] if the article does not exist.
+func (s *SQLite) ReEnrich(ctx context.Context, id, mode string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	var q string
+	if mode == model.ReEnrichModeTopup {
+		q = `UPDATE articles SET status='topup_queued', error='', updated_at=? WHERE id=?`
+	} else {
+		q = `UPDATE articles SET status='fetched', error='', enriched_at='', updated_at=? WHERE id=?`
+	}
+	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: ReEnrich: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article queued for re-enrich", "article_id", id, "mode", mode)
 	return nil
 }
 

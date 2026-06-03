@@ -635,3 +635,52 @@ func TestEnrich_UsesCustomPromptWithPlaceholders(t *testing.T) {
 		t.Error("default prompt leaked into custom prompt output")
 	}
 }
+
+// TestEnrichSpans_RestrictsToRanges verifies the incremental prompt carries the
+// requested span ranges and that the response is decoded like a normal enrich.
+func TestEnrichSpans_RestrictsToRanges(t *testing.T) {
+	var systemPrompt, userPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		for _, m := range body.Messages {
+			switch m.Role {
+			case "system":
+				systemPrompt = m.Content
+			case "user":
+				userPrompt = m.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buildCannedResponse(t))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	spans := []model.Span{{Start: 1, End: 3}}
+	enr, _, err := client.EnrichSpans(context.Background(), testArticle(), testSettings(), 1, spans)
+	if err != nil {
+		t.Fatalf("EnrichSpans: %v", err)
+	}
+	if enr == nil || len(enr.Sentences) != 1 {
+		t.Fatalf("expected decoded enrichment with 1 sentence, got %+v", enr)
+	}
+
+	// Both prompts must reference the requested range so the model restricts itself.
+	if !strings.Contains(systemPrompt, "INCREMENTAL MODE") {
+		t.Error("system prompt missing incremental-mode directive")
+	}
+	if !strings.Contains(systemPrompt, "[1-3]") {
+		t.Errorf("system prompt missing span range [1-3]: %q", systemPrompt)
+	}
+	if !strings.Contains(userPrompt, "[1-3]") {
+		t.Errorf("user prompt missing span range [1-3]: %q", userPrompt)
+	}
+}

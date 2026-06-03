@@ -85,8 +85,24 @@ func (f *fakeStore) GetArticle(_ context.Context, id string) (*model.Article, er
 	return &cp, nil
 }
 
-func (f *fakeStore) GetArticlePayload(_ context.Context, _ string) (*model.ArticlePayload, error) {
-	return nil, ports.ErrNotFound
+func (f *fakeStore) GetArticlePayload(_ context.Context, id string) (*model.ArticlePayload, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return nil, ports.ErrNotFound
+	}
+	p := &model.ArticlePayload{
+		ID:     a.ID,
+		Status: a.Status,
+		Title:  a.Title,
+		Tokens: a.Tokens,
+	}
+	if e, ok := f.enrichments[id]; ok {
+		ec := e
+		p.Enrichment = &ec
+	}
+	return p, nil
 }
 
 func (f *fakeStore) DeleteArticle(_ context.Context, id string) error {
@@ -152,7 +168,7 @@ func (f *fakeStore) ListWork(_ context.Context, limit int) ([]model.Article, err
 	var out []model.Article
 	for _, a := range f.articles {
 		switch a.Status {
-		case model.StatusQueued, model.StatusFetching, model.StatusFetched, model.StatusEnriching:
+		case model.StatusQueued, model.StatusFetching, model.StatusFetched, model.StatusEnriching, model.StatusTopupQueued:
 			out = append(out, *a)
 			if len(out) >= limit {
 				return out, nil
@@ -181,6 +197,22 @@ func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 		a.Status = model.StatusFetched
 	} else {
 		a.Status = model.StatusQueued
+	}
+	a.Error = ""
+	return nil
+}
+
+func (f *fakeStore) ReEnrich(_ context.Context, id, mode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	if mode == "topup" {
+		a.Status = model.StatusTopupQueued
+	} else {
+		a.Status = model.StatusFetched
 	}
 	a.Error = ""
 	return nil
@@ -332,6 +364,35 @@ type fakeLLM struct {
 	// onEnrich, if set, runs at the start of each Enrich call. Used by tests to
 	// inject side effects (e.g. deleting the article mid-enrichment).
 	onEnrich func()
+	// spanResult is returned by EnrichSpans on success; when nil, result is used.
+	spanResult *model.Enrichment
+	// spanCalls counts EnrichSpans invocations and lastSpans captures the most
+	// recent spans argument.
+	spanCalls int
+	lastSpans []model.Span
+}
+
+func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Settings, _ int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callCount++
+	f.spanCalls++
+	f.lastSpans = spans
+	if f.callCount <= f.failN {
+		return nil, ports.Usage{}, f.failErr
+	}
+	res := f.spanResult
+	if res == nil {
+		res = f.result
+	}
+	return res, ports.Usage{PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10}, nil
+}
+
+// spanCallCount returns how many times EnrichSpans was invoked.
+func (f *fakeLLM) spanCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spanCalls
 }
 
 func (f *fakeLLM) Enrich(_ context.Context, _ *model.Article, _ model.Settings, _ int) (*model.Enrichment, ports.Usage, error) {

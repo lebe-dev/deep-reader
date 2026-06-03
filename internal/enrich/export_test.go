@@ -21,3 +21,13 @@ func BackoffDuration(attempt int, base, cap time.Duration) time.Duration {
 func IsRetryable(err error) bool {
 	return isRetryable(err)
 }
+
+// UncoveredSpans exposes the unexported uncoveredSpans for unit tests.
+func UncoveredSpans(e model.Enrichment, tokenCount int) []model.Span {
+	return uncoveredSpans(e, tokenCount)
+}
+
+// MergeEnrichment exposes the unexported mergeEnrichment for unit tests.
+func MergeEnrichment(existing, addition model.Enrichment) model.Enrichment {
+	return mergeEnrichment(existing, addition)
+}

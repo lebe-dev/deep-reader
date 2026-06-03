@@ -15,9 +15,10 @@ import {
 	patchSettings,
 	pinArticle as apiPinArticle,
 	putProgress,
+	reEnrichArticle as apiReEnrichArticle,
 	retryArticle as apiRetryArticle
 } from '$lib/api';
-import type { Progress, ProgressUpdate, SettingsPatch } from '$lib/types';
+import type { Progress, ProgressUpdate, ReEnrichMode, SettingsPatch } from '$lib/types';
 
 // ---------------------------------------------------------------------------
 // pull — server → local diff
@@ -96,7 +97,10 @@ export async function pull(): Promise<void> {
 
 		// Swallow OfflineError mid-pull; the next pull will retry.
 		try {
-			const payload = await apiGetArticle(meta.id);
+			// Cache-bust by updated_at so a re-enriched article (same
+			// enrichment_version) is fetched fresh rather than served from the
+			// immutable HTTP cache.
+			const payload = await apiGetArticle(meta.id, undefined, { version: meta.updated_at });
 			await db.articles_payload.put(payload);
 		} catch (err) {
 			if (err instanceof OfflineError) break; // stop trying; no network
@@ -180,6 +184,11 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 		case 'retry': {
 			const { id } = entry.payload as { id: string };
 			await apiRetryArticle(id);
+			return;
+		}
+		case 'reenrich': {
+			const { id, mode } = entry.payload as { id: string; mode: ReEnrichMode };
+			await apiReEnrichArticle(id, mode);
 			return;
 		}
 		case 'pin': {
@@ -298,6 +307,30 @@ export async function enqueueRetry(id: string): Promise<void> {
 	}
 
 	await enqueueOutbox('retry', { id });
+
+	if (isOnline()) sync().catch(console.warn);
+}
+
+/**
+ * Enqueue a user-triggered re-enrichment and optimistically reflect the
+ * processing state. `full` re-translates the whole article (status → fetched),
+ * `topup` fills only the uncovered spans (status → topup_queued / enriching).
+ *
+ * The cached payload is deleted so the reader re-fetches the fresh translation
+ * once it completes: the server keeps the same enrichment_version on a re-run,
+ * so the version-based cache check in pull() would otherwise keep the stale
+ * payload. The authoritative status is reconciled on the next sync.
+ */
+export async function enqueueReEnrich(id: string, mode: ReEnrichMode): Promise<void> {
+	// Optimistic status update + cache-bust so the stale translation is not shown.
+	const meta = await db.articles_meta.get(id);
+	if (meta) {
+		const status = mode === 'topup' ? 'enriching' : 'fetched';
+		await db.articles_meta.put({ ...meta, status });
+	}
+	await db.articles_payload.delete(id);
+
+	await enqueueOutbox('reenrich', { id, mode });
 
 	if (isOnline()) sync().catch(console.warn);
 }

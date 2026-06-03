@@ -15,6 +15,7 @@
 //	POST   /api/articles                    {url} -> {id,status} (rate limited)
 //	DELETE /api/articles/:id                remove from library
 //	POST   /api/articles/:id/retry          resume failed article from its stage
+//	POST   /api/articles/:id/reenrich       {mode:full|topup} -> re-run enrichment
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
 //	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
 //	PATCH  /api/settings                    partial settings update
@@ -157,6 +158,7 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Post("/articles", s.addArticle, s.ingestRateLimiter())
 	api.Delete("/articles/:id", s.deleteArticle)
 	api.Post("/articles/:id/retry", s.retryArticle)
+	api.Post("/articles/:id/reenrich", s.reEnrichArticle)
 	api.Put("/articles/:id/progress", s.putProgress)
 	api.Put("/articles/:id/pin", s.setPinned)
 

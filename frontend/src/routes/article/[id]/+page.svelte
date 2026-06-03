@@ -9,11 +9,12 @@
 
 	import { page } from '$app/state';
 	import { browser } from '$app/environment';
+	import { onDestroy } from 'svelte';
 	import { db } from '$lib/db';
 	import { getArticle } from '$lib/api';
-	import { enqueueProgress, enqueuePin } from '$lib/sync/engine';
+	import { enqueueProgress, enqueuePin, enqueueReEnrich } from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
-	import type { ArticleMeta, ArticlePayload, Progress } from '$lib/types';
+	import type { ArticleMeta, ArticlePayload, Progress, ReEnrichMode } from '$lib/types';
 	import TokenRenderer from '$lib/components/reader/TokenRenderer.svelte';
 	import WordPopover from '$lib/components/reader/WordPopover.svelte';
 	import SentenceSheet from '$lib/components/reader/SentenceSheet.svelte';
@@ -21,9 +22,11 @@
 	import { debounce } from '$lib/components/reader/reader-utils';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
 	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
-	import { Button } from '$lib/components/ui/button';
+	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Skeleton } from '$lib/components/ui/skeleton';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+	import { toast } from 'svelte-sonner';
 	import BookOpenCheckIcon from '@lucide/svelte/icons/book-open-check';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import PinIcon from '@lucide/svelte/icons/pin';
@@ -31,6 +34,10 @@
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
 	import AlertCircleIcon from '@lucide/svelte/icons/circle-alert';
+	import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
+	import LanguagesIcon from '@lucide/svelte/icons/languages';
+	import ListPlusIcon from '@lucide/svelte/icons/list-plus';
+	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 
 	// ---------------------------------------------------------------------------
 	// Route param
@@ -42,10 +49,12 @@
 	// State
 	// ---------------------------------------------------------------------------
 
-	type LoadState = 'loading' | 'ready' | 'offline' | 'error' | 'not-enriched';
+	type LoadState = 'loading' | 'ready' | 'offline' | 'error' | 'not-enriched' | 'reenriching';
 
 	let loadState: LoadState = $state('loading');
 	let errorMessage: string | undefined = $state();
+	// The mode of an in-flight re-enrichment, for the processing-state copy.
+	let reEnrichMode: ReEnrichMode | undefined = $state();
 
 	let meta: ArticleMeta | undefined = $state();
 	let payload: ArticlePayload | undefined = $state();
@@ -93,7 +102,9 @@
 		}
 
 		try {
-			const fetched = await getArticle(id);
+			// Cache-bust by updated_at so a re-enrich (same enrichment_version) is
+			// fetched fresh rather than served from the immutable HTTP cache.
+			const fetched = await getArticle(id, undefined, { version: cachedMeta?.updated_at });
 
 			if (fetched.status !== 'enriched') {
 				loadState = 'not-enriched';
@@ -114,6 +125,77 @@
 			errorMessage = err instanceof Error ? err.message : String(err);
 			loadState = 'error';
 		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Re-enrich (improve translation) + auto-polling
+	// ---------------------------------------------------------------------------
+
+	// "Top up" only makes sense while some text is still uncovered.
+	const canTopUp = $derived(coverage !== null && coverage < 1);
+
+	const POLL_INTERVAL_MS = 4000;
+	const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+	let pollTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function stopPolling() {
+		if (pollTimer) {
+			clearTimeout(pollTimer);
+			pollTimer = undefined;
+		}
+	}
+
+	// Poll the article until it is enriched again, then swap in the fresh payload.
+	// Uses no-store to bypass the immutable HTTP cache on the enriched payload.
+	function startPolling(id: string) {
+		stopPolling();
+		const startedAt = Date.now();
+
+		const tick = async () => {
+			pollTimer = undefined;
+			if (id !== currentId) return; // navigated away
+			if (!navigator.onLine) {
+				pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+				return;
+			}
+			try {
+				const fetched = await getArticle(id, undefined, { noStore: true });
+				if (fetched.status === 'enriched') {
+					await db.articles_payload.put(fetched);
+					payload = fetched;
+					progress = await db.progress.get(id);
+					meta = (await db.articles_meta.get(id)) ?? meta;
+					loadState = 'ready';
+					reEnrichMode = undefined;
+					return;
+				}
+			} catch {
+				// 409 (still processing) and offline errors are expected — keep polling.
+			}
+			if (id !== currentId) return;
+			if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+				errorMessage = 'Re-enrichment is taking longer than expected. Check back later.';
+				loadState = 'error';
+				reEnrichMode = undefined;
+				return;
+			}
+			pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+		};
+
+		pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+	}
+
+	async function handleReEnrich(mode: ReEnrichMode) {
+		if (!articleId) return;
+		const id = articleId;
+		loadState = 'reenriching';
+		reEnrichMode = mode;
+		try {
+			await enqueueReEnrich(id, mode);
+		} catch {
+			toast.error('Failed to start re-enrichment.');
+		}
+		startPolling(id);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -212,8 +294,12 @@
 		const id = articleId;
 		if (!id || id === currentId) return;
 		currentId = id;
+		stopPolling();
+		reEnrichMode = undefined;
 		loadArticle(id).catch(console.error);
 	});
+
+	onDestroy(stopPolling);
 </script>
 
 <svelte:head>
@@ -253,6 +339,17 @@
 		<h2 class="text-lg font-semibold">Not ready yet</h2>
 		<p class="text-muted-foreground max-w-xs text-sm">
 			This article is still being processed. Check back in a moment.
+		</p>
+		<Button variant="outline" href="/">Back to library</Button>
+	</div>
+{:else if loadState === 'reenriching'}
+	<div class="flex flex-col items-center gap-4 py-16 text-center">
+		<LoaderCircleIcon class="text-primary size-12 animate-spin" />
+		<h2 class="text-lg font-semibold">
+			{reEnrichMode === 'topup' ? 'Filling in missing translation…' : 'Re-translating…'}
+		</h2>
+		<p class="text-muted-foreground max-w-xs text-sm">
+			This usually takes a moment. The page updates automatically when it's ready.
 		</p>
 		<Button variant="outline" href="/">Back to library</Button>
 	</div>
@@ -324,6 +421,27 @@
 			{#if coverage !== null}
 				<CoverageBadge {coverage} showLabel />
 			{/if}
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger
+					class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })}
+					title="Improve translation"
+					aria-label="Improve translation"
+				>
+					<EllipsisIcon class="size-4" />
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="start" class="w-60">
+					<DropdownMenu.Label>Improve translation</DropdownMenu.Label>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item onSelect={() => handleReEnrich('full')}>
+						<LanguagesIcon class="size-4" />
+						Re-translate from scratch
+					</DropdownMenu.Item>
+					<DropdownMenu.Item onSelect={() => handleReEnrich('topup')} disabled={!canTopUp}>
+						<ListPlusIcon class="size-4" />
+						Fill in missing parts
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
 			{#if progress?.is_read}
 				<Badge variant="secondary" class="ml-auto text-xs">Read</Badge>
 			{/if}

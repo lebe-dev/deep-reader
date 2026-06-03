@@ -220,6 +220,33 @@ func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion in
 	return system, user
 }
 
+// buildSpanPrompt returns the system and user messages for an incremental
+// ("top up") enrichment call. It reuses buildPrompt's full token array (the
+// indices must stay aligned with the original article) and appends a directive
+// restricting the annotations to the supplied uncovered token-index ranges.
+func buildSpanPrompt(a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (system, user string) {
+	baseSystem, baseUser := buildPrompt(a, settings, enrichmentVersion)
+	ranges := formatSpans(spans)
+
+	system = baseSystem + "\nINCREMENTAL MODE: a previous pass already annotated most of this article. " +
+		"Annotate ONLY the tokens within these inclusive token-index ranges: " + ranges + ". " +
+		"Emit difficult_words only when token_index falls inside one of these ranges; emit phrases and " +
+		"sentences only when their entire [start_index, end_index] lies inside a single range. Do NOT emit " +
+		"anything for tokens outside these ranges. Within the ranges you MUST still translate every sentence. " +
+		"Keep using the original token_index values from the input array.\n"
+	user = baseUser + "\n\nAnnotate only these inclusive token-index ranges: " + ranges + "."
+	return system, user
+}
+
+// formatSpans renders spans as a human/LLM-readable list like "[12-20], [45-45]".
+func formatSpans(spans []model.Span) string {
+	parts := make([]string, len(spans))
+	for i, s := range spans {
+		parts[i] = "[" + strconv.Itoa(s.Start) + "-" + strconv.Itoa(s.End) + "]"
+	}
+	return strings.Join(parts, ", ")
+}
+
 // ---------------------------------------------------------------------------
 // Retryable error type.
 // ---------------------------------------------------------------------------
@@ -250,11 +277,25 @@ func (e *APIError) Retryable() bool {
 // It honours ctx for cancellation and timeout.
 func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int) (*model.Enrichment, ports.Usage, error) {
 	systemPrompt, userPrompt := buildPrompt(a, settings, enrichmentVersion)
+	return c.complete(ctx, a.ID, modelName(c.model, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
+}
 
-	// Prefer json_schema response format; fall back to json_object for
-	// providers that do not support the schema variant (e.g. older Ollama).
+// EnrichSpans builds an incremental ("top up") prompt restricted to the supplied
+// uncovered token spans, calls the API once, and returns the partial enrichment
+// (only the annotations for those ranges). The enrich pool merges it into the
+// existing enrichment.
+func (c *Client) EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+	systemPrompt, userPrompt := buildSpanPrompt(a, settings, enrichmentVersion, spans)
+	return c.complete(ctx, a.ID, modelName(c.model, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
+}
+
+// complete issues a single chat completion for the given prompts, decoding the
+// enrichment JSON. It prefers the json_schema response format and falls back to
+// json_object once for providers that do not support the schema variant (e.g.
+// older Ollama). tokenCount is logged for observability only.
+func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt, userPrompt string, tokenCount int) (*model.Enrichment, ports.Usage, error) {
 	reqBody := chatRequest{
-		Model: modelName(c.model, settings.LLMModel),
+		Model: modelID,
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -271,9 +312,9 @@ func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Se
 	}
 
 	slog.Debug("llm: enrich request",
-		"article_id", a.ID,
+		"article_id", articleID,
 		"model", reqBody.Model,
-		"token_count", len(a.Tokens),
+		"token_count", tokenCount,
 		"system_prompt_bytes", len(systemPrompt),
 		"user_prompt_bytes", len(userPrompt),
 		"response_format", reqBody.ResponseFormat.Type,
@@ -284,7 +325,7 @@ func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Se
 		// If the provider rejected json_schema, retry once with json_object.
 		if isSchemaUnsupported(err) {
 			slog.Warn("llm: provider rejected json_schema, falling back to json_object",
-				"article_id", a.ID,
+				"article_id", articleID,
 				"model", reqBody.Model,
 				"err", err,
 			)

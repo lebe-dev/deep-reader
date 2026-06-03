@@ -15,6 +15,7 @@ import type {
 	ConfigResponse,
 	Progress,
 	ProgressUpdate,
+	ReEnrichMode,
 	Settings,
 	SettingsPatch
 } from './types';
@@ -58,12 +59,23 @@ async function resolveBaseUrl(): Promise<string> {
 	return '';
 }
 
+/** Fetch cache modes (avoids relying on the DOM lib's RequestCache global). */
+type FetchCache =
+	| 'default'
+	| 'no-store'
+	| 'reload'
+	| 'no-cache'
+	| 'force-cache'
+	| 'only-if-cached';
+
 interface RequestOptions {
 	method?: string;
 	body?: unknown;
 	/** Extra query params (omitted when undefined). */
 	query?: Record<string, string | undefined>;
 	signal?: AbortSignal;
+	/** Overrides the fetch cache mode (e.g. 'no-store' to bypass the HTTP cache). */
+	cache?: FetchCache;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -90,7 +102,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 			method: opts.method ?? 'GET',
 			headers,
 			body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-			signal: opts.signal
+			signal: opts.signal,
+			cache: opts.cache
 		});
 	} catch {
 		// fetch rejects on network failure / offline.
@@ -152,9 +165,26 @@ export function logout(signal?: AbortSignal): Promise<void> {
 	return request<void>('/api/logout', { method: 'POST', signal });
 }
 
-/** `GET /api/articles/:id` — full immutable article payload. */
-export function getArticle(id: string, signal?: AbortSignal): Promise<ArticlePayload> {
-	return request<ArticlePayload>(`/api/articles/${encodeURIComponent(id)}`, { signal });
+/**
+ * `GET /api/articles/:id` — full article payload.
+ *
+ * Enriched payloads are served with a long immutable Cache-Control. A re-enrich
+ * changes the content but keeps the same enrichment_version, so callers pass the
+ * article's `version` (its updated_at) as a cache-busting query param: each
+ * distinct version is a fresh URL the browser caches immutably, and a re-enrich
+ * (which bumps updated_at) is fetched anew instead of served stale. When polling
+ * mid-re-enrich, pass `{ noStore: true }` to bypass the HTTP cache entirely.
+ */
+export function getArticle(
+	id: string,
+	signal?: AbortSignal,
+	opts?: { noStore?: boolean; version?: string }
+): Promise<ArticlePayload> {
+	return request<ArticlePayload>(`/api/articles/${encodeURIComponent(id)}`, {
+		signal,
+		query: { v: opts?.version },
+		cache: opts?.noStore ? 'no-store' : undefined
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +205,23 @@ export function deleteArticle(id: string, signal?: AbortSignal): Promise<void> {
 export function retryArticle(id: string, signal?: AbortSignal): Promise<AddArticleResponse> {
 	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/retry`, {
 		method: 'POST',
+		signal
+	});
+}
+
+/**
+ * `POST /api/articles/:id/reenrich` — re-run enrichment for an enriched article.
+ * `mode` "full" re-translates the whole article; "topup" fills only the spans no
+ * sentence covers yet.
+ */
+export function reEnrichArticle(
+	id: string,
+	mode: ReEnrichMode,
+	signal?: AbortSignal
+): Promise<AddArticleResponse> {
+	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/reenrich`, {
+		method: 'POST',
+		body: { mode },
 		signal
 	});
 }

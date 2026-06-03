@@ -26,7 +26,15 @@ export type Status =
 	| 'enriching'
 	| 'enriched'
 	| 'fetch_failed'
-	| 'enrich_failed';
+	| 'enrich_failed'
+	| 'topup_queued';
+
+/**
+ * Re-enrichment mode for the article-page "improve translation" tools:
+ * `full` re-translates the whole article, `topup` fills only the spans no
+ * sentence covers yet (model.ReEnrichMode*).
+ */
+export type ReEnrichMode = 'full' | 'topup';
 
 /** CEFR proficiency levels (spec §8 `settings.cefr_level`). */
 export type CefrLevel = 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
