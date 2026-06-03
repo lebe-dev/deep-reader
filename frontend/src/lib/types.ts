@@ -214,6 +214,11 @@ export type SettingsPatch = Partial<
 export interface ServerInfo {
 	http_port: number;
 	database_path: string;
+	trust_proxy: boolean;
+	trusted_proxies: string[];
+	login_max_attempts: number;
+	login_attempt_window: string;
+	login_lockout_duration: string;
 	llm_api_base_url: string;
 	llm_model: string;
 	llm_max_concurrent: number;

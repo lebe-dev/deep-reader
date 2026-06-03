@@ -39,7 +39,7 @@
 
 	interface Row {
 		label: string;
-		value: string | number | boolean;
+		value: string | number | boolean | string[];
 		hint?: string;
 	}
 
@@ -55,6 +55,16 @@
 				rows: [
 					{ label: 'HTTP_PORT', value: s.http_port },
 					{ label: 'DATABASE_PATH', value: s.database_path }
+				]
+			},
+			{
+				title: 'Auth',
+				rows: [
+					{ label: 'TRUST_PROXY', value: s.trust_proxy },
+					{ label: 'TRUSTED_PROXIES', value: s.trusted_proxies },
+					{ label: 'LOGIN_MAX_ATTEMPTS', value: s.login_max_attempts },
+					{ label: 'LOGIN_ATTEMPT_WINDOW', value: s.login_attempt_window },
+					{ label: 'LOGIN_LOCKOUT_DURATION', value: s.login_lockout_duration }
 				]
 			},
 			{
@@ -94,7 +104,8 @@
 		];
 	}
 
-	function displayValue(v: string | number | boolean): string {
+	function displayValue(v: string | number | boolean | string[]): string {
+		if (Array.isArray(v)) return v.length > 0 ? v.join(', ') : '—';
 		if (typeof v === 'boolean') return v ? 'true' : 'false';
 		return String(v);
 	}

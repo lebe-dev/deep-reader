@@ -272,8 +272,16 @@ func (s *Server) healthz(c fiber.Ctx) error {
 // serverInfoFromConfig maps non-secret config fields into the wire type.
 func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 	return model.ServerInfo{
-		HTTPPort:               cfg.HTTPPort,
-		DatabasePath:           cfg.DatabasePath,
+		HTTPPort:     cfg.HTTPPort,
+		DatabasePath: cfg.DatabasePath,
+
+		TrustProxy:     cfg.TrustProxy,
+		TrustedProxies: cfg.TrustedProxies,
+
+		LoginMaxAttempts:     cfg.LoginMaxAttempts,
+		LoginAttemptWindow:   cfg.LoginAttemptWindow.String(),
+		LoginLockoutDuration: cfg.LoginLockoutDuration.String(),
+
 		LLMAPIBaseURL:          cfg.LLMAPIBaseURL,
 		LLMModel:               cfg.LLMModel,
 		LLMMaxConcurrent:       cfg.LLMMaxConcurrent,

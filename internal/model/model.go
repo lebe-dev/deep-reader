@@ -257,6 +257,13 @@ type ServerInfo struct {
 	HTTPPort     int    `json:"http_port"`
 	DatabasePath string `json:"database_path"`
 
+	TrustProxy     bool     `json:"trust_proxy"`
+	TrustedProxies []string `json:"trusted_proxies"`
+
+	LoginMaxAttempts     int    `json:"login_max_attempts"`
+	LoginAttemptWindow   string `json:"login_attempt_window"`
+	LoginLockoutDuration string `json:"login_lockout_duration"`
+
 	LLMAPIBaseURL     string `json:"llm_api_base_url"`
 	LLMModel          string `json:"llm_model"`
 	LLMMaxConcurrent  int    `json:"llm_max_concurrent"`
