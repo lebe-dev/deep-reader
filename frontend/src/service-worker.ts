@@ -12,6 +12,7 @@
 //  - Write methods (POST/PUT/PATCH/DELETE) → always pass through to network.
 
 import { build, files, version } from '$service-worker';
+import { precacheAll } from '$lib/pwa/precache';
 
 declare let self: ServiceWorkerGlobalScope;
 
@@ -33,7 +34,21 @@ self.addEventListener('install', (event: ExtendableEvent) => {
 	// Note: we deliberately do NOT call skipWaiting() here. The new worker stays
 	// in the "waiting" state so the UpdateBanner can offer an explicit "Обновить".
 	// The page activates it on demand via the SKIP_WAITING message below.
-	event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)));
+	//
+	// We precache resiliently (per-asset) rather than with the atomic Cache.addAll:
+	// a single unfetchable asset must not abort the whole install and brick the PWA
+	// (see precacheAll). Failures are logged, not swallowed.
+	event.waitUntil(
+		caches.open(SHELL_CACHE).then(async (cache) => {
+			const failed = await precacheAll(cache, SHELL_ASSETS);
+			if (failed.length > 0) {
+				console.warn(
+					`[sw] precache: ${failed.length}/${SHELL_ASSETS.length} assets failed to cache`,
+					failed
+				);
+			}
+		})
+	);
 });
 
 // ---------------------------------------------------------------------------
