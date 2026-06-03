@@ -8,8 +8,6 @@
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, OfflineError } from '$lib/api';
 	import { login } from '$lib/auth/store.svelte';
-	import BookOpenIcon from '@lucide/svelte/icons/book-open';
-
 	let username = $state('');
 	let password = $state('');
 	let error = $state('');
@@ -45,12 +43,9 @@
 <div class="flex min-h-svh items-center justify-center px-4 py-10">
 	<Card.Root class="w-full max-w-sm">
 		<Card.Header class="text-center">
-			<div class="mb-2 flex justify-center">
-				<div class="bg-muted rounded-full p-3">
-					<BookOpenIcon class="size-6" />
-				</div>
-			</div>
-			<Card.Title>Sign in to Deep Reader</Card.Title>
+			<p class="mb-1 text-4xl font-bold tracking-tight" style="font-family: 'Merriweather', serif;">
+				Deep Reader
+			</p>
 			<Card.Description>Enter your account credentials.</Card.Description>
 		</Card.Header>
 
