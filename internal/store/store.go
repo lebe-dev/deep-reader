@@ -143,7 +143,7 @@ func parseTime(s string) (time.Time, error) {
 // GetSettings returns the singleton settings row. The row is guaranteed to
 // exist because the migration seeds it; if somehow absent, a default is returned.
 func (s *SQLite) GetSettings(ctx context.Context) (model.Settings, error) {
-	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, updated_at
+	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, updated_at
                FROM settings WHERE id = 1`
 	row := s.db.QueryRowContext(ctx, q)
 	return scanSettings(row)
@@ -156,7 +156,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	defer s.wmu.Unlock()
 
 	// Read current values first.
-	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, updated_at
+	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, updated_at
                   FROM settings WHERE id = 1`
 	row := s.write.QueryRowContext(ctx, selQ)
 	cur, err := scanSettings(row)
@@ -177,13 +177,16 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	if patch.MinDifficultyToHighlight != nil {
 		cur.MinDifficultyToHighlight = *patch.MinDifficultyToHighlight
 	}
+	if patch.MarkdownWarnThreshold != nil {
+		cur.MarkdownWarnThreshold = *patch.MarkdownWarnThreshold
+	}
 	cur.UpdatedAt = now()
 
 	const updQ = `UPDATE settings SET cefr_level=?, target_language=?, llm_model=?,
-                  min_difficulty_to_highlight=?, updated_at=? WHERE id = 1`
+                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, updated_at=? WHERE id = 1`
 	if _, err := s.write.ExecContext(ctx, updQ,
 		cur.CEFRLevel, cur.TargetLanguage, cur.LLMModel,
-		cur.MinDifficultyToHighlight, fmtTime(cur.UpdatedAt),
+		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, fmtTime(cur.UpdatedAt),
 	); err != nil {
 		return model.Settings{}, fmt.Errorf("store: UpdateSettings write: %w", err)
 	}
@@ -192,6 +195,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 		"target_language", cur.TargetLanguage,
 		"llm_model", cur.LLMModel,
 		"min_difficulty_to_highlight", cur.MinDifficultyToHighlight,
+		"markdown_warn_threshold", cur.MarkdownWarnThreshold,
 	)
 	return cur, nil
 }
@@ -200,13 +204,14 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 	var s model.Settings
 	var updatedAtStr string
 	if err := row.Scan(&s.CEFRLevel, &s.TargetLanguage, &s.LLMModel,
-		&s.MinDifficultyToHighlight, &updatedAtStr); err != nil {
+		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &updatedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return defaults if somehow the singleton row is missing.
 			return model.Settings{
 				CEFRLevel:                model.CEFRA2,
 				TargetLanguage:           model.DefaultTargetLanguage,
 				MinDifficultyToHighlight: model.CEFRB1,
+				MarkdownWarnThreshold:    model.DefaultMarkdownWarnThreshold,
 			}, nil
 		}
 		return model.Settings{}, fmt.Errorf("store: scanSettings: %w", err)

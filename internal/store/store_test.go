@@ -67,6 +67,9 @@ func TestGetSettings_Defaults(t *testing.T) {
 	if got.MinDifficultyToHighlight != model.CEFRB1 {
 		t.Errorf("MinDifficultyToHighlight: got %q, want %q", got.MinDifficultyToHighlight, model.CEFRB1)
 	}
+	if got.MarkdownWarnThreshold != model.DefaultMarkdownWarnThreshold {
+		t.Errorf("MarkdownWarnThreshold: got %d, want %d", got.MarkdownWarnThreshold, model.DefaultMarkdownWarnThreshold)
+	}
 }
 
 func TestUpdateSettings(t *testing.T) {
@@ -93,6 +96,29 @@ func TestUpdateSettings(t *testing.T) {
 	}
 	if got2.CEFRLevel != newLevel {
 		t.Errorf("CEFRLevel after reload: got %q, want %q", got2.CEFRLevel, newLevel)
+	}
+}
+
+func TestUpdateSettings_MarkdownWarnThreshold(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	threshold := 3
+	got, err := s.UpdateSettings(ctx, model.SettingsPatch{MarkdownWarnThreshold: &threshold})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.MarkdownWarnThreshold != threshold {
+		t.Errorf("MarkdownWarnThreshold after update: got %d, want %d", got.MarkdownWarnThreshold, threshold)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.MarkdownWarnThreshold != threshold {
+		t.Errorf("MarkdownWarnThreshold after reload: got %d, want %d", got2.MarkdownWarnThreshold, threshold)
 	}
 }
 

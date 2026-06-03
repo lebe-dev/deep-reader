@@ -18,6 +18,7 @@
 	import { bootstrapPWA } from '$lib/pwa/bootstrap';
 	import { authState, refreshAuth } from '$lib/auth/store.svelte';
 	import UpdateBanner from '$lib/components/UpdateBanner.svelte';
+	import MarkdownBudgetBanner from '$lib/components/MarkdownBudgetBanner.svelte';
 
 	let { children } = $props();
 
@@ -81,6 +82,7 @@
 {#if showChrome}
 	<div class="bg-background text-foreground flex min-h-svh flex-col">
 		<UpdateBanner />
+		<MarkdownBudgetBanner />
 		<header
 			class="bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40 w-full border-b backdrop-blur"
 		>

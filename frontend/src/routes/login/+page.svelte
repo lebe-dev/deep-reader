@@ -78,7 +78,10 @@
 		</div>
 
 		<Card.Header class="text-center">
-			<p class="title-shimmer mb-1 text-4xl font-bold tracking-tight" style="font-family: 'Merriweather', serif;">
+			<p
+				class="title-shimmer mb-1 text-4xl font-bold tracking-tight"
+				style="font-family: 'Merriweather', serif;"
+			>
 				Deep Reader
 			</p>
 			<Card.Description>Enter your account credentials.</Card.Description>
@@ -88,7 +91,14 @@
 			<form class="space-y-4" onsubmit={handleSubmit}>
 				<div class="grid gap-1.5">
 					<Label for="username">Username</Label>
-					<Input id="username" bind:value={username} bind:ref={usernameEl} autocomplete="username" disabled={submitting} required />
+					<Input
+						id="username"
+						bind:value={username}
+						bind:ref={usernameEl}
+						autocomplete="username"
+						disabled={submitting}
+						required
+					/>
 				</div>
 
 				<div class="grid gap-1.5">
@@ -137,7 +147,11 @@
 	}
 
 	@keyframes shimmer {
-		0% { background-position: 200% center; }
-		100% { background-position: -200% center; }
+		0% {
+			background-position: 200% center;
+		}
+		100% {
+			background-position: -200% center;
+		}
 	}
 </style>

@@ -23,5 +23,8 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.LLMModel != nil && *patch.LLMModel == "" {
 		return "llm_model must not be empty", false
 	}
+	if patch.MarkdownWarnThreshold != nil && (*patch.MarkdownWarnThreshold < 0 || *patch.MarkdownWarnThreshold > model.MaxMarkdownWarnThreshold) {
+		return "markdown_warn_threshold must be between 0 and 100", false
+	}
 	return "", true
 }

@@ -9,6 +9,7 @@
 	import { Select as SelectPrimitive } from 'bits-ui';
 	import * as Card from '$lib/components/ui/card';
 	import * as Select from '$lib/components/ui/select';
+	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
@@ -66,7 +67,10 @@
 	// Helpers
 	// ---------------------------------------------------------------------------
 
-	type PatchableField = Pick<Settings, 'cefr_level' | 'min_difficulty_to_highlight'>;
+	type PatchableField = Pick<
+		Settings,
+		'cefr_level' | 'min_difficulty_to_highlight' | 'markdown_warn_threshold'
+	>;
 
 	async function patchField(patch: Partial<PatchableField>) {
 		try {
@@ -93,6 +97,14 @@
 	function handleMinDifficultyChange(value: string | undefined) {
 		if (!value || !settings) return;
 		patchField({ min_difficulty_to_highlight: value as CefrLevel });
+	}
+
+	function handleWarnThresholdChange(raw: string) {
+		if (!settings) return;
+		const n = Number.parseInt(raw, 10);
+		if (Number.isNaN(n) || n < 0 || n > 100) return;
+		if (n === settings.markdown_warn_threshold) return;
+		patchField({ markdown_warn_threshold: n });
 	}
 </script>
 
@@ -172,6 +184,23 @@
 				</Select.Root>
 				<p class="text-muted-foreground text-xs">
 					Usually your CEFR level + 1. Words at or below this level are shown without markup.
+				</p>
+			</div>
+
+			<!-- markdown.new low-budget warning threshold -->
+			<div class="grid gap-1.5">
+				<Label for="warn-threshold-input">markdown.new warning threshold</Label>
+				<Input
+					id="warn-threshold-input"
+					type="number"
+					min="0"
+					max="100"
+					value={settings.markdown_warn_threshold}
+					onchange={(e) => handleWarnThresholdChange(e.currentTarget.value)}
+				/>
+				<p class="text-muted-foreground text-xs">
+					Show a banner when ≤ this many markdown.new conversions remain today. 0 turns the warning
+					off.
 				</p>
 			</div>
 		{/if}

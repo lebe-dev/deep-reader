@@ -186,12 +186,21 @@ export interface Settings {
 	llm_model: string;
 	/** Minimum word level considered "difficult" (usually cefr_level + 1). */
 	min_difficulty_to_highlight: CefrLevel;
+	/** Show the low-budget banner when ≤ N markdown.new conversions remain (0 = off). */
+	markdown_warn_threshold: number;
 	updated_at: string;
 }
 
 /** Partial settings patch body for `PATCH /api/settings`. */
 export type SettingsPatch = Partial<
-	Pick<Settings, 'cefr_level' | 'target_language' | 'llm_model' | 'min_difficulty_to_highlight'>
+	Pick<
+		Settings,
+		| 'cefr_level'
+		| 'target_language'
+		| 'llm_model'
+		| 'min_difficulty_to_highlight'
+		| 'markdown_warn_threshold'
+	>
 >;
 
 // ---------------------------------------------------------------------------

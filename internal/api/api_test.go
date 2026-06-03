@@ -683,6 +683,35 @@ func TestPatchSettings(t *testing.T) {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}
 	})
+
+	t.Run("warn threshold out of range", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		for _, bad := range []int{-1, model.MaxMarkdownWarnThreshold + 1} {
+			resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{MarkdownWarnThreshold: &bad}, testToken)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("threshold %d: status = %d, want 400", bad, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("warn threshold valid", func(t *testing.T) {
+		var applied model.SettingsPatch
+		st := &fakeStore{
+			updateSettings: func(p model.SettingsPatch) (model.Settings, error) {
+				applied = p
+				return model.Settings{MarkdownWarnThreshold: *p.MarkdownWarnThreshold}, nil
+			},
+		}
+		s := newTestServer(t, st, &fakeIngestor{})
+		threshold := 0
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{MarkdownWarnThreshold: &threshold}, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if applied.MarkdownWarnThreshold == nil || *applied.MarkdownWarnThreshold != 0 {
+			t.Errorf("patch not forwarded: %+v", applied)
+		}
+	})
 }
 
 func TestDeleteArticle(t *testing.T) {

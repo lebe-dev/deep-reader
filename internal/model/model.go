@@ -76,6 +76,14 @@ var PhraseTypes = []string{PhraseTypeIdiom, PhraseTypePhrasalVerb, PhraseTypeTer
 // field configurable, but the MVP hard-defaults to Russian.
 const DefaultTargetLanguage = "ru"
 
+// DefaultMarkdownWarnThreshold is the seeded value for Settings.MarkdownWarnThreshold:
+// warn once today's remaining markdown.new conversions drop to this count or below.
+// Must match the DEFAULT in migration 00006.
+const DefaultMarkdownWarnThreshold = 5
+
+// MaxMarkdownWarnThreshold is the accepted upper bound for the warn threshold.
+const MaxMarkdownWarnThreshold = 100
+
 // Token is a single deterministic token produced by the tokenizer. Start and
 // End are byte offsets into Article.OriginalText such that
 // OriginalText[Start:End] == Text. Index is the token's position in the token
@@ -174,11 +182,14 @@ type User struct {
 // Settings is the singleton user-settings row. Persisted in the DB (not env),
 // since these are user-tunable.
 type Settings struct {
-	CEFRLevel                string    `json:"cefr_level"`
-	TargetLanguage           string    `json:"target_language"`
-	LLMModel                 string    `json:"llm_model"`
-	MinDifficultyToHighlight string    `json:"min_difficulty_to_highlight"`
-	UpdatedAt                time.Time `json:"updated_at"`
+	CEFRLevel                string `json:"cefr_level"`
+	TargetLanguage           string `json:"target_language"`
+	LLMModel                 string `json:"llm_model"`
+	MinDifficultyToHighlight string `json:"min_difficulty_to_highlight"`
+	// MarkdownWarnThreshold is the remaining-conversions count at or below which
+	// the client shows a low-budget warning banner. 0 disables the warning.
+	MarkdownWarnThreshold int       `json:"markdown_warn_threshold"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -189,6 +200,7 @@ type SettingsPatch struct {
 	TargetLanguage           *string `json:"target_language,omitempty"`
 	LLMModel                 *string `json:"llm_model,omitempty"`
 	MinDifficultyToHighlight *string `json:"min_difficulty_to_highlight,omitempty"`
+	MarkdownWarnThreshold    *int    `json:"markdown_warn_threshold,omitempty"`
 }
 
 // Progress is the reading progress for a single article. It is synced with LWW
