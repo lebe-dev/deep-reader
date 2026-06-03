@@ -98,3 +98,6 @@ push-image:
 release-image: build-image && push-image
 
 release: release-image
+
+ssh:
+    ssh kaiman
