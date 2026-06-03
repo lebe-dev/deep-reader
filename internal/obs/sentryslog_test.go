@@ -74,8 +74,13 @@ func TestErrorAttrIsCapturedAsException(t *testing.T) {
 	if got := ev.Exception[len(ev.Exception)-1].Value; got != "context deadline exceeded" {
 		t.Errorf("exception value = %q", got)
 	}
-	if ev.Contexts["log"]["message"] != "enrich: permanent error" {
-		t.Errorf("log context message = %v", ev.Contexts["log"]["message"])
+	// Message carries both the log message and the error so backends that
+	// ignore the exception list still render a meaningful title.
+	if want := "enrich: permanent error: context deadline exceeded"; ev.Message != want {
+		t.Errorf("message = %q, want %q", ev.Message, want)
+	}
+	if ev.Exception[len(ev.Exception)-1].Stacktrace == nil {
+		t.Errorf("want a stack trace on the outermost exception")
 	}
 }
 
@@ -95,6 +100,14 @@ func TestScopedAttrsAreAttachedToContext(t *testing.T) {
 	}
 	if logCtx["worker"] != int64(0) {
 		t.Errorf("worker = %v (%T), want int64(0)", logCtx["worker"], logCtx["worker"])
+	}
+	// Scalars are also tags so backends that hide custom contexts still expose
+	// them for display and search.
+	if events[0].Tags["article_id"] != "01KT75" {
+		t.Errorf("article_id tag = %q, want 01KT75", events[0].Tags["article_id"])
+	}
+	if events[0].Tags["worker"] != "0" {
+		t.Errorf("worker tag = %q, want 0", events[0].Tags["worker"])
 	}
 }
 

@@ -5,6 +5,7 @@ package obs
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/getsentry/sentry-go"
@@ -13,6 +14,10 @@ import (
 // forwardLevel is the minimum slog level forwarded to Sentry. ERROR and above
 // are worth an alert; INFO/WARN stay in the log stream only.
 const forwardLevel = slog.LevelError
+
+// errorChainDepth bounds how deep a wrapped-error chain is unwound into Sentry
+// exception entries; it mirrors sentry-go's own default.
+const errorChainDepth = 100
 
 // errorKeys are the attribute keys conventionally holding an error value
 // (e.g. log.Error("...", "err", err)). When present, the record is sent as a
@@ -88,13 +93,18 @@ func (h *SentryHandler) WithGroup(name string) slog.Handler {
 	return &SentryHandler{next: h.next.WithGroup(name), hub: h.hub, attrs: h.attrs}
 }
 
-// capture builds and sends a Sentry event from a record. An error-typed
-// attribute (err/error) becomes a CaptureException for proper grouping;
-// otherwise the message is sent via CaptureMessage. All other attributes are
-// attached as a "log" context block for triage.
+// capture builds and sends a Sentry event from a record.
+//
+// We construct the event explicitly rather than calling CaptureException so the
+// result is legible across Sentry-compatible backends: full Sentry groups on
+// the exception chain and stack trace, while leaner backends that don't parse
+// the Go SDK's exception list still get a readable title from Message. Scalar
+// attributes go to tags — which such backends surface and index for search —
+// and the full set is mirrored into a "log" context for richer UIs.
 func (h *SentryHandler) capture(r slog.Record) {
 	var captured error
-	fields := sentry.Context{"message": r.Message}
+	fields := sentry.Context{}
+	tags := map[string]string{}
 
 	collect := func(a slog.Attr) {
 		if captured == nil && errorKeys[a.Key] {
@@ -103,7 +113,9 @@ func (h *SentryHandler) capture(r slog.Record) {
 				return
 			}
 		}
-		fields[a.Key] = a.Value.Any()
+		v := a.Value.Any()
+		fields[a.Key] = v
+		tags[a.Key] = fmt.Sprintf("%v", v)
 	}
 	for _, a := range h.attrs {
 		collect(a)
@@ -113,15 +125,27 @@ func (h *SentryHandler) capture(r slog.Record) {
 		return true
 	})
 
+	event := sentry.NewEvent()
+	event.Level = sentryLevel(r.Level)
+	if captured != nil {
+		// Include the error in the title so it is visible even where the
+		// exception list is ignored; the exception still drives grouping and
+		// carries the stack trace on backends that read it.
+		event.Message = r.Message + ": " + captured.Error()
+		event.SetException(captured, errorChainDepth)
+	} else {
+		event.Message = r.Message
+	}
+
 	hub := h.hub
 	hub.WithScope(func(scope *sentry.Scope) {
-		scope.SetLevel(sentryLevel(r.Level))
-		scope.SetContext("log", fields)
-		if captured != nil {
-			hub.CaptureException(captured)
-			return
+		if len(tags) > 0 {
+			scope.SetTags(tags)
 		}
-		hub.CaptureMessage(r.Message)
+		if len(fields) > 0 {
+			scope.SetContext("log", fields)
+		}
+		hub.CaptureEvent(event)
 	})
 }
 
