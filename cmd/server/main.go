@@ -23,6 +23,7 @@ import (
 	"deep-reader/internal/ingest"
 	"deep-reader/internal/llm"
 	"deep-reader/internal/markdown"
+	"deep-reader/internal/obs"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/store"
 	"deep-reader/internal/version"
@@ -155,6 +156,10 @@ func newLogger(cfg *config.Config) *slog.Logger {
 	} else {
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	}
+	// Forward ERROR-and-above records to Sentry. The wrapper is a no-op while
+	// the global hub has no client (Sentry not configured) and is non-blocking
+	// when it is, so a slow or unreachable Sentry never stalls logging.
+	handler = obs.NewSentryHandler(handler)
 	return slog.New(handler)
 }
 
