@@ -43,7 +43,7 @@
 <div class="flex min-h-svh items-center justify-center px-4 py-10">
 	<Card.Root class="w-full max-w-sm">
 		<Card.Header class="text-center">
-			<p class="mb-1 text-4xl font-bold tracking-tight" style="font-family: 'Merriweather', serif;">
+			<p class="title-shimmer mb-1 text-4xl font-bold tracking-tight" style="font-family: 'Merriweather', serif;">
 				Deep Reader
 			</p>
 			<Card.Description>Enter your account credentials.</Card.Description>
@@ -78,3 +78,24 @@
 		</Card.Content>
 	</Card.Root>
 </div>
+
+<style>
+	.title-shimmer {
+		background: linear-gradient(
+			90deg,
+			oklch(0.145 0 0) 0%,
+			oklch(50% 0.134 242.749) 50%,
+			oklch(0.145 0 0) 100%
+		);
+		background-size: 200% auto;
+		background-clip: text;
+		-webkit-background-clip: text;
+		color: transparent;
+		animation: shimmer 10s linear infinite;
+	}
+
+	@keyframes shimmer {
+		0% { background-position: 200% center; }
+		100% { background-position: -200% center; }
+	}
+</style>
