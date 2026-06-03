@@ -19,7 +19,15 @@ const config = {
 			strict: false
 		}),
 		// Served from origin root.
-		paths: { base: '' }
+		paths: { base: '' },
+		// Do NOT let SvelteKit auto-register the service worker. In production it
+		// injects `navigator.serviceWorker.register('/service-worker.js')` with NO
+		// options — a *classic* registration — while bootstrap.ts registers the
+		// same URL as a *module*. Two registrations of one scope with conflicting
+		// `type` make the browser reinstall the worker on every navigation, so it
+		// is permanently stuck "waiting" and the update banner never clears.
+		// bootstrap.ts is our single registrar (it also owns the update-banner UX).
+		serviceWorker: { register: false }
 	}
 };
 
