@@ -74,7 +74,10 @@
 			<ExternalLinkIcon class="size-3" />
 		</a>
 		<span class="bg-border h-3 w-px"></span>
-		<button onclick={handleCheckForUpdate} class="cursor-pointer underline hover:text-foreground transition-colors">
+		<button
+			onclick={handleCheckForUpdate}
+			class="cursor-pointer underline hover:text-foreground transition-colors"
+		>
 			Check for updates
 		</button>
 	</div>

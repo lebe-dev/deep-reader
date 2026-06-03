@@ -81,7 +81,11 @@
 <Toaster richColors closeButton position="bottom-right" />
 
 {#if $navigating}
-	<div class="fixed inset-x-0 top-0 z-50 h-[2px] overflow-hidden" role="progressbar" aria-label="Loading">
+	<div
+		class="fixed inset-x-0 top-0 z-50 h-[2px] overflow-hidden"
+		role="progressbar"
+		aria-label="Loading"
+	>
 		<div class="nav-bar bg-primary absolute h-full w-1/2" />
 	</div>
 {/if}
@@ -157,7 +161,11 @@
 	}
 
 	@keyframes nav-slide {
-		0% { left: -55%; }
-		100% { left: 110%; }
+		0% {
+			left: -55%;
+		}
+		100% {
+			left: 110%;
+		}
 	}
 </style>

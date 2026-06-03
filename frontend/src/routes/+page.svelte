@@ -131,7 +131,11 @@
 	{:else}
 		<div class="space-y-2">
 			{#each articles as article (article.id)}
-				<ArticleCard {article} articleHref="/article/{article.id}" isRead={readSet.has(article.id)} />
+				<ArticleCard
+					{article}
+					articleHref="/article/{article.id}"
+					isRead={readSet.has(article.id)}
+				/>
 			{/each}
 		</div>
 	{/if}

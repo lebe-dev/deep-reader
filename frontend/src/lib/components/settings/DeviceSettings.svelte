@@ -144,8 +144,15 @@
 			{isSyncing ? 'Syncing…' : 'Test Connection / Sync Now'}
 		</Button>
 
-		<Button variant="outline" onclick={handleCheckUpdate} disabled={isCheckingUpdate} class="w-full gap-2">
-			<ArrowUpCircleIcon class={['size-4', isCheckingUpdate && 'animate-pulse'].filter(Boolean).join(' ')} />
+		<Button
+			variant="outline"
+			onclick={handleCheckUpdate}
+			disabled={isCheckingUpdate}
+			class="w-full gap-2"
+		>
+			<ArrowUpCircleIcon
+				class={['size-4', isCheckingUpdate && 'animate-pulse'].filter(Boolean).join(' ')}
+			/>
 			{isCheckingUpdate ? 'Checking…' : 'Check for Updates'}
 		</Button>
 

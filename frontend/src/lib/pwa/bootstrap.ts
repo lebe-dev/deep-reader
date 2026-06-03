@@ -106,10 +106,14 @@ export async function checkForUpdate(): Promise<boolean> {
 
 		const timeout = setTimeout(() => settle(false), 10_000);
 
-		registration.addEventListener('updatefound', () => {
-			clearTimeout(timeout);
-			settle(true);
-		}, { once: true });
+		registration.addEventListener(
+			'updatefound',
+			() => {
+				clearTimeout(timeout);
+				settle(true);
+			},
+			{ once: true }
+		);
 
 		registration.update().catch(() => {
 			clearTimeout(timeout);
