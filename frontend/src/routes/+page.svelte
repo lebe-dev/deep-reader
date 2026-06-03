@@ -18,15 +18,26 @@
 	// ---------------------------------------------------------------------------
 
 	let articles = $state<ArticleMeta[]>([]);
+	let readSet = $state<Set<string>>(new Set());
 	let initialLoading = $state(true);
 
 	onMount(() => {
 		const articlesSub = liveQuery(async () => {
-			const all = await db.articles_meta.orderBy('created_at').reverse().toArray();
-			return all;
+			const [all, progress] = await Promise.all([
+				db.articles_meta.orderBy('created_at').reverse().toArray(),
+				db.progress.toArray()
+			]);
+			const read = new Set(progress.filter((p) => p.is_read).map((p) => p.article_id));
+			const sorted = [...all].sort((a, b) => {
+				const aRead = read.has(a.id) ? 1 : 0;
+				const bRead = read.has(b.id) ? 1 : 0;
+				return aRead - bRead;
+			});
+			return { sorted, read };
 		}).subscribe({
-			next(value) {
-				articles = value;
+			next({ sorted, read }) {
+				articles = sorted;
+				readSet = read;
 				initialLoading = false;
 			},
 			error(err) {
@@ -120,7 +131,7 @@
 	{:else}
 		<div class="space-y-2">
 			{#each articles as article (article.id)}
-				<ArticleCard {article} articleHref="/article/{article.id}" />
+				<ArticleCard {article} articleHref="/article/{article.id}" isRead={readSet.has(article.id)} />
 			{/each}
 		</div>
 	{/if}

@@ -217,6 +217,7 @@ type Progress struct {
 // enrichment payload.
 type ArticleMeta struct {
 	ID                string    `json:"id"`
+	SourceURL         string    `json:"source_url"`
 	Title             string    `json:"title"`
 	Author            string    `json:"author"`
 	SourceDomain      string    `json:"source_domain"`

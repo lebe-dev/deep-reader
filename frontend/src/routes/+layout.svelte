@@ -4,6 +4,7 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { ModeWatcher, toggleMode, mode } from 'mode-watcher';
 	import { page } from '$app/state';
+	import { navigating } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { Toaster } from '$lib/components/ui/sonner';
 	import { Button } from '$lib/components/ui/button';
@@ -79,6 +80,12 @@
 <ModeWatcher />
 <Toaster richColors closeButton position="bottom-right" />
 
+{#if $navigating}
+	<div class="fixed inset-x-0 top-0 z-50 h-[2px] overflow-hidden" role="progressbar" aria-label="Loading">
+		<div class="nav-bar bg-primary absolute h-full w-1/2" />
+	</div>
+{/if}
+
 {#if !authState.checked}
 	<div class="bg-background min-h-svh"></div>
 {:else if showChrome}
@@ -91,7 +98,8 @@
 			<div class="mx-auto flex h-14 w-full max-w-3xl items-center gap-2 px-4">
 				<a href="/" class="mr-2 flex items-center gap-2 font-semibold">
 					<BookOpenIcon class="size-5" />
-					<span>Deep Reader</span>
+					<span class="hidden sm:inline">Deep Reader</span>
+					<span class="sm:hidden">DR</span>
 				</a>
 
 				<Separator orientation="vertical" class="mx-1 h-6" />
@@ -142,3 +150,14 @@
 		{@render children?.()}
 	</div>
 {/if}
+
+<style>
+	.nav-bar {
+		animation: nav-slide 1.2s ease-in-out infinite;
+	}
+
+	@keyframes nav-slide {
+		0% { left: -55%; }
+		100% { left: 110%; }
+	}
+</style>

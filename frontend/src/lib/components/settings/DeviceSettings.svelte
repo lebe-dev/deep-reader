@@ -16,9 +16,11 @@
 	import { getSyncState, updateSyncState } from '$lib/db';
 	import { sync } from '$lib/sync/engine';
 	import { authState, logout } from '$lib/auth/store.svelte';
+	import { checkForUpdate } from '$lib/pwa/bootstrap';
 	import MonitorSmartphoneIcon from '@lucide/svelte/icons/monitor-smartphone';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
+	import ArrowUpCircleIcon from '@lucide/svelte/icons/arrow-up-circle';
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -26,6 +28,7 @@
 
 	let serverUrl = $state('');
 	let isSyncing = $state(false);
+	let isCheckingUpdate = $state(false);
 	let serverUrlError = $state('');
 
 	// ---------------------------------------------------------------------------
@@ -75,6 +78,16 @@
 			toast.error(`Sync failed: ${msg}`);
 		} finally {
 			isSyncing = false;
+		}
+	}
+
+	async function handleCheckUpdate() {
+		isCheckingUpdate = true;
+		try {
+			const found = await checkForUpdate();
+			if (!found) toast('Already on the latest version.');
+		} finally {
+			isCheckingUpdate = false;
 		}
 	}
 
@@ -129,6 +142,11 @@
 		<Button onclick={handleTestSync} disabled={isSyncing} class="w-full gap-2">
 			<RefreshCwIcon class={['size-4', isSyncing && 'animate-spin'].filter(Boolean).join(' ')} />
 			{isSyncing ? 'Syncing…' : 'Test Connection / Sync Now'}
+		</Button>
+
+		<Button variant="outline" onclick={handleCheckUpdate} disabled={isCheckingUpdate} class="w-full gap-2">
+			<ArrowUpCircleIcon class={['size-4', isCheckingUpdate && 'animate-pulse'].filter(Boolean).join(' ')} />
+			{isCheckingUpdate ? 'Checking…' : 'Check for Updates'}
 		</Button>
 
 		<Separator />

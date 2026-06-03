@@ -76,3 +76,44 @@ async function registerServiceWorker(): Promise<void> {
 		console.warn('[PWA] Service worker registration failed:', err);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Manual update check
+// ---------------------------------------------------------------------------
+
+/**
+ * Trigger an explicit SW update check. Returns true if a new version was found
+ * (the UpdateBanner will appear), false if already on the latest version.
+ */
+export async function checkForUpdate(): Promise<boolean> {
+	if (!('serviceWorker' in navigator)) return false;
+
+	const registration = await navigator.serviceWorker.getRegistration();
+	if (!registration) return false;
+
+	if (registration.waiting && navigator.serviceWorker.controller) {
+		signalUpdateAvailable(registration.waiting);
+		return true;
+	}
+
+	return new Promise((resolve) => {
+		let settled = false;
+		const settle = (found: boolean) => {
+			if (settled) return;
+			settled = true;
+			resolve(found);
+		};
+
+		const timeout = setTimeout(() => settle(false), 10_000);
+
+		registration.addEventListener('updatefound', () => {
+			clearTimeout(timeout);
+			settle(true);
+		}, { once: true });
+
+		registration.update().catch(() => {
+			clearTimeout(timeout);
+			settle(false);
+		});
+	});
+}

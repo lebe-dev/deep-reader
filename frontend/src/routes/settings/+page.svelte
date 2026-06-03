@@ -8,7 +8,20 @@
 	import StorageSettings from '$lib/components/settings/StorageSettings.svelte';
 	import ServerSettings from '$lib/components/settings/ServerSettings.svelte';
 	import pkg from '../../../package.json';
-	import { checkForUpdate } from '$lib/pwa/state.svelte';
+	import { checkForUpdate, pwaState } from '$lib/pwa/state.svelte';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import { toast } from 'svelte-sonner';
+
+	async function handleCheckForUpdate() {
+		const toastId = toast.loading('Checking for updates…');
+		await checkForUpdate();
+		toast.dismiss(toastId);
+		if (pwaState.updateAvailable) {
+			toast.success('Update available — see the banner above.');
+		} else {
+			toast('Already up to date.');
+		}
+	}
 </script>
 
 <svelte:head>
@@ -48,14 +61,21 @@
 		</Tabs.Content>
 	</Tabs.Root>
 
-	<p class="text-muted-foreground mt-6 text-center text-xs">
-		Client v{pkg.version}
-		·
-		<button
-			onclick={checkForUpdate}
-			class="text-muted-foreground cursor-pointer underline"
+	<div class="text-muted-foreground mt-6 flex items-center justify-center gap-3 text-xs">
+		<span>Client v{pkg.version}</span>
+		<span class="bg-border h-3 w-px"></span>
+		<a
+			href="https://github.com/lebe-dev/deep-reader"
+			target="_blank"
+			rel="noopener noreferrer"
+			class="hover:text-foreground flex items-center gap-1 underline transition-colors"
 		>
+			GitHub
+			<ExternalLinkIcon class="size-3" />
+		</a>
+		<span class="bg-border h-3 w-px"></span>
+		<button onclick={handleCheckForUpdate} class="cursor-pointer underline hover:text-foreground transition-colors">
 			Check for updates
 		</button>
-	</p>
+	</div>
 </div>

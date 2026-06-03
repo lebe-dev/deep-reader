@@ -283,12 +283,12 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		err  error
 	)
 	if since.IsZero() {
-		const q = `SELECT id, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
+		const q = `SELECT id, source_url, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
                           json_array_length(tokens), enrichment_coverage
                    FROM articles ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q)
 	} else {
-		const q = `SELECT id, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
+		const q = `SELECT id, source_url, title, author, source_domain, status, created_at, enriched_at, enrichment_version,
                           json_array_length(tokens), enrichment_coverage
                    FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
@@ -302,7 +302,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	for rows.Next() {
 		var m model.ArticleMeta
 		var createdAtStr, enrichedAtStr string
-		if err := rows.Scan(&m.ID, &m.Title, &m.Author, &m.SourceDomain,
+		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
 			&m.Status, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
 			&m.EnrichmentCoverage); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)

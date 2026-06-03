@@ -13,9 +13,10 @@
 	interface Props {
 		article: ArticleMeta;
 		articleHref: string;
+		isRead?: boolean;
 	}
 
-	let { article, articleHref }: Props = $props();
+	let { article, articleHref, isRead = false }: Props = $props();
 
 	let deleteOpen = $state(false);
 
@@ -85,12 +86,13 @@
 			{#if article.status === 'enriched'}
 				<a
 					href={articleHref}
-					class="hover:text-primary line-clamp-2 text-sm font-medium leading-snug transition-colors"
+					class="line-clamp-2 text-base font-medium leading-snug transition-colors
+						{isRead ? 'text-muted-foreground hover:text-foreground' : 'hover:text-primary'}"
 				>
 					{article.title || 'Untitled'}
 				</a>
 			{:else}
-				<span class="text-muted-foreground line-clamp-2 text-sm font-medium leading-snug">
+				<span class="text-muted-foreground line-clamp-2 text-base font-medium leading-snug">
 					{article.title || 'Untitled'}
 				</span>
 			{/if}
@@ -99,7 +101,7 @@
 			{/if}
 		</div>
 		<div class="flex shrink-0 items-center gap-1">
-			{#if article.status === 'enriched'}
+			{#if article.status === 'enriched' && article.enrichment_coverage < 1}
 				<CoverageBadge coverage={article.enrichment_coverage} />
 			{/if}
 			{#if article.status !== 'enriched'}
