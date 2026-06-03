@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import { liveQuery } from 'dexie';
 	import { db } from '$lib/db';
-	import type { ArticleMeta, Progress } from '$lib/types';
+	import type { ArticleMeta } from '$lib/types';
 	import { sync } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
 	import { ArticleCard, AddArticleDialog } from '$lib/components/library';
@@ -19,11 +18,9 @@
 	// ---------------------------------------------------------------------------
 
 	let articles = $state<ArticleMeta[]>([]);
-	let progressMap = $state<Map<string, Progress>>(new Map());
 	let initialLoading = $state(true);
 
 	onMount(() => {
-		// Subscribe to live articles sorted by created_at descending.
 		const articlesSub = liveQuery(async () => {
 			const all = await db.articles_meta.orderBy('created_at').reverse().toArray();
 			return all;
@@ -38,26 +35,8 @@
 			}
 		});
 
-		// Subscribe to progress rows.
-		const progressSub = liveQuery(async () => {
-			const rows = await db.progress.toArray();
-			return rows;
-		}).subscribe({
-			next(rows) {
-				const m = new Map<string, Progress>();
-				for (const row of rows) {
-					m.set(row.article_id, row);
-				}
-				progressMap = m;
-			},
-			error(err) {
-				console.error('[library] progress liveQuery error', err);
-			}
-		});
-
 		return () => {
 			articlesSub.unsubscribe();
-			progressSub.unsubscribe();
 		};
 	});
 
@@ -78,14 +57,6 @@
 		} finally {
 			syncing = false;
 		}
-	}
-
-	// ---------------------------------------------------------------------------
-	// Navigation
-	// ---------------------------------------------------------------------------
-
-	function openArticle(id: string) {
-		goto(`/article/${id}`);
 	}
 </script>
 
@@ -123,25 +94,18 @@
 		</div>
 	</div>
 
-	<!-- Loading skeletons on first sync -->
 	{#if initialLoading}
-		<div class="space-y-3">
+		<div class="space-y-2">
 			{#each { length: 4 } as _, i (i)}
-				<div class="bg-card rounded-xl border p-4 space-y-3">
+				<div class="bg-card rounded-xl border px-4 py-3 space-y-2">
 					<div class="flex items-start justify-between gap-2">
-						<div class="flex-1 space-y-2">
-							<Skeleton class="h-4 w-3/4" />
-							<Skeleton class="h-3 w-1/3" />
-						</div>
+						<Skeleton class="h-4 w-3/4" />
 						<Skeleton class="h-5 w-16 rounded-full" />
 					</div>
-					<Skeleton class="h-3 w-1/2" />
-					<Skeleton class="h-1.5 w-full rounded-full" />
+					<Skeleton class="h-3 w-1/3" />
 				</div>
 			{/each}
 		</div>
-
-		<!-- Empty state -->
 	{:else if articles.length === 0}
 		<div class="flex flex-col items-center justify-center gap-4 py-20 text-center">
 			<div class="bg-muted rounded-full p-4">
@@ -153,16 +117,10 @@
 			</div>
 			<AddArticleDialog />
 		</div>
-
-		<!-- Article list -->
 	{:else}
-		<div class="space-y-3">
+		<div class="space-y-2">
 			{#each articles as article (article.id)}
-				<ArticleCard
-					{article}
-					progress={progressMap.get(article.id)}
-					onclick={() => openArticle(article.id)}
-				/>
+				<ArticleCard {article} articleHref="/article/{article.id}" />
 			{/each}
 		</div>
 	{/if}

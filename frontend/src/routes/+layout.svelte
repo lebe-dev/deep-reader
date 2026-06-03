@@ -79,7 +79,9 @@
 <ModeWatcher />
 <Toaster richColors closeButton position="bottom-right" />
 
-{#if showChrome}
+{#if !authState.checked}
+	<div class="bg-background min-h-svh"></div>
+{:else if showChrome}
 	<div class="bg-background text-foreground flex min-h-svh flex-col">
 		<UpdateBanner />
 		<MarkdownBudgetBanner />
@@ -135,7 +137,7 @@
 		</main>
 	</div>
 {:else}
-	<!-- Auth pages (and the pre-auth loading flash) render bare, centered. -->
+	<!-- Auth pages render bare, centered. -->
 	<div class="bg-background text-foreground flex min-h-svh flex-col">
 		{@render children?.()}
 	</div>

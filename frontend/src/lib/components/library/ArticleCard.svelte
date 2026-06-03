@@ -1,9 +1,7 @@
 <script lang="ts">
-	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Progress } from '$lib/components/ui/progress';
-	import type { ArticleMeta, Progress as ProgressType } from '$lib/types';
+	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { enqueueRetry } from '$lib/sync/engine';
@@ -14,11 +12,10 @@
 
 	interface Props {
 		article: ArticleMeta;
-		progress?: ProgressType;
-		onclick?: () => void;
+		articleHref: string;
 	}
 
-	let { article, progress, onclick }: Props = $props();
+	let { article, articleHref }: Props = $props();
 
 	let deleteOpen = $state(false);
 
@@ -26,8 +23,7 @@
 		article.status === 'fetch_failed' || article.status === 'enrich_failed'
 	);
 
-	// "New": ready but never opened (no progress row yet).
-	const isNew = $derived(article.status === 'enriched' && progress === undefined);
+	const isNew = $derived(article.status === 'enriched');
 
 	const statusVariant = $derived.by(() => {
 		if (article.status === 'enriched') return 'default' as const;
@@ -60,15 +56,6 @@
 			: 'Could not process the article.'
 	);
 
-	// position is a token index; convert to 0–100 percentage using the article's token count.
-	const progressPct = $derived.by(() => {
-		const pos = progress?.position ?? 0;
-		const total = article.token_count;
-		if (!total) return 0;
-		return Math.min(100, Math.round((pos / total) * 100));
-	});
-
-	// only allow http(s) source links to avoid javascript:/data: href injection
 	const safeSourceUrl = $derived(
 		article.source_url && /^https?:\/\//i.test(article.source_url) ? article.source_url : null
 	);
@@ -81,18 +68,6 @@
 		});
 	}
 
-	function handleCardClick() {
-		if (article.status === 'enriched') {
-			onclick?.();
-			return;
-		}
-		if (isFailed) {
-			// do nothing on card click; user uses the Retry button
-			return;
-		}
-		toast('Still processing — check back in a moment.');
-	}
-
 	async function handleRetry(e: MouseEvent) {
 		e.stopPropagation();
 		try {
@@ -102,112 +77,81 @@
 			toast.error('Failed to queue retry.');
 		}
 	}
-
-	function handleDeleteClick(e: MouseEvent) {
-		e.stopPropagation();
-		deleteOpen = true;
-	}
 </script>
 
-<Card.Root
-	class="group relative cursor-pointer transition-shadow hover:shadow-md {article.status !==
-	'enriched'
-		? 'cursor-default'
-		: ''}"
-	onclick={handleCardClick}
-	role="button"
-	tabindex={0}
-	onkeydown={(e) => {
-		if (e.key === 'Enter' || e.key === ' ') handleCardClick();
-	}}
->
-	<Card.Header class="pb-2">
-		<div class="flex items-start justify-between gap-2">
-			<div class="min-w-0 flex-1">
-				<Card.Title class="line-clamp-2 text-base leading-snug">
-					{article.title || 'Untitled'}
-				</Card.Title>
-				{#if article.author}
-					<Card.Description class="mt-0.5 truncate text-xs">
-						{article.author}
-					</Card.Description>
-				{/if}
-			</div>
-			<div class="flex shrink-0 items-center gap-1">
-				{#if isNew}
-					<Badge variant="outline" class="border-primary text-primary rounded-md">New</Badge>
-				{/if}
-				{#if article.status === 'enriched'}
-					<CoverageBadge coverage={article.enrichment_coverage} />
-				{/if}
-				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
-			</div>
-		</div>
-	</Card.Header>
-
-	<Card.Content class="pb-3">
-		<div class="text-muted-foreground mb-3 flex items-center gap-2 text-xs">
-			{#if article.source_domain && safeSourceUrl}
+<div class="border-border bg-card rounded-xl border px-4 py-3">
+	<div class="flex items-start justify-between gap-3">
+		<div class="min-w-0 flex-1">
+			{#if article.status === 'enriched'}
 				<a
-					href={safeSourceUrl}
-					target="_blank"
-					rel="noopener noreferrer"
-					onclick={(e) => e.stopPropagation()}
-					class="hover:text-foreground flex items-center gap-1 truncate transition-colors"
+					href={articleHref}
+					class="hover:text-primary line-clamp-2 text-sm font-medium leading-snug transition-colors"
 				>
-					{article.source_domain}
-					<ExternalLinkIcon class="size-3 shrink-0" />
+					{article.title || 'Untitled'}
 				</a>
-			{:else if article.source_domain}
-				<span class="flex items-center gap-1 truncate">
-					{article.source_domain}
-					<ExternalLinkIcon class="size-3 shrink-0" />
+			{:else}
+				<span class="text-muted-foreground line-clamp-2 text-sm font-medium leading-snug">
+					{article.title || 'Untitled'}
 				</span>
 			{/if}
-			<span class="shrink-0">{formatDate(article.created_at)}</span>
-			{#if progress?.is_read}
-				<span class="text-primary shrink-0 font-medium">Read</span>
+			{#if article.author}
+				<p class="text-muted-foreground mt-0.5 truncate text-xs">{article.author}</p>
 			{/if}
 		</div>
+		<div class="flex shrink-0 items-center gap-1">
+			{#if article.status === 'enriched'}
+				<CoverageBadge coverage={article.enrichment_coverage} />
+			{/if}
+			{#if article.status !== 'enriched'}
+				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
+			{/if}
+		</div>
+	</div>
 
-		{#if article.status === 'enriched'}
-			<div class="space-y-1">
-				<div class="flex justify-between text-xs">
-					<span class="text-muted-foreground">Progress</span>
-					<span class="text-muted-foreground">{Math.round(progressPct)}%</span>
-				</div>
-				<Progress value={progressPct} max={100} class="h-1" />
-			</div>
+	{#if isFailed}
+		<div class="bg-destructive/10 text-destructive mt-2 rounded-md px-3 py-2 text-xs">
+			{#if article.error}
+				<span class="line-clamp-2">{article.error}</span>
+			{:else}
+				{failedMessage}
+			{/if}
+		</div>
+	{/if}
+
+	<div class="text-muted-foreground mt-1.5 flex items-center gap-2 text-xs">
+		{#if article.source_domain && safeSourceUrl}
+			<a
+				href={safeSourceUrl}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="hover:text-foreground flex items-center gap-1 truncate transition-colors"
+			>
+				{article.source_domain}
+				<ExternalLinkIcon class="size-3 shrink-0" />
+			</a>
+		{:else if article.source_domain}
+			<span class="truncate">{article.source_domain}</span>
 		{/if}
+		<span class="shrink-0">{formatDate(article.created_at)}</span>
 
-		{#if isFailed}
-			<div class="bg-destructive/10 text-destructive mt-2 rounded-md px-3 py-2 text-xs">
-				{#if article.error}
-					<span class="line-clamp-2">{article.error}</span>
-				{:else}
-					{failedMessage}
-				{/if}
-			</div>
-		{/if}
-	</Card.Content>
-
-	<Card.Footer class="flex justify-end gap-2 pt-0">
-		{#if isFailed}
-			<Button size="sm" variant="secondary" onclick={handleRetry} class="h-7 text-xs">
-				<RefreshCwIcon class="size-3" />
-				Retry
+		<div class="ml-auto flex items-center gap-1">
+			{#if isFailed}
+				<Button size="sm" variant="secondary" onclick={handleRetry} class="h-6 text-xs">
+					<RefreshCwIcon class="size-3" />
+					Retry
+				</Button>
+			{/if}
+			<Button
+				size="icon-sm"
+				variant="ghost"
+				onclick={() => (deleteOpen = true)}
+				aria-label="Delete article"
+				class="text-muted-foreground hover:text-destructive"
+			>
+				<TrashIcon class="size-4" />
 			</Button>
-		{/if}
-		<Button
-			size="icon-sm"
-			variant="ghost"
-			onclick={handleDeleteClick}
-			aria-label="Delete article"
-			class="text-muted-foreground hover:text-destructive"
-		>
-			<TrashIcon class="size-4" />
-		</Button>
-	</Card.Footer>
-</Card.Root>
+		</div>
+	</div>
+</div>
 
 <DeleteDialog bind:open={deleteOpen} articleId={article.id} articleTitle={article.title} />
