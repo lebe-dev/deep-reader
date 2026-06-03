@@ -187,9 +187,13 @@ func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 		fs.sessions[auth.HashToken(testToken)] = true
 	}
 	siteFS := fstest.MapFS{
-		"index.html":    &fstest.MapFile{Data: []byte("<!doctype html><title>app</title>")},
-		"manifest.json": &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
-		"_app/start.js": &fstest.MapFile{Data: []byte("console.log('hi')")},
+		"index.html":                  &fstest.MapFile{Data: []byte("<!doctype html><title>app</title>")},
+		"manifest.json":               &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
+		"manifest.webmanifest":        &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
+		"service-worker.js":           &fstest.MapFile{Data: []byte("self.addEventListener('install',()=>{})")},
+		"_app/start.js":               &fstest.MapFile{Data: []byte("console.log('hi')")},
+		"_app/immutable/chunk.abc.js": &fstest.MapFile{Data: []byte("export{}")},
+		"icons/icon-192.png":          &fstest.MapFile{Data: []byte("png")},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return New(cfg, st, ing, WithStaticFS(fs.FS(siteFS)), WithLogger(log))
@@ -809,5 +813,33 @@ func TestStaticServesAsset(t *testing.T) {
 	resp := doReq(t, s, http.MethodGet, "/_app/start.js", nil, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestStaticCacheControl guards the per-path cache policy: only fingerprinted
+// /_app/immutable/ assets may be cached long-term. A stale index.html or
+// service-worker.js is what makes the PWA update banner reappear forever.
+func TestStaticCacheControl(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/_app/immutable/chunk.abc.js", "public, max-age=31536000, immutable"},
+		{"/service-worker.js", "no-cache"},
+		{"/manifest.webmanifest", "no-cache"},
+		{"/icons/icon-192.png", "public, max-age=3600"},
+		{"/", "no-cache"},               // HTML shell via IndexNames
+		{"/article/abc123", "no-cache"}, // SPA fallback
+	}
+	for _, tc := range cases {
+		resp := doReq(t, s, http.MethodGet, tc.path, nil, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", tc.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Cache-Control"); got != tc.want {
+			t.Errorf("%s: Cache-Control = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }

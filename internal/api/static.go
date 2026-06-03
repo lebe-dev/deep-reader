@@ -27,10 +27,36 @@ func registerStatic(app *fiber.App, siteFS fs.FS) {
 		FS:              siteFS,
 		IndexNames:      []string{indexFile},
 		NotFoundHandler: fallback,
-		// One year for hashed assets is safe; index.html itself is revalidated
-		// by the service worker, and SvelteKit fingerprints _app/ assets.
-		MaxAge: 31536000,
+		// Cache-Control is assigned per path (see cacheControlFor) instead of a
+		// blanket MaxAge. A one-year cache on index.html / service-worker.js is
+		// what makes the PWA "update available" banner reappear forever: the
+		// browser keeps serving a stale shell that points at old asset hashes, so
+		// new builds never take effect. Only fingerprinted /_app/immutable/ files
+		// may be cached long-term. See docs/nginx.md.
+		ModifyResponse: func(c fiber.Ctx) error {
+			c.Set(fiber.HeaderCacheControl, cacheControlFor(c.Path()))
+			return nil
+		},
 	}))
+}
+
+// cacheControlFor returns the Cache-Control value for a static path. Only
+// content-hashed build assets are cached long-term; the HTML shell, the service
+// worker and the manifest must be revalidated so updates roll out promptly.
+func cacheControlFor(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/_app/immutable/"):
+		// Fingerprinted by SvelteKit — the URL changes when the content does.
+		return "public, max-age=31536000, immutable"
+	case path == "/service-worker.js" || path == "/manifest.webmanifest":
+		return "no-cache"
+	case hasFileExtension(path):
+		// Non-fingerprinted assets (icons, robots.txt): brief cache, revalidated.
+		return "public, max-age=3600"
+	default:
+		// The HTML shell and SPA routes must always reflect the latest build.
+		return "no-cache"
+	}
 }
 
 // newSPAFallback returns a handler that serves index.html for GET/HEAD
@@ -57,6 +83,8 @@ func newSPAFallback(siteFS fs.FS) fiber.Handler {
 			return sendError(c, fiber.StatusNotFound, "frontend not built")
 		}
 		c.Set(fiber.HeaderContentType, "text/html; charset=utf-8")
+		// The shell must be revalidated; it references per-build asset hashes.
+		c.Set(fiber.HeaderCacheControl, "no-cache")
 		return c.Status(http.StatusOK).Send(index)
 	}
 }
