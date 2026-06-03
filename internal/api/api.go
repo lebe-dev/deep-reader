@@ -12,6 +12,7 @@
 //	POST   /api/login                       (no auth) credentials -> {token}
 //	POST   /api/logout                      end the current session
 //	GET    /api/articles/:id                full enriched payload (409 if not enriched)
+//	GET    /api/articles/:id/raw            raw LLM response captured on enrich failure
 //	POST   /api/articles                    {url} -> {id,status} (rate limited)
 //	DELETE /api/articles/:id                remove from library
 //	POST   /api/articles/:id/retry          resume failed article from its stage
@@ -156,6 +157,7 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Get("/stats", s.getStats)
 
 	api.Get("/articles/:id", s.getArticle)
+	api.Get("/articles/:id/raw", s.getArticleRaw)
 	api.Post("/articles", s.addArticle, s.ingestRateLimiter())
 	api.Delete("/articles/:id", s.deleteArticle)
 	api.Post("/articles/:id/retry", s.retryArticle)

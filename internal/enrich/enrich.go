@@ -477,9 +477,11 @@ func (p *Pool) setStatus(ctx context.Context, log *slog.Logger, id, status, errM
 	}
 }
 
-// setFailed records a terminal stage failure with its error message.
+// setFailed records a terminal stage failure with its error message. When the
+// error carries a raw LLM response that failed to decode (rawResponseOf), that
+// response is persisted alongside the error so the UI can show it verbatim.
 func (p *Pool) setFailed(ctx context.Context, id, status string, err error) {
-	if setErr := p.store.SetStatus(ctx, id, status, err.Error()); setErr != nil {
+	if setErr := p.store.SetFailed(ctx, id, status, err.Error(), rawResponseOf(err)); setErr != nil {
 		slog.Error("enrich: failed to set failed status",
 			"article_id", id,
 			"status", status,
@@ -814,4 +816,25 @@ func isRetryable(err error) bool {
 		return re.Retryable()
 	}
 	return false
+}
+
+// rawResponder is implemented by errors that carry the raw LLM output that
+// failed to decode (llm.DecodeError). The accessor is duck-typed so this
+// package need not import llm.
+type rawResponder interface {
+	RawResponse() string
+}
+
+// rawResponseOf returns the raw LLM response carried by err, or "" when err does
+// not carry one (e.g. a fetch failure, an HTTP/network error, or a validation
+// error).
+func rawResponseOf(err error) string {
+	if err == nil {
+		return ""
+	}
+	var rr rawResponder
+	if errors.As(err, &rr) {
+		return rr.RawResponse()
+	}
+	return ""
 }

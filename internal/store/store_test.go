@@ -666,6 +666,77 @@ func TestRetryArticle(t *testing.T) {
 	}
 }
 
+func TestSetFailedAndGetArticleRaw(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/raw")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	const raw = `{"sentences": [ {"start_index": 0, "end_` // truncated JSON
+	if err := s.SetFailed(ctx, a.ID, model.StatusEnrichFailed, "llm: unmarshal enrichment content: unexpected end of JSON input", raw); err != nil {
+		t.Fatalf("SetFailed: %v", err)
+	}
+
+	got, err := s.GetArticleRaw(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticleRaw: %v", err)
+	}
+	if got.Status != model.StatusEnrichFailed {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusEnrichFailed)
+	}
+	if got.Raw != raw {
+		t.Errorf("raw: got %q, want %q", got.Raw, raw)
+	}
+	if got.Error == "" {
+		t.Error("expected error message to be stored")
+	}
+
+	// A plain status flip (fresh attempt) clears the captured raw response.
+	if err := s.SetStatus(ctx, a.ID, model.StatusEnriching, ""); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	cleared, err := s.GetArticleRaw(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticleRaw after SetStatus: %v", err)
+	}
+	if cleared.Raw != "" {
+		t.Errorf("raw should be cleared by SetStatus, got %q", cleared.Raw)
+	}
+}
+
+func TestGetArticleRaw_NotFound(t *testing.T) {
+	s := openStore(t)
+	if _, err := s.GetArticleRaw(context.Background(), "no-such-id"); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRetryArticle_ClearsRawResponse(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/raw-retry")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.SetFailed(ctx, a.ID, model.StatusEnrichFailed, "boom", "RAW"); err != nil {
+		t.Fatalf("SetFailed: %v", err)
+	}
+	if err := s.RetryArticle(ctx, a.ID); err != nil {
+		t.Fatalf("RetryArticle: %v", err)
+	}
+	got, err := s.GetArticleRaw(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticleRaw: %v", err)
+	}
+	if got.Raw != "" {
+		t.Errorf("raw should be cleared after retry, got %q", got.Raw)
+	}
+}
+
 func TestRetryArticle_FetchFailedGoesToQueued(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

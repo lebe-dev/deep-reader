@@ -404,11 +404,14 @@ func (s *SQLite) DeleteArticle(ctx context.Context, id string) error {
 }
 
 // SetStatus updates an article's status and error text, stamping updated_at.
+// It also clears any previously captured raw LLM response — a plain status flip
+// (e.g. into an in-flight state) starts a fresh attempt; SetFailed is the path
+// that stores a raw response.
 func (s *SQLite) SetStatus(ctx context.Context, id, status, errMsg string) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
-	const q = `UPDATE articles SET status=?, error=?, updated_at=? WHERE id=?`
+	const q = `UPDATE articles SET status=?, error=?, raw_llm_response='', updated_at=? WHERE id=?`
 	res, err := s.write.ExecContext(ctx, q, status, errMsg, fmtTime(now()), id)
 	if err != nil {
 		return fmt.Errorf("store: SetStatus: %w", err)
@@ -419,6 +422,39 @@ func (s *SQLite) SetStatus(ctx context.Context, id, status, errMsg string) error
 	}
 	slog.Debug("store: article status updated", "article_id", id, "status", status)
 	return nil
+}
+
+// SetFailed records a terminal stage failure, storing the error message and the
+// raw LLM response (when available) for inspection, and stamps updated_at.
+func (s *SQLite) SetFailed(ctx context.Context, id, status, errMsg, rawLLMResponse string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	const q = `UPDATE articles SET status=?, error=?, raw_llm_response=?, updated_at=? WHERE id=?`
+	res, err := s.write.ExecContext(ctx, q, status, errMsg, rawLLMResponse, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: SetFailed: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article failed status set", "article_id", id, "status", status, "raw_bytes", len(rawLLMResponse))
+	return nil
+}
+
+// GetArticleRaw returns the raw LLM response (with error/status) captured for an
+// article, or [ports.ErrNotFound]. Raw is empty when nothing was captured.
+func (s *SQLite) GetArticleRaw(ctx context.Context, id string) (*model.ArticleRaw, error) {
+	const q = `SELECT id, status, error, raw_llm_response FROM articles WHERE id = ?`
+	var r model.ArticleRaw
+	if err := s.db.QueryRowContext(ctx, q, id).Scan(&r.ID, &r.Status, &r.Error, &r.Raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ports.ErrNotFound
+		}
+		return nil, fmt.Errorf("store: GetArticleRaw: %w", err)
+	}
+	return &r, nil
 }
 
 // sentenceCoverage returns the fraction [0,1] of tokens in [0,tokenCount) that
@@ -486,7 +522,7 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 		return fmt.Errorf("store: SaveEnrichment upsert enrichment: %w", err)
 	}
 
-	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=?, enrichment_coverage=? WHERE id=?`
+	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=?, enrichment_coverage=?, raw_llm_response='' WHERE id=?`
 	res, err := tx.ExecContext(ctx, updArticle, fmtTime(enrichedAt), fmtTime(now()), coverage, id)
 	if err != nil {
 		return fmt.Errorf("store: SaveEnrichment update article: %w", err)
@@ -549,7 +585,8 @@ func (s *SQLite) SaveContent(ctx context.Context, id string, c ports.ContentUpda
 
 	const q = `UPDATE articles
 	           SET source_url=?, title=?, author=?, source_domain=?, lang=?,
-	               original_text=?, tokens=?, status='fetched', error='', updated_at=?
+	               original_text=?, tokens=?, status='fetched', error='',
+	               raw_llm_response='', updated_at=?
 	           WHERE id=?`
 	res, err := s.write.ExecContext(ctx, q,
 		c.SourceURL, c.Title, c.Author, c.SourceDomain, c.Lang,
@@ -585,6 +622,7 @@ func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 	                   ELSE 'queued'
 	               END,
 	               error = '',
+	               raw_llm_response = '',
 	               enriched_at = '',
 	               updated_at = ?
 	           WHERE id = ?`
@@ -614,9 +652,9 @@ func (s *SQLite) ReEnrich(ctx context.Context, id, mode string) error {
 
 	var q string
 	if mode == model.ReEnrichModeTopup {
-		q = `UPDATE articles SET status='topup_queued', error='', updated_at=? WHERE id=?`
+		q = `UPDATE articles SET status='topup_queued', error='', raw_llm_response='', updated_at=? WHERE id=?`
 	} else {
-		q = `UPDATE articles SET status='fetched', error='', enriched_at='', updated_at=? WHERE id=?`
+		q = `UPDATE articles SET status='fetched', error='', raw_llm_response='', enriched_at='', updated_at=? WHERE id=?`
 	}
 	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
 	if err != nil {

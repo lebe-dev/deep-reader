@@ -162,7 +162,19 @@ type Store interface {
 	// SetStatus updates an article's status and error text, stamping UpdatedAt
 	// (and EnrichedAt when status==enriched is set via SaveEnrichment, not
 	// here). errMsg is stored only for the *_failed states; pass "" otherwise.
+	// It always clears any captured raw LLM response (see SetFailed).
 	SetStatus(ctx context.Context, id, status, errMsg string) error
+
+	// SetFailed records a terminal stage failure: status (fetch_failed or
+	// enrich_failed), the error message, and rawLLMResponse — the verbatim model
+	// output captured when the enrichment response could not be decoded (empty
+	// for fetch failures or non-decode errors). Stamps UpdatedAt. Returns
+	// ErrNotFound if the article does not exist.
+	SetFailed(ctx context.Context, id, status, errMsg, rawLLMResponse string) error
+
+	// GetArticleRaw returns the raw LLM response (and error/status) captured for
+	// an article, or ErrNotFound. Raw is empty when nothing was captured.
+	GetArticleRaw(ctx context.Context, id string) (*model.ArticleRaw, error)
 
 	// SaveContent persists fetched/extracted content for an article and advances
 	// its status to fetched (clearing any prior error). Returns ErrNotFound if

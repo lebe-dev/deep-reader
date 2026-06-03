@@ -3,6 +3,7 @@ package llm_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,73 @@ func TestEnrich_Non2xxReturnsAPIError(t *testing.T) {
 				t.Errorf("Retryable() = %v, want %v", apiErr.Retryable(), tc.retryable)
 			}
 		})
+	}
+}
+
+// TestEnrich_DecodeErrorCarriesRaw asserts that when a 2xx response carries
+// malformed enrichment content, Enrich returns a *llm.DecodeError whose
+// RawResponse() is the verbatim (undecodable) model output and that is not
+// flagged retryable.
+func TestEnrich_DecodeErrorCarriesRaw(t *testing.T) {
+	const badContent = `{"sentences": [ {"start_index": 0, "end_` // truncated JSON
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		type choice struct {
+			Message message `json:"message"`
+		}
+		type resp struct {
+			Choices []choice `json:"choices"`
+		}
+		b, _ := json.Marshal(resp{Choices: []choice{{Message: message{Role: "assistant", Content: badContent}}}})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if decErr.RawResponse() != badContent {
+		t.Errorf("RawResponse() = %q, want %q", decErr.RawResponse(), badContent)
+	}
+
+	// A decode failure must be permanent: retrying yields the same bad answer.
+	var re interface{ Retryable() bool }
+	if errors.As(err, &re) {
+		t.Errorf("DecodeError should not be retryable, but Retryable() = %v", re.Retryable())
+	}
+}
+
+// TestEnrich_DecodeErrorCarriesBodyOnEnvelope asserts that when the chat
+// envelope itself is unparseable, the raw HTTP body is captured.
+func TestEnrich_DecodeErrorCarriesBodyOnEnvelope(t *testing.T) {
+	const badBody = `not json at all`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(badBody))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if decErr.RawResponse() != badBody {
+		t.Errorf("RawResponse() = %q, want %q", decErr.RawResponse(), badBody)
 	}
 }
 

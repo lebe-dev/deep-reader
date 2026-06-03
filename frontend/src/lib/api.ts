@@ -11,6 +11,7 @@ import { getSyncState } from './db';
 import type {
 	AddArticleResponse,
 	ArticlePayload,
+	ArticleRaw,
 	AuthResponse,
 	ConfigResponse,
 	Progress,
@@ -178,6 +179,18 @@ export function getArticle(
 		signal,
 		query: { v: opts?.version },
 		cache: opts?.noStore ? 'no-store' : undefined
+	});
+}
+
+/**
+ * `GET /api/articles/:id/raw` — the raw LLM response captured when enrichment
+ * failed to decode the provider's answer. A debugging aid for `enrich_failed`
+ * articles; `raw` is empty when nothing was captured.
+ */
+export function getArticleRaw(id: string, signal?: AbortSignal): Promise<ArticleRaw> {
+	return request<ArticleRaw>(`/api/articles/${encodeURIComponent(id)}/raw`, {
+		signal,
+		cache: 'no-store'
 	});
 }
 

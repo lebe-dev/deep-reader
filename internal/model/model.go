@@ -289,6 +289,19 @@ type ArticlePayload struct {
 	EnrichmentCoverage float64 `json:"enrichment_coverage"`
 }
 
+// ArticleRaw is the raw LLM output captured when the enrichment stage failed to
+// decode the provider's response, returned by GET /api/articles/:id/raw so the
+// UI can show the unparsed answer for inspection. Raw is empty when nothing was
+// captured (e.g. a fetch failure, a network/HTTP error, or a successful enrich).
+type ArticleRaw struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	// Error is the failure message stored on the article (Article.Error).
+	Error string `json:"error,omitempty"`
+	// Raw is the verbatim model output that failed to decode.
+	Raw string `json:"raw"`
+}
+
 // ServerInfo holds the non-secret deployment configuration sent to the client
 // on bootstrap. Secrets (LLM_API_KEY, password hashes) are intentionally omitted.
 type ServerInfo struct {

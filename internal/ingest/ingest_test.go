@@ -120,6 +120,12 @@ func (f *fakeStore) DeleteArticle(_ context.Context, _ string) error { return ni
 func (f *fakeStore) SetStatus(_ context.Context, _, _, _ string) error {
 	return nil
 }
+func (f *fakeStore) SetFailed(_ context.Context, _, _, _, _ string) error {
+	return nil
+}
+func (f *fakeStore) GetArticleRaw(_ context.Context, _ string) (*model.ArticleRaw, error) {
+	return nil, ports.ErrNotFound
+}
 func (f *fakeStore) SaveEnrichment(_ context.Context, _ string, _ model.Enrichment, _ time.Time) error {
 	return nil
 }

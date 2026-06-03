@@ -10,6 +10,7 @@ import (
 
 	"deep-reader/internal/config"
 	"deep-reader/internal/enrich"
+	"deep-reader/internal/llm"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 )
@@ -25,15 +26,18 @@ type fakeStore struct {
 	enrichments map[string]model.Enrichment
 	// settings is returned by GetSettings.
 	settings model.Settings
-	// failedCalls counts SetStatus invocations that set a *_failed status.
+	// failedCalls counts SetFailed invocations (terminal *_failed transitions).
 	failedCalls map[string]int
+	// rawResponses records the raw LLM response captured per article via SetFailed.
+	rawResponses map[string]string
 }
 
 func newFakeStore(articles ...*model.Article) *fakeStore {
 	s := &fakeStore{
-		articles:    make(map[string]*model.Article),
-		enrichments: make(map[string]model.Enrichment),
-		failedCalls: make(map[string]int),
+		articles:     make(map[string]*model.Article),
+		enrichments:  make(map[string]model.Enrichment),
+		failedCalls:  make(map[string]int),
+		rawResponses: make(map[string]string),
 		settings: model.Settings{
 			CEFRLevel:                model.CEFRA2,
 			TargetLanguage:           model.DefaultTargetLanguage,
@@ -118,16 +122,38 @@ func (f *fakeStore) DeleteArticle(_ context.Context, id string) error {
 func (f *fakeStore) SetStatus(_ context.Context, id, status, errMsg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if status == model.StatusFetchFailed || status == model.StatusEnrichFailed {
-		f.failedCalls[id]++
-	}
 	a, ok := f.articles[id]
 	if !ok {
 		return ports.ErrNotFound
 	}
 	a.Status = status
 	a.Error = errMsg
+	delete(f.rawResponses, id)
 	return nil
+}
+
+func (f *fakeStore) SetFailed(_ context.Context, id, status, errMsg, raw string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedCalls[id]++
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.Status = status
+	a.Error = errMsg
+	f.rawResponses[id] = raw
+	return nil
+}
+
+func (f *fakeStore) GetArticleRaw(_ context.Context, id string) (*model.ArticleRaw, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return nil, ports.ErrNotFound
+	}
+	return &model.ArticleRaw{ID: a.ID, Status: a.Status, Error: a.Error, Raw: f.rawResponses[id]}, nil
 }
 
 func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpdate) error {
@@ -285,6 +311,13 @@ func (f *fakeStore) failedCount(id string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.failedCalls[id]
+}
+
+// rawResponse returns the raw LLM response captured for id via SetFailed.
+func (f *fakeStore) rawResponse(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rawResponses[id]
 }
 
 // originalText returns the stored original text for id.
@@ -624,6 +657,30 @@ func TestPermanentErrorMarksFailed(t *testing.T) {
 	}
 	if st.errMsg("article-3") == "" {
 		t.Error("expected error message to be stored")
+	}
+}
+
+// TestDecodeErrorPersistsRawResponse verifies that when the LLM call fails with
+// an llm.DecodeError (the response could not be parsed), the article is marked
+// enrich_failed and the raw model output is persisted for inspection.
+func TestDecodeErrorPersistsRawResponse(t *testing.T) {
+	article := makeArticle("article-raw", 3)
+	st := newFakeStore(article)
+	const raw = `{"sentences": [ {"start_index": 0, "end_` // truncated JSON
+	client := &fakeLLM{
+		failN:   100,
+		failErr: &llm.DecodeError{Raw: raw, Err: errors.New("llm: unmarshal enrichment content: unexpected end of JSON input")},
+	}
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, client)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-raw") == model.StatusEnrichFailed
+	})
+	if !ok {
+		t.Fatalf("expected status=enrich_failed, got %q", st.status("article-raw"))
+	}
+	if got := st.rawResponse("article-raw"); got != raw {
+		t.Errorf("raw response: got %q, want %q", got, raw)
 	}
 }
 

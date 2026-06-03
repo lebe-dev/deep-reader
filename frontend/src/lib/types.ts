@@ -328,6 +328,20 @@ export interface SentryConfig {
 	release: string;
 }
 
+/**
+ * `GET /api/articles/:id/raw` response — the verbatim LLM output captured when
+ * the enrichment stage failed to decode the provider's answer. `raw` is empty
+ * when nothing was captured (e.g. a fetch failure or a network/HTTP error).
+ */
+export interface ArticleRaw {
+	id: string;
+	status: Status;
+	/** Stored failure message (same as `ArticleMeta.error`). */
+	error?: string;
+	/** Verbatim model output that failed to decode. */
+	raw: string;
+}
+
 /** `POST /api/articles` and `POST /api/articles/:id/retry` response. */
 export interface AddArticleResponse {
 	id: string;

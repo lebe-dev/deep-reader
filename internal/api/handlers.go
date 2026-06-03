@@ -130,6 +130,23 @@ func (s *Server) getArticle(c fiber.Ctx) error {
 	return c.JSON(payload)
 }
 
+// getArticleRaw handles GET /api/articles/:id/raw — the raw LLM response
+// captured when the enrichment stage failed to decode the provider's answer.
+// It is a debugging aid for enrich_failed articles; Raw is empty when nothing
+// was captured. Unknown ids return 404.
+func (s *Server) getArticleRaw(c fiber.Ctx) error {
+	id := c.Params("id")
+
+	raw, err := s.store.GetArticleRaw(c.Context(), id)
+	if err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return sendError(c, fiber.StatusNotFound, "article not found")
+		}
+		return s.serverError(c, "get article raw", err)
+	}
+	return c.JSON(raw)
+}
+
 // addArticle handles POST /api/articles. Body: {url}. It ingests via the
 // Ingestor (dedup-transparent) and returns {id,status}. Blocked-host,
 // unparseable, too-large, and malformed-URL conditions map to 4xx.

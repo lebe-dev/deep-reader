@@ -45,6 +45,8 @@ type fakeStore struct {
 	progress       []model.Progress
 	payload        *model.ArticlePayload
 	getPayloadErr  error
+	rawResult      *model.ArticleRaw
+	rawErr         error
 	deleteErr      error
 	retryErr       error
 	reEnrichErr    error
@@ -97,6 +99,17 @@ func (f *fakeStore) GetArticlePayload(context.Context, string) (*model.ArticlePa
 func (f *fakeStore) DeleteArticle(context.Context, string) error { return f.deleteErr }
 func (f *fakeStore) SetStatus(context.Context, string, string, string) error {
 	return nil
+}
+
+func (f *fakeStore) SetFailed(context.Context, string, string, string, string) error {
+	return nil
+}
+
+func (f *fakeStore) GetArticleRaw(context.Context, string) (*model.ArticleRaw, error) {
+	if f.rawErr != nil {
+		return nil, f.rawErr
+	}
+	return f.rawResult, nil
 }
 
 func (f *fakeStore) SaveEnrichment(context.Context, string, model.Enrichment, time.Time) error {
@@ -302,6 +315,44 @@ func TestAPIAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetArticleRaw verifies GET /api/articles/:id/raw returns the captured raw
+// LLM response, and maps a missing article to 404.
+func TestGetArticleRaw(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		st := &fakeStore{
+			rawResult: &model.ArticleRaw{
+				ID:     "a1",
+				Status: model.StatusEnrichFailed,
+				Error:  "llm: unmarshal enrichment content: unexpected end of JSON input",
+				Raw:    `{"sentences": [ {"start_index": 0, "end_`,
+			},
+		}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/articles/a1/raw", nil, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		got := decode[model.ArticleRaw](t, resp)
+		if got.Raw != st.rawResult.Raw {
+			t.Errorf("raw = %q, want %q", got.Raw, st.rawResult.Raw)
+		}
+		if got.Error == "" {
+			t.Error("expected error message in response")
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		st := &fakeStore{rawErr: ports.ErrNotFound}
+		s := newTestServer(t, st, &fakeIngestor{})
+
+		resp := doReq(t, s, http.MethodGet, "/api/articles/missing/raw", nil, testToken)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
 }
 
 // TestConfigPublicAuthFlag verifies /api/config is reachable without a token and

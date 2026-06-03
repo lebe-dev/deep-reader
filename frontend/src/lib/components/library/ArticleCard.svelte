@@ -3,10 +3,12 @@
 	import { Button } from '$lib/components/ui/button';
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
+	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
 	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { enqueueRetry, enqueuePin } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import FileTextIcon from '@lucide/svelte/icons/file-text';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import PinIcon from '@lucide/svelte/icons/pin';
@@ -23,10 +25,14 @@
 	let { article, articleHref, isRead = false, progressPercent = 0 }: Props = $props();
 
 	let deleteOpen = $state(false);
+	let rawOpen = $state(false);
 
 	const isFailed = $derived(
 		article.status === 'fetch_failed' || article.status === 'enrich_failed'
 	);
+
+	// A raw LLM response is only captured for enrichment-stage decode failures.
+	const canViewRaw = $derived(article.status === 'enrich_failed');
 
 	const statusVariant = $derived.by(() => {
 		if (article.status === 'enriched') return 'default' as const;
@@ -157,6 +163,21 @@
 		<span class="shrink-0">{formatDate(article.created_at)}</span>
 
 		<div class="ml-auto flex items-center gap-1">
+			{#if canViewRaw}
+				<Button
+					size="sm"
+					variant="ghost"
+					onclick={(e: MouseEvent) => {
+						e.stopPropagation();
+						rawOpen = true;
+					}}
+					class="h-6 text-xs"
+					title="View the raw LLM response"
+				>
+					<FileTextIcon class="size-3" />
+					Raw
+				</Button>
+			{/if}
 			{#if isFailed}
 				<Button size="sm" variant="secondary" onclick={handleRetry} class="h-6 text-xs">
 					<RefreshCwIcon class="size-3" />
@@ -205,3 +226,7 @@
 </div>
 
 <DeleteDialog bind:open={deleteOpen} articleId={article.id} articleTitle={article.title} />
+
+{#if canViewRaw}
+	<RawResponseDialog bind:open={rawOpen} articleId={article.id} />
+{/if}

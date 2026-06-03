@@ -268,6 +268,29 @@ func (e *APIError) Retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
+// DecodeError wraps a failure to decode a successful (2xx) provider response —
+// either the chat envelope or the enrichment JSON inside it — together with the
+// raw model output that could not be parsed. The enrichment pool persists Raw
+// (via the RawResponse() accessor) so the UI can show the unparsed answer for
+// inspection. These errors are permanent (not Retryable): re-sending the same
+// prompt yields the same malformed answer.
+type DecodeError struct {
+	// Raw is the verbatim text that failed to decode: the message content when
+	// the enrichment JSON is malformed, or the whole HTTP body when the chat
+	// envelope itself could not be parsed.
+	Raw string
+	Err error
+}
+
+func (e *DecodeError) Error() string { return e.Err.Error() }
+
+func (e *DecodeError) Unwrap() error { return e.Err }
+
+// RawResponse returns the raw model output that failed to decode. It satisfies
+// the duck-typed accessor the enrichment pool uses to persist the response
+// without importing this package.
+func (e *DecodeError) RawResponse() string { return e.Raw }
+
 // ---------------------------------------------------------------------------
 // Enrich.
 // ---------------------------------------------------------------------------
@@ -382,17 +405,17 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: unmarshal response: %w", err)
+		return nil, ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: unmarshal response: %w", err)}
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return nil, ports.Usage{}, fmt.Errorf("llm: response contains no choices")
+		return nil, ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: response contains no choices")}
 	}
 
 	content := chatResp.Choices[0].Message.Content
 	var enrichment model.Enrichment
 	if err := json.Unmarshal([]byte(content), &enrichment); err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: unmarshal enrichment content: %w", err)
+		return nil, ports.Usage{}, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal enrichment content: %w", err)}
 	}
 
 	usage := ports.Usage{}
