@@ -22,8 +22,8 @@ import (
 // DefaultPromptTemplate is the built-in system-prompt template used when the
 // user has not configured a custom one via settings. The {{target_language}}
 // placeholder is substituted by RenderSystemPrompt at request time. The output
-// is the cleaned article body as plain text; the JSON wrapper is enforced
-// separately via the response schema (see llm.Normalize).
+// is the cleaned article body as plain text / markdown, returned directly with
+// no JSON wrapper (see llm.Normalize).
 const DefaultPromptTemplate = "You are a content-cleaning assistant. You are given the raw text of a web " +
 	"article that was extracted from a page and may still contain non-article noise. " +
 	"Remove everything that is NOT part of the article's actual prose, including: " +
@@ -39,8 +39,8 @@ const DefaultPromptTemplate = "You are a content-cleaning assistant. You are giv
 	"return the kept text verbatim, preserving wording, order, and paragraph breaks. " +
 	"The article will later be translated into {{target_language}} for a language learner, " +
 	"so fidelity of the original wording is essential. " +
-	"Return ONLY the JSON object matching the provided schema, with the cleaned article text " +
-	"in the \"content\" field. No markdown fences, no commentary."
+	"Return ONLY the cleaned article text itself, as plain text or markdown. " +
+	"No JSON, no code fences, no commentary."
 
 // RenderSystemPrompt resolves the effective normalization system prompt: the
 // user's custom template (settings.NormalizePrompt) when set, otherwise

@@ -65,7 +65,7 @@ type jsonSchema struct {
 type chatRequest struct {
 	Model          string         `json:"model"`
 	Messages       []chatMessage  `json:"messages"`
-	ResponseFormat responseFormat `json:"response_format"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	Temperature    float64        `json:"temperature"`
 }
 
@@ -428,7 +428,7 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: responseFormat{
+		ResponseFormat: &responseFormat{
 			Type: "json_schema",
 			JSONSchema: &jsonSchema{
 				Name:   "summary",
@@ -442,7 +442,7 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 	content, usage, err := c.postChat(ctx, reqBody)
 	if err != nil {
 		if isSchemaUnsupported(err) {
-			reqBody.ResponseFormat = responseFormat{Type: "json_object"}
+			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
 			content, usage, err = c.postChat(ctx, reqBody)
 		}
 		if err != nil {
@@ -458,29 +458,15 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 	return strings.TrimSpace(sr.Summary), usage, nil
 }
 
-// normalizeSchema constrains the normalization completion to a single
-// cleaned-text field, mirroring the summary wrapper.
-const normalizeSchema = `{
-  "type": "object",
-  "required": ["content"],
-  "additionalProperties": false,
-  "properties": {
-    "content": {"type": "string"}
-  }
-}`
-
-// normalizeResponse is the parsed normalization completion.
-type normalizeResponse struct {
-	Content string `json:"content"`
-}
-
 // Normalize runs the content-normalization pass of the fetch stage: it sends the
 // extracted article text to the LLM with the (possibly user-customized)
 // normalization prompt and returns the cleaned body, with the leftover
-// navigation / chrome / boilerplate removed. The fail-open guard
-// (normalize.Apply) keeps the original text whenever the model returns empty or
-// over-deletes, so a bad pass can never destroy the article. It performs exactly
-// one HTTP request; retry/backoff is the caller's responsibility (enrich.Pool).
+// navigation / chrome / boilerplate removed. The model replies with the cleaned
+// article as plain text / markdown (no JSON wrapper), so the completion is used
+// directly. The fail-open guard (normalize.Apply) keeps the original text
+// whenever the model returns empty or over-deletes, so a bad pass can never
+// destroy the article. It performs exactly one HTTP request; retry/backoff is
+// the caller's responsibility (enrich.Pool).
 func (c *Client) Normalize(ctx context.Context, title, text string, settings model.Settings) (string, ports.Usage, error) {
 	systemPrompt := normalize.RenderSystemPrompt(settings)
 	userPrompt := "Article title: " + title + "\n\nArticle text:\n" + text
@@ -490,34 +476,15 @@ func (c *Client) Normalize(ctx context.Context, title, text string, settings mod
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: responseFormat{
-			Type: "json_schema",
-			JSONSchema: &jsonSchema{
-				Name:   "normalized_content",
-				Schema: json.RawMessage(normalizeSchema),
-				Strict: true,
-			},
-		},
 		Temperature: 0,
 	}
 
 	content, usage, err := c.postChat(ctx, reqBody)
 	if err != nil {
-		if isSchemaUnsupported(err) {
-			reqBody.ResponseFormat = responseFormat{Type: "json_object"}
-			content, usage, err = c.postChat(ctx, reqBody)
-		}
-		if err != nil {
-			return "", usage, err
-		}
+		return "", usage, err
 	}
 
-	var nr normalizeResponse
-	if err := json.Unmarshal([]byte(content), &nr); err != nil {
-		transient := strings.TrimSpace(content) == ""
-		return "", usage, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal normalize content: %w", err), Transient: transient}
-	}
-	cleaned, _ := normalize.Apply(text, nr.Content)
+	cleaned, _ := normalize.Apply(text, content)
 	return cleaned, usage, nil
 }
 
@@ -532,7 +499,7 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: responseFormat{
+		ResponseFormat: &responseFormat{
 			Type: "json_schema",
 			JSONSchema: &jsonSchema{
 				Name:   "enrichment",
@@ -561,8 +528,7 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 				"model", reqBody.Model,
 				"err", err,
 			)
-			reqBody.ResponseFormat = responseFormat{Type: "json_object"}
-			reqBody.ResponseFormat.JSONSchema = nil
+			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
 			enrichment, usage, err = c.do(ctx, reqBody)
 		}
 	}
