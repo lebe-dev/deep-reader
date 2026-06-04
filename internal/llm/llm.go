@@ -63,10 +63,10 @@ type jsonSchema struct {
 }
 
 type chatRequest struct {
-	Model          string         `json:"model"`
-	Messages       []chatMessage  `json:"messages"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
-	Temperature    float64        `json:"temperature"`
+	Temperature    float64         `json:"temperature"`
 }
 
 type chatChoice struct {
