@@ -228,6 +228,75 @@ func TestAdd_NewURL(t *testing.T) {
 	}
 }
 
+func TestAddText_New(t *testing.T) {
+	st := newFakeStore()
+	wk := &fakeWorker{}
+	cfg := defaultCfg()
+	ing := ingest.New(cfg, st, wk)
+
+	const body = "First line is the title\nSecond paragraph with the body."
+	art, err := ing.AddText(context.Background(), "", body)
+	if err != nil {
+		t.Fatalf("AddText: unexpected error: %v", err)
+	}
+
+	// Worker must be notified to run the enrich stage.
+	if n := wk.notified.Load(); n != 1 {
+		t.Errorf("worker notified: got %d, want 1", n)
+	}
+
+	// Text is ingested already fetched, with content/tokens populated.
+	if art.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", art.Status, model.StatusFetched)
+	}
+	if art.OriginalText != body {
+		t.Errorf("original text not persisted: got %q", art.OriginalText)
+	}
+	if len(art.Tokens) == 0 {
+		t.Error("tokens must be populated for text articles")
+	}
+	if art.Title != "First line is the title" {
+		t.Errorf("derived title: got %q", art.Title)
+	}
+
+	// Persisted and retrievable under its content hash.
+	stored, err := st.GetArticleByHash(context.Background(), art.URLHash)
+	if err != nil {
+		t.Fatalf("GetArticleByHash: %v", err)
+	}
+	if stored.ID != art.ID {
+		t.Errorf("stored id mismatch: got %q, want %q", stored.ID, art.ID)
+	}
+}
+
+func TestAddText_DedupAndEmpty(t *testing.T) {
+	st := newFakeStore()
+	wk := &fakeWorker{}
+	ing := ingest.New(defaultCfg(), st, wk)
+
+	first, err := ing.AddText(context.Background(), "Custom title", "Same content")
+	if err != nil {
+		t.Fatalf("AddText first: %v", err)
+	}
+	if first.Title != "Custom title" {
+		t.Errorf("explicit title not used: got %q", first.Title)
+	}
+
+	// Same text → dedup hit returns the existing article.
+	second, err := ing.AddText(context.Background(), "", "Same content")
+	if err != nil {
+		t.Fatalf("AddText second: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("dedup miss: got %q, want %q", second.ID, first.ID)
+	}
+
+	// Empty text is rejected before any record is created.
+	if _, err := ing.AddText(context.Background(), "", "   "); err == nil {
+		t.Fatal("AddText: expected error for empty text")
+	}
+}
+
 func TestAdd_InvalidURLCreatesNoRecord(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}

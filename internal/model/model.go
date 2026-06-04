@@ -538,9 +538,13 @@ type MarkdownBudget struct {
 	ArticlesRemaining int `json:"articles_remaining"`
 }
 
-// AddArticleRequest is the POST /api/articles body.
+// AddArticleRequest is the POST /api/articles body. Either URL (fetch an
+// article from the web) or Text (ingest pasted raw content directly) is
+// provided. When Text is set, Title is an optional human-friendly heading.
 type AddArticleRequest struct {
-	URL string `json:"url"`
+	URL   string `json:"url"`
+	Text  string `json:"text"`
+	Title string `json:"title"`
 }
 
 // AddArticleResponse is the POST /api/articles response. Deduplication is

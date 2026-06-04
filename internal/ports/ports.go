@@ -331,6 +331,12 @@ type Ingestor interface {
 	// returned article carries its current status.
 	Add(ctx context.Context, rawURL string) (*model.Article, error)
 
+	// AddText ingests pasted raw text directly (no fetch stage): it tokenizes
+	// the text, persists the article in status=fetched, and notifies the worker
+	// to run enrichment. title is optional. On a dedup hit it returns the
+	// existing article. The returned article carries its current status.
+	AddText(ctx context.Context, title, text string) (*model.Article, error)
+
 	// Retry resumes a failed article from the stage that failed (re-fetch or
 	// re-enrich) and notifies the worker. Returns ErrNotFound for an unknown id.
 	Retry(ctx context.Context, id string) error

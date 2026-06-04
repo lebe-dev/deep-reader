@@ -738,19 +738,47 @@ func (s *SQLite) ReEnrich(ctx context.Context, id, mode string) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
-	var q string
 	if mode == model.ReEnrichModeTopup {
-		q = `UPDATE articles SET status='topup_queued', error='', raw_llm_response='', updated_at=? WHERE id=?`
-	} else {
-		q = `UPDATE articles SET status='fetched', error='', raw_llm_response='', enriched_at='', updated_at=? WHERE id=?`
+		const q = `UPDATE articles SET status='topup_queued', error='', raw_llm_response='', updated_at=? WHERE id=?`
+		res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
+		if err != nil {
+			return fmt.Errorf("store: ReEnrich: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ports.ErrNotFound
+		}
+		slog.Debug("store: article queued for re-enrich", "article_id", id, "mode", mode)
+		return nil
 	}
-	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
+
+	// Full re-enrich: clear the old enrichment blob and reset coverage to zero
+	// so the worker starts fresh instead of resuming the previous partial run.
+	tx, err := s.write.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: ReEnrich: %w", err)
+		return fmt.Errorf("store: ReEnrich begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	const updArticle = `UPDATE articles
+	                    SET status='fetched', error='', raw_llm_response='',
+	                        enriched_at='', enrichment_coverage=0, updated_at=?
+	                    WHERE id=?`
+	res, err := tx.ExecContext(ctx, updArticle, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: ReEnrich update article: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ports.ErrNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM enrichments WHERE article_id=?`, id); err != nil {
+		return fmt.Errorf("store: ReEnrich delete enrichment: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: ReEnrich commit: %w", err)
 	}
 	slog.Debug("store: article queued for re-enrich", "article_id", id, "mode", mode)
 	return nil

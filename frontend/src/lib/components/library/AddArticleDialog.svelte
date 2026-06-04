@@ -1,17 +1,24 @@
 <script lang="ts">
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import { enqueueAddArticle } from '$lib/sync/engine';
+	import { Textarea } from '$lib/components/ui/textarea';
+	import { enqueueAddArticle, enqueueAddArticleText } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
 	import { toast } from 'svelte-sonner';
 	import PlusIcon from '@lucide/svelte/icons/plus';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+	import LinkIcon from '@lucide/svelte/icons/link';
+	import FileTextIcon from '@lucide/svelte/icons/file-text';
 	import Loader2Icon from '@lucide/svelte/icons/loader-2';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 
 	// open is bindable so parent can control it, or the internal trigger button opens it.
 	let open = $state(false);
+	// Which input mode the dialog is showing: a URL to fetch, or raw pasted text.
+	let mode = $state<'url' | 'text'>('url');
 
 	// markdown.new daily budget (undefined until first sync, or when disabled).
 	const budget = $derived(syncStatus.markdownBudget);
@@ -20,6 +27,8 @@
 	const budgetExhausted = $derived(budgetActive && articlesLeft <= 0);
 
 	let url = $state('');
+	let text = $state('');
+	let title = $state('');
 	let submitting = $state(false);
 	let validationError = $state('');
 
@@ -39,97 +48,186 @@
 
 	function handleInput() {
 		if (validationError) {
-			validationError = validateUrl(url);
+			validationError = mode === 'url' ? validateUrl(url) : text.trim() ? '' : 'Text is required.';
 		}
+	}
+
+	function openWith(next: 'url' | 'text') {
+		mode = next;
+		validationError = '';
+		open = true;
 	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
-		const trimmed = url.trim();
-		validationError = validateUrl(trimmed);
-		if (validationError) return;
+
+		if (mode === 'url') {
+			const trimmed = url.trim();
+			validationError = validateUrl(trimmed);
+			if (validationError) return;
+
+			submitting = true;
+			try {
+				await enqueueAddArticle(trimmed);
+				toast('Article added — syncing in the background.');
+				resetFields();
+				open = false;
+			} catch {
+				toast.error('Failed to queue article. Try again.');
+			} finally {
+				submitting = false;
+			}
+			return;
+		}
+
+		const trimmedText = text.trim();
+		if (!trimmedText) {
+			validationError = 'Text is required.';
+			return;
+		}
 
 		submitting = true;
 		try {
-			await enqueueAddArticle(trimmed);
-			toast('Article added — syncing in the background.');
-			url = '';
+			await enqueueAddArticleText(trimmedText, title.trim());
+			toast('Text added — syncing in the background.');
+			resetFields();
 			open = false;
 		} catch {
-			toast.error('Failed to queue article. Try again.');
+			toast.error('Failed to queue text. Try again.');
 		} finally {
 			submitting = false;
 		}
 	}
 
+	function resetFields() {
+		url = '';
+		text = '';
+		title = '';
+	}
+
 	function handleOpenChange(value: boolean) {
 		if (!value) {
-			url = '';
+			resetFields();
 			validationError = '';
 		}
 		open = value;
 	}
+
+	const canSubmit = $derived(mode === 'url' ? !!url.trim() : !!text.trim());
 </script>
 
-<!-- Trigger button -->
-<Button onclick={() => handleOpenChange(true)} class="gap-2">
-	<PlusIcon class="size-4" />
-	Add article
-</Button>
+<!-- Split trigger: primary action adds by URL, the dropdown offers "Add text". -->
+<div class="flex">
+	<Button onclick={() => openWith('url')} class="gap-2 rounded-r-none">
+		<PlusIcon class="size-4" />
+		Add article
+	</Button>
+	<DropdownMenu.Root>
+		<DropdownMenu.Trigger>
+			{#snippet child({ props })}
+				<Button
+					{...props}
+					class="rounded-l-none border-l border-l-primary-foreground/20 px-2"
+					aria-label="More add options"
+				>
+					<ChevronDownIcon class="size-4" />
+				</Button>
+			{/snippet}
+		</DropdownMenu.Trigger>
+		<DropdownMenu.Content align="end">
+			<DropdownMenu.Item onSelect={() => openWith('url')}>
+				<LinkIcon class="size-4" />
+				Add article
+			</DropdownMenu.Item>
+			<DropdownMenu.Item onSelect={() => openWith('text')}>
+				<FileTextIcon class="size-4" />
+				Add text
+			</DropdownMenu.Item>
+		</DropdownMenu.Content>
+	</DropdownMenu.Root>
+</div>
 
 <Dialog.Root {open} onOpenChange={handleOpenChange}>
-	<Dialog.Content class="max-w-md">
+	<Dialog.Content class="flex max-h-[90vh] max-w-md flex-col overflow-hidden">
 		<Dialog.Header>
-			<Dialog.Title>Add article</Dialog.Title>
+			<Dialog.Title>{mode === 'url' ? 'Add article' : 'Add text'}</Dialog.Title>
 			<Dialog.Description>
-				Paste a URL to add an article to your library. It will be processed in the background.
+				{#if mode === 'url'}
+					Paste a URL to add an article to your library. It will be processed in the background.
+				{:else}
+					Paste the raw text of an article. It will be processed in the background — no fetching.
+				{/if}
 			</Dialog.Description>
 		</Dialog.Header>
 
-		<form onsubmit={handleSubmit} class="mt-2 space-y-3">
-			<div class="space-y-1.5">
-				<Input
-					type="url"
-					placeholder="https://example.com/article"
-					bind:value={url}
-					oninput={handleInput}
-					disabled={submitting}
-					aria-invalid={!!validationError || undefined}
-					aria-describedby={validationError ? 'url-error' : undefined}
-					autofocus
-				/>
-				{#if validationError}
-					<p id="url-error" class="text-destructive text-xs">{validationError}</p>
-				{/if}
-			</div>
+		<form onsubmit={handleSubmit} class="mt-2 flex min-h-0 flex-1 flex-col space-y-3">
+			{#if mode === 'url'}
+				<div class="space-y-1.5">
+					<Input
+						type="url"
+						placeholder="https://example.com/article"
+						bind:value={url}
+						oninput={handleInput}
+						disabled={submitting}
+						aria-invalid={!!validationError || undefined}
+						aria-describedby={validationError ? 'add-error' : undefined}
+						autofocus
+					/>
+					{#if validationError}
+						<p id="add-error" class="text-destructive text-xs">{validationError}</p>
+					{/if}
+				</div>
 
-			{#if budgetActive}
-				{#if budgetExhausted}
-					<div
-						class="bg-muted text-muted-foreground flex items-start gap-2 rounded-md p-2.5 text-xs"
-						role="status"
-					>
-						<TriangleAlertIcon class="text-amber-500 mt-0.5 size-3.5 shrink-0" />
-						<span>
-							markdown.new daily limit reached ({budget!.daily_limit} units). New articles will use the
-							built-in extractor until it resets (UTC midnight).
-						</span>
-					</div>
-				{:else}
-					<div class="text-muted-foreground flex items-center gap-1.5 text-xs">
-						<SparklesIcon class="size-3.5 shrink-0" />
-						<span>
-							~{articlesLeft}
-							{articlesLeft === 1 ? 'conversion' : 'conversions'} left today via markdown.new
-							<span class="text-muted-foreground/60"
-								>({budget!.units_remaining}/{budget!.daily_limit} units)</span
-							>
-						</span>
-					</div>
+				{#if budgetActive}
+					{#if budgetExhausted}
+						<div
+							class="bg-muted text-muted-foreground flex items-start gap-2 rounded-md p-2.5 text-xs"
+							role="status"
+						>
+							<TriangleAlertIcon class="text-amber-500 mt-0.5 size-3.5 shrink-0" />
+							<span>
+								markdown.new daily limit reached ({budget!.daily_limit} units). New articles will use
+								the built-in extractor until it resets (UTC midnight).
+							</span>
+						</div>
+					{:else}
+						<div class="text-muted-foreground flex items-center gap-1.5 text-xs">
+							<SparklesIcon class="size-3.5 shrink-0" />
+							<span>
+								~{articlesLeft}
+								{articlesLeft === 1 ? 'conversion' : 'conversions'} left today via markdown.new
+								<span class="text-muted-foreground/60"
+									>({budget!.units_remaining}/{budget!.daily_limit} units)</span
+								>
+							</span>
+						</div>
+					{/if}
 				{/if}
+			{:else}
+				<div class="flex min-h-0 flex-1 flex-col space-y-1.5 overflow-y-auto">
+					<Input
+						type="text"
+						placeholder="Title (optional)"
+						bind:value={title}
+						disabled={submitting}
+						autofocus
+					/>
+					<Textarea
+						placeholder="Paste the article text here…"
+						bind:value={text}
+						oninput={handleInput}
+						disabled={submitting}
+						aria-invalid={!!validationError || undefined}
+						aria-describedby={validationError ? 'add-error' : undefined}
+						class="min-h-40 flex-1 resize-none"
+					/>
+					{#if validationError}
+						<p id="add-error" class="text-destructive text-xs">{validationError}</p>
+					{/if}
+				</div>
 			{/if}
 
-			<Dialog.Footer class="flex justify-end gap-2">
+			<Dialog.Footer class="flex shrink-0 justify-end gap-2">
 				<Button
 					type="button"
 					variant="outline"
@@ -138,7 +236,7 @@
 				>
 					Cancel
 				</Button>
-				<Button type="submit" disabled={submitting || !url.trim()}>
+				<Button type="submit" disabled={submitting || !canSubmit}>
 					{#if submitting}
 						<Loader2Icon class="size-4 animate-spin" />
 					{/if}

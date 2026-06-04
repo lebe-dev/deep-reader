@@ -188,9 +188,11 @@ func (f *fakeStore) DeleteSession(_ context.Context, tokenHash string) error {
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
 	add          func(string) (*model.Article, error)
+	addText      func(string, string) (*model.Article, error)
 	retry        func(string) error
 	reEnrich     func(string, string) error
 	lastAddURL   string
+	lastAddText  [2]string
 	lastReEnrich [2]string
 }
 
@@ -200,6 +202,14 @@ func (f *fakeIngestor) Add(_ context.Context, rawURL string) (*model.Article, er
 		return f.add(rawURL)
 	}
 	return &model.Article{ID: "art-1", Status: model.StatusQueued}, nil
+}
+
+func (f *fakeIngestor) AddText(_ context.Context, title, text string) (*model.Article, error) {
+	f.lastAddText = [2]string{title, text}
+	if f.addText != nil {
+		return f.addText(title, text)
+	}
+	return &model.Article{ID: "art-1", Status: model.StatusFetched}, nil
 }
 
 func (f *fakeIngestor) Retry(_ context.Context, id string) error {

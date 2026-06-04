@@ -27,6 +27,7 @@ import (
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
+	"deep-reader/internal/tokenize"
 )
 
 // Ingestor orchestrates the article ingestion pipeline. Use [New] to construct.
@@ -132,6 +133,88 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 	ing.worker.Notify()
 
 	return article, nil
+}
+
+// AddText ingests pasted raw text directly, bypassing the fetch/extract stage.
+// It tokenizes the text, persists the article already in status=fetched (with
+// its content saved to the database), and notifies the worker, which runs the
+// enrich stage asynchronously. title is optional; when empty a heading is
+// derived from the first line of text.
+//
+// Dedup is by a SHA-256 of the text (prefixed so it cannot collide with a URL
+// hash). A matching article at the current enrichment version is returned as-is.
+func (ing *Ingestor) AddText(ctx context.Context, title, text string) (*model.Article, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, fmt.Errorf("ingest: empty text")
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = deriveTitle(text)
+	}
+
+	hash := URLHash("text:" + text)
+	slog.Debug("ingest: add text requested", "url_hash", hash, "bytes", len(text))
+
+	// Dedup against an already-ingested identical paste.
+	existing, err := ing.store.GetArticleByHash(ctx, hash)
+	if err == nil {
+		if existing.EnrichmentVersion == ing.cfg.EnrichmentVersion {
+			slog.Info("ingest: returning cached text article (dedup hit)", "article_id", existing.ID, "url_hash", hash)
+			return existing, nil
+		}
+		slog.Info("ingest: enrichment version mismatch for text, re-ingesting", "article_id", existing.ID, "url_hash", hash)
+	} else if !isNotFound(err) {
+		return nil, fmt.Errorf("ingest: dedup lookup: %w", err)
+	}
+
+	now := time.Now().UTC()
+	article := &model.Article{
+		ID:                ulid.Make().String(),
+		URLHash:           hash,
+		Title:             title,
+		Status:            model.StatusFetched,
+		OriginalText:      text,
+		Tokens:            tokenize.Tokenize(text),
+		EnrichmentVersion: ing.cfg.EnrichmentVersion,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+
+	if err := ing.store.CreateArticle(ctx, article); err != nil {
+		if isErr(err, ports.ErrDuplicate) {
+			slog.Debug("ingest: duplicate text insert race, returning existing article", "url_hash", hash)
+			got, lookupErr := ing.store.GetArticleByHash(ctx, hash)
+			if lookupErr != nil {
+				return nil, fmt.Errorf("ingest: post-duplicate lookup: %w", lookupErr)
+			}
+			return got, nil
+		}
+		return nil, fmt.Errorf("ingest: create text article: %w", err)
+	}
+
+	slog.Info("ingest: text article added", "article_id", article.ID, "title", article.Title, "status", article.Status)
+
+	ing.worker.Notify()
+
+	return article, nil
+}
+
+// deriveTitle builds a short heading from the first non-empty line of text,
+// truncated to a reasonable length. Returns "Untitled" if nothing usable.
+func deriveTitle(text string) string {
+	const maxLen = 120
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if r := []rune(line); len(r) > maxLen {
+			return strings.TrimSpace(string(r[:maxLen])) + "…"
+		}
+		return line
+	}
+	return "Untitled"
 }
 
 // Retry resumes a failed article from the stage that failed and notifies the

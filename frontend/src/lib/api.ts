@@ -203,6 +203,19 @@ export function addArticle(url: string, signal?: AbortSignal): Promise<AddArticl
 	return request<AddArticleResponse>('/api/articles', { method: 'POST', body: { url }, signal });
 }
 
+/** `POST /api/articles` — add an article from pasted raw text (title optional). */
+export function addArticleText(
+	text: string,
+	title?: string,
+	signal?: AbortSignal
+): Promise<AddArticleResponse> {
+	return request<AddArticleResponse>('/api/articles', {
+		method: 'POST',
+		body: { text, title: title ?? '' },
+		signal
+	});
+}
+
 /** `DELETE /api/articles/:id` — remove an article from the library. */
 export function deleteArticle(id: string, signal?: AbortSignal): Promise<void> {
 	return request<void>(`/api/articles/${encodeURIComponent(id)}`, { method: 'DELETE', signal });

@@ -26,6 +26,7 @@ export type OutboxKind =
 	| 'progress'
 	| 'settings'
 	| 'add_article'
+	| 'add_text'
 	| 'delete_article'
 	| 'retry'
 	| 'reenrich'
@@ -36,6 +37,7 @@ export interface OutboxPayloadMap {
 	progress: { article_id: string } & ProgressUpdate;
 	settings: SettingsPatch;
 	add_article: { url: string };
+	add_text: { text: string; title: string };
 	delete_article: { id: string };
 	retry: { id: string };
 	reenrich: { id: string; mode: ReEnrichMode };

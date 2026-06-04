@@ -156,11 +156,19 @@ func (s *Server) addArticle(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
 	}
-	if req.URL == "" {
-		return sendError(c, fiber.StatusBadRequest, "url is required")
-	}
 
-	article, err := s.ingest.Add(c.Context(), req.URL)
+	var (
+		article *model.Article
+		err     error
+	)
+	switch {
+	case strings.TrimSpace(req.Text) != "":
+		article, err = s.ingest.AddText(c.Context(), req.Title, req.Text)
+	case req.URL != "":
+		article, err = s.ingest.Add(c.Context(), req.URL)
+	default:
+		return sendError(c, fiber.StatusBadRequest, "url or text is required")
+	}
 	if err != nil {
 		status, msg := mapAddError(err)
 		if status >= 500 {

@@ -49,7 +49,7 @@ func isBadURL(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	for _, frag := range []string{"normalize URL", "URL has no host", "empty URL", "parse:"} {
+	for _, frag := range []string{"normalize URL", "URL has no host", "empty URL", "empty text", "parse:"} {
 		if strings.Contains(msg, frag) {
 			return true
 		}

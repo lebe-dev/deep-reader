@@ -846,6 +846,102 @@ func TestRetryArticle_NotFound(t *testing.T) {
 	}
 }
 
+// ── ReEnrich ──────────────────────────────────────────────────────────────
+
+func TestReEnrich_FullClearsEnrichmentAndCoverage(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/reenrich-full")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	enrichment := model.Enrichment{
+		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 0, Translation: "Hi"}},
+	}
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	// Verify coverage is non-zero before re-enrich.
+	before, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload before ReEnrich: %v", err)
+	}
+	if before.EnrichmentCoverage == 0 {
+		t.Fatal("expected non-zero coverage before re-enrich")
+	}
+
+	if err := s.ReEnrich(ctx, a.ID, model.ReEnrichModeFull); err != nil {
+		t.Fatalf("ReEnrich: %v", err)
+	}
+
+	gotArticle, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after ReEnrich: %v", err)
+	}
+	if gotArticle.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", gotArticle.Status, model.StatusFetched)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload after ReEnrich: %v", err)
+	}
+	if payload.EnrichmentCoverage != 0 {
+		t.Errorf("enrichment_coverage: got %v, want 0", payload.EnrichmentCoverage)
+	}
+	if payload.Enrichment != nil {
+		t.Errorf("enrichment blob should be nil after full re-enrich, got %+v", payload.Enrichment)
+	}
+}
+
+func TestReEnrich_TopupPreservesEnrichment(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/reenrich-topup")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	enrichment := model.Enrichment{
+		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 0, Translation: "Hi"}},
+	}
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	if err := s.ReEnrich(ctx, a.ID, model.ReEnrichModeTopup); err != nil {
+		t.Fatalf("ReEnrich: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle after topup: %v", err)
+	}
+	if got.Status != model.StatusTopupQueued {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusTopupQueued)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload after topup: %v", err)
+	}
+	if payload.Enrichment == nil {
+		t.Error("enrichment blob should be preserved for topup")
+	}
+}
+
+func TestReEnrich_NotFound(t *testing.T) {
+	s := openStore(t)
+	err := s.ReEnrich(context.Background(), "no-such-id", model.ReEnrichModeFull)
+	if !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
 // ── SetPinned ──────────────────────────────────────────────────────────────
 
 func TestSetPinned(t *testing.T) {

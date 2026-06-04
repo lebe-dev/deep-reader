@@ -7,6 +7,7 @@ import { db, enqueueOutbox, getSyncState, updateSyncState, type OutboxEntry } fr
 import { clearSession } from '$lib/auth/store.svelte';
 import {
 	addArticle as apiAddArticle,
+	addArticleText as apiAddArticleText,
 	deleteArticle as apiDeleteArticle,
 	getArticle as apiGetArticle,
 	getConfig,
@@ -176,6 +177,11 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 			await apiAddArticle(url);
 			return;
 		}
+		case 'add_text': {
+			const { text, title } = entry.payload as { text: string; title: string };
+			await apiAddArticleText(text, title);
+			return;
+		}
 		case 'delete_article': {
 			const { id } = entry.payload as { id: string };
 			await apiDeleteArticle(id);
@@ -277,6 +283,12 @@ export async function enqueueSettings(patch: SettingsPatch): Promise<void> {
 /** Enqueue adding an article by URL. */
 export async function enqueueAddArticle(url: string): Promise<void> {
 	await enqueueOutbox('add_article', { url });
+	if (isOnline()) sync().catch(console.warn);
+}
+
+/** Enqueue adding an article from pasted raw text (title optional). */
+export async function enqueueAddArticleText(text: string, title = ''): Promise<void> {
+	await enqueueOutbox('add_text', { text, title });
 	if (isOnline()) sync().catch(console.warn);
 }
 
