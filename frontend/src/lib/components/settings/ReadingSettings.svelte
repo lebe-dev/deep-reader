@@ -1,5 +1,6 @@
 <!-- Reading / language settings card.
-     Manages: CEFR level, min difficulty to highlight, reader font.
+     Manages: CEFR level, min difficulty to highlight, reader font, markdown.new
+     budget warning, and the bot-wall / captcha detection signatures.
      Writes optimistically via enqueueSettings (outbox → PATCH /api/settings).
 -->
 <script lang="ts">
@@ -11,10 +12,12 @@
 	import * as Select from '$lib/components/ui/select';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { Separator } from '$lib/components/ui/separator';
+	import PromptEditor from '$lib/components/settings/PromptEditor.svelte';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
-	import type { CefrLevel, Settings } from '$lib/types';
+	import type { CefrLevel, Settings, ServerInfo } from '$lib/types';
 	import {
 		readerFont,
 		setReaderFont,
@@ -43,6 +46,7 @@
 	// ---------------------------------------------------------------------------
 
 	let settings = $state<Settings | undefined>(undefined);
+	let serverInfo = $state<ServerInfo | undefined>(undefined);
 
 	// ---------------------------------------------------------------------------
 	// Lifecycle — subscribe to the sync_state singleton so settings appear as
@@ -52,6 +56,7 @@
 	onMount(() => {
 		const sub = liveQuery(() => db.sync_state.get(SYNC_STATE_ID)).subscribe({
 			next(state) {
+				if (state?.serverInfo) serverInfo = state.serverInfo;
 				if (!state?.settings) return;
 				settings = state.settings;
 			},
@@ -69,7 +74,7 @@
 
 	type PatchableField = Pick<
 		Settings,
-		'cefr_level' | 'min_difficulty_to_highlight' | 'markdown_warn_threshold'
+		'cefr_level' | 'min_difficulty_to_highlight' | 'markdown_warn_threshold' | 'bot_wall_signatures'
 	>;
 
 	async function patchField(patch: Partial<PatchableField>) {
@@ -203,6 +208,26 @@
 					off.
 				</p>
 			</div>
+
+			<Separator />
+
+			<!-- Bot-wall / captcha detection signatures -->
+			<PromptEditor
+				id="bot-wall-signatures"
+				label="Bot-wall / captcha signatures"
+				rows={10}
+				saved={settings.bot_wall_signatures}
+				defaultValue={serverInfo?.bot_wall_signatures_default ?? ''}
+				onSave={(value) => patchField({ bot_wall_signatures: value })}
+				onReset={() => patchField({ bot_wall_signatures: '' })}
+			>
+				{#snippet help()}
+					One signature per line. When a fetched page is short and its title or text contains any of
+					these (case-insensitive) substrings, it is flagged as a bot-verification / captcha page
+					and marked <strong>Blocked</strong> before any LLM call — so no tokens are spent on a challenge
+					page. Pre-filled with the defaults; edit to customise or “Reset to default”.
+				{/snippet}
+			</PromptEditor>
 		{/if}
 	</Card.Content>
 </Card.Root>

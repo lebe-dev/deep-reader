@@ -129,6 +129,10 @@ func (f *fakeStore) GetArticleRaw(_ context.Context, _ string) (*model.ArticleRa
 func (f *fakeStore) SaveEnrichment(_ context.Context, _ string, _ model.Enrichment, _ time.Time) error {
 	return nil
 }
+func (f *fakeStore) SaveEnrichmentProgress(_ context.Context, _ string, _ model.Enrichment) error {
+	return nil
+}
+func (f *fakeStore) SaveSummary(_ context.Context, _, _ string) error           { return nil }
 func (f *fakeStore) ListWork(_ context.Context, _ int) ([]model.Article, error) { return nil, nil }
 func (f *fakeStore) UpsertProgress(_ context.Context, _ model.Progress) (bool, error) {
 	return false, nil

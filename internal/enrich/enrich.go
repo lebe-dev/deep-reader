@@ -218,6 +218,10 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	if len(tokens) == 0 {
 		tokens = payload.Tokens
 	}
+	text := a.OriginalText
+	if text == "" {
+		text = payload.OriginalText
+	}
 
 	spans := uncoveredSpans(existing, len(tokens))
 	if len(spans) == 0 {
@@ -229,6 +233,10 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		log.Info("enrich: topup found no uncovered spans, nothing to do")
 		return
 	}
+	// Widen the uncovered gaps to whole sentences so each span the LLM receives
+	// contains complete sentences (it now sees only the spanned tokens, not the
+	// whole article — see llm.buildSpanPrompt).
+	spans = expandSpansToSentences(text, tokens, spans)
 
 	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
 
@@ -257,14 +265,14 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 			addition = &model.Enrichment{}
 		}
 
-		merged := mergeEnrichment(existing, *addition)
-
-		// Validate the merged result (additions may carry out-of-range indices).
-		if valErr := validateEnrichment(&merged, tokens); valErr != nil {
-			lastErr = valErr
-			log.Warn("enrich: topup validation failed, will retry", "attempt", attempt, "max_retries", maxRetries, "err", valErr)
-			continue
+		// Drop individually-invalid additions instead of failing the whole pass
+		// (mirrors the per-chunk path): a malformed entry costs only itself, and
+		// any still-uncovered span surfaces again on the next top-up.
+		clean := sanitizeEnrichment(*addition, tokens)
+		if dropped := droppedCount(*addition, clean); dropped > 0 {
+			log.Warn("enrich: topup dropped invalid annotations", "dropped", dropped)
 		}
+		merged := mergeEnrichment(existing, clean)
 
 		if err := p.store.SaveEnrichment(ctx, a.ID, merged, time.Now().UTC()); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
@@ -295,6 +303,50 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	}
 }
 
+// ErrBotWall is returned (terminal, non-retryable) when the fetched content is
+// recognised as a bot-verification / captcha interstitial (e.g. Cloudflare's
+// "Just a moment", a Vercel Security Checkpoint) rather than the real article.
+// It is detected in the fetch stage before any LLM call, so no tokens are spent
+// annotating a challenge page. The matched signature is included for diagnostics.
+var ErrBotWall = errors.New("content blocked by bot-verification / captcha")
+
+// botWallMaxWords is the upper bound on the body word count for content to be
+// treated as a bot-wall on a signature match. Challenge pages are a handful of
+// words; real articles are far longer, so a long body with a matching phrase is
+// almost certainly an article discussing the topic, not the wall itself.
+const botWallMaxWords = 120
+
+// botWallSignaturesFor returns the signature list to match against: the user's
+// custom override (Settings.BotWallSignatures, one per line) when set, otherwise
+// the built-in model.DefaultBotWallSignatures.
+func botWallSignaturesFor(settings model.Settings) []string {
+	if sigs := model.ParseBotWallSignatures(settings.BotWallSignatures); len(sigs) > 0 {
+		return sigs
+	}
+	return model.DefaultBotWallSignatures
+}
+
+// detectBotWall reports a non-empty reason (the matched signature) when result
+// looks like a bot-verification / captcha interstitial: a known signature in the
+// title or body AND a body short enough to be a challenge page. It returns "" for
+// real content. signatures are expected lowercased (see model.ParseBotWallSignatures).
+// Detection happens before SaveContent and any LLM stage.
+func detectBotWall(result *ports.ExtractResult, signatures []string) string {
+	if result == nil {
+		return ""
+	}
+	if len(strings.Fields(result.Text)) > botWallMaxWords {
+		return ""
+	}
+	hay := strings.ToLower(result.Title + "\n" + result.Text)
+	for _, sig := range signatures {
+		if strings.Contains(hay, sig) {
+			return sig
+		}
+	}
+	return ""
+}
+
 // runFetch performs the fetch/extract stage: it flips the article to
 // status=fetching, extracts and tokenizes the content with retries, and on
 // success persists it (status=fetched), updating a in place so the enrich stage
@@ -302,6 +354,14 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 // continue, false on terminal failure, deletion, or cancellation.
 func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article) bool {
 	p.setStatus(ctx, log, a.ID, model.StatusFetching, "")
+
+	// Load the bot-wall signature list once for this fetch. A settings read error
+	// must not block fetching — fall back to the built-in defaults.
+	settings, err := p.store.GetSettings(ctx)
+	if err != nil {
+		log.Warn("enrich: get settings for bot-wall detection failed, using defaults", "err", err)
+	}
+	signatures := botWallSignaturesFor(settings)
 
 	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
@@ -322,6 +382,18 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 			}
 			log.Error("enrich: permanent fetch error", "err", err)
 			p.setFailed(ctx, a.ID, model.StatusFetchFailed, err)
+			return false
+		}
+
+		// Guard against bot-verification / captcha interstitials: markdown.new (and
+		// the readability fallback) happily convert a challenge page into "content",
+		// so catch it here — before SaveContent and any LLM call — and mark the
+		// article blocked rather than spending tokens annotating a captcha. Not
+		// retried automatically (the wall won't clear on its own); a manual retry
+		// re-runs the fetch.
+		if reason := detectBotWall(result, signatures); reason != "" {
+			log.Warn("enrich: bot-wall/captcha detected, aborting before LLM", "reason", reason)
+			p.setFailed(ctx, a.ID, model.StatusBlocked, fmt.Errorf("%w: %s", ErrBotWall, reason))
 			return false
 		}
 
@@ -375,10 +447,16 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 	return false
 }
 
-// runEnrich performs the enrichment stage: it flips the article to
-// status=enriching, calls the LLM with retries, validates the result, and
-// persists it (status=enriched). On terminal failure it records
-// status=enrich_failed.
+// runEnrich performs the step-wise enrichment stage. Rather than asking the LLM
+// to annotate the whole article in one completion (which truncates the JSON on
+// long articles), it: (1) produces a short summary (best-effort, used as
+// cross-chunk context), (2) splits the token stream into sentence-aligned
+// chunks, and (3) annotates each chunk with its own bounded LLM call, merging
+// and persisting the result after every chunk so progress survives a crash and
+// the coverage signal grows incrementally. Only the final chunk flips the
+// article to status=enriched; intermediate saves keep it in status=enriching so
+// an interrupted article is re-selected and resumed. On terminal failure it
+// records status=enrich_failed, preserving whatever chunks already succeeded.
 func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article) {
 	settings, err := p.store.GetSettings(ctx)
 	if err != nil {
@@ -388,68 +466,218 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 
 	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
 
-	maxRetries := p.cfg.LLMMaxRetries
+	// Step 1: summary (best-effort — a summary failure must not block translation).
+	if strings.TrimSpace(a.Summary) == "" {
+		if summary, ok := p.runSummarize(ctx, log, a, settings); ok {
+			a.Summary = summary
+		}
+	}
+
+	// Resume support: load any enrichment a prior (interrupted or partially
+	// failed) run already persisted so covered chunks are skipped.
+	running := p.loadExistingEnrichment(ctx, log, a.ID)
+
+	chunks := chunkSpans(a.OriginalText, a.Tokens, p.chunkTokens(settings))
+	if len(chunks) == 0 {
+		// No tokens to annotate — persist (possibly empty) enrichment as enriched.
+		if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC()); err != nil && !errors.Is(err, ports.ErrNotFound) {
+			log.Error("enrich: save (no chunks) failed", "err", err)
+		}
+		return
+	}
+
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for ci, span := range chunks {
 		if ctx.Err() != nil {
 			return
 		}
-		if attempt > 0 && !p.backoff(ctx, log, attempt) {
-			return
+		if spanCovered(running, span) {
+			continue // already annotated by a prior run
 		}
 
-		enrichment, usage, err := p.llm.Enrich(ctx, a, settings, p.cfg.EnrichmentVersion)
+		merged, err := p.enrichChunk(ctx, log, a, settings, running, span, ci, len(chunks))
 		if err != nil {
-			lastErr = err
-			if isRetryable(err) {
-				log.Warn("enrich: transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
-				continue
+			if ctx.Err() != nil {
+				return
 			}
-			log.Error("enrich: permanent error", "err", err)
-			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
-			return
+			lastErr = err
+			continue // keep going; preserve the chunks that did succeed
 		}
+		running = merged
 
-		// Validate the enrichment before persisting.
-		if valErr := validateEnrichment(enrichment, a.Tokens); valErr != nil {
-			lastErr = valErr
-			log.Warn("enrich: validation failed, will retry", "attempt", attempt, "max_retries", maxRetries, "err", valErr)
-			continue
-		}
-
-		// Persist.
-		enrichedAt := time.Now().UTC()
-		if err := p.store.SaveEnrichment(ctx, a.ID, *enrichment, enrichedAt); err != nil {
-			// The article was deleted between ListWork and this save (e.g. the
-			// user removed it while enrichment was in flight). Nothing to persist
-			// and nothing to fail — drop it silently.
+		if err := p.store.SaveEnrichmentProgress(ctx, a.ID, running); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
 				log.Info("enrich: article deleted during enrichment, skipping")
 				return
 			}
 			lastErr = err
-			log.Error("enrich: save enrichment failed", "err", err)
-			// Save failure is treated as retryable (transient DB issue).
-			if isRetryable(err) {
-				continue
-			}
-			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
-			return
+			log.Error("enrich: save progress failed", "chunk", ci, "err", err)
 		}
+	}
 
-		log.Info("enrich: article enriched",
-			"prompt_tokens", usage.PromptTokens,
-			"completion_tokens", usage.CompletionTokens,
-			"total_tokens", usage.TotalTokens,
-		)
+	if lastErr != nil {
+		log.Error("enrich: one or more chunks failed", "chunks", len(chunks), "last_err", lastErr)
+		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
 		return
 	}
 
-	// Exhausted retries.
-	log.Error("enrich: retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
-	if lastErr != nil {
-		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
+	// All chunks done — flip to enriched.
+	if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC()); err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			log.Info("enrich: article deleted during enrichment, skipping")
+			return
+		}
+		log.Error("enrich: final save enrichment failed", "err", err)
+		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+		return
 	}
+	log.Info("enrich: article enriched (step-wise)", "chunks", len(chunks))
+}
+
+// runSummarize runs the summary step with retry/backoff and persists the result.
+// It returns the summary and ok=true on success. A summary failure is
+// non-terminal (the article can still be translated without it), so ok=false
+// just means "continue without a summary".
+func (p *Pool) runSummarize(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings) (string, bool) {
+	maxRetries := p.cfg.LLMMaxRetries
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return "", false
+		}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return "", false
+		}
+
+		summary, usage, err := p.llm.Summarize(ctx, a, settings)
+		if err != nil {
+			if isRetryable(err) {
+				log.Warn("enrich: summary transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
+				continue
+			}
+			log.Warn("enrich: summary failed, continuing without it", "err", err)
+			return "", false
+		}
+		if strings.TrimSpace(summary) == "" {
+			log.Warn("enrich: summary empty, continuing without it")
+			return "", false
+		}
+
+		if err := p.store.SaveSummary(ctx, a.ID, summary); err != nil {
+			if errors.Is(err, ports.ErrNotFound) {
+				return "", false
+			}
+			log.Warn("enrich: save summary failed, continuing", "err", err)
+			return summary, true // we still have it in memory for chunk context
+		}
+		log.Info("enrich: summary generated",
+			"summary_bytes", len(summary),
+			"prompt_tokens", usage.PromptTokens,
+			"completion_tokens", usage.CompletionTokens,
+		)
+		return summary, true
+	}
+	log.Warn("enrich: summary retries exhausted, continuing without it")
+	return "", false
+}
+
+// enrichChunk annotates a single token span with retry/backoff, merges the
+// addition into the running enrichment, validates the merged result, and returns
+// it. It returns errArticleDeleted if the article vanished, ctx.Err() on
+// cancellation, or the last error after exhausting retries.
+func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings, existing model.Enrichment, span model.Span, idx, total int) (model.Enrichment, error) {
+	maxRetries := p.cfg.LLMMaxRetries
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return model.Enrichment{}, ctx.Err()
+		}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return model.Enrichment{}, ctx.Err()
+		}
+
+		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, []model.Span{span})
+		if err != nil {
+			lastErr = err
+			if isRetryable(err) {
+				log.Warn("enrich: chunk transient error, will retry", "chunk", idx+1, "of", total, "attempt", attempt, "err", err)
+				continue
+			}
+			log.Error("enrich: chunk permanent error", "chunk", idx+1, "of", total, "err", err)
+			return model.Enrichment{}, err
+		}
+		if addition == nil {
+			addition = &model.Enrichment{}
+		}
+
+		// Drop any individually-invalid annotation instead of failing the whole
+		// chunk: a single empty translation or drifted phrase costs only that one
+		// entry, and whatever stays uncovered is picked up by a later top-up pass.
+		clean := sanitizeEnrichment(*addition, a.Tokens)
+		if dropped := droppedCount(*addition, clean); dropped > 0 {
+			log.Warn("enrich: chunk dropped invalid annotations", "chunk", idx+1, "of", total, "dropped", dropped)
+		}
+		merged := mergeEnrichment(existing, clean)
+
+		log.Info("enrich: chunk done",
+			"chunk", idx+1, "of", total,
+			"span_start", span.Start, "span_end", span.End,
+			"prompt_tokens", usage.PromptTokens,
+			"completion_tokens", usage.CompletionTokens,
+		)
+		return merged, nil
+	}
+
+	log.Error("enrich: chunk retries exhausted", "chunk", idx+1, "of", total, "attempts", maxRetries+1, "last_err", lastErr)
+	return model.Enrichment{}, lastErr
+}
+
+// chunkTokens resolves the effective step-wise enrichment window size: the
+// user's per-settings override (Settings.ChunkTokens) when set to a positive
+// value, otherwise the deployment default (config.LLMChunkTokens).
+func (p *Pool) chunkTokens(settings model.Settings) int {
+	if settings.ChunkTokens > 0 {
+		return settings.ChunkTokens
+	}
+	return p.cfg.LLMChunkTokens
+}
+
+// loadExistingEnrichment returns the enrichment already persisted for the
+// article (for resuming a partially-completed run), or an empty enrichment when
+// none exists or the lookup fails (treated as "start fresh").
+func (p *Pool) loadExistingEnrichment(ctx context.Context, log *slog.Logger, id string) model.Enrichment {
+	payload, err := p.store.GetArticlePayload(ctx, id)
+	if err != nil {
+		if !errors.Is(err, ports.ErrNotFound) {
+			log.Warn("enrich: load existing enrichment failed, starting fresh", "err", err)
+		}
+		return model.Enrichment{}
+	}
+	if payload.Enrichment != nil {
+		return *payload.Enrichment
+	}
+	return model.Enrichment{}
+}
+
+// spanCovered reports whether every token in span is already covered by a
+// sentence in e — i.e. the chunk was annotated by a prior run and can be skipped.
+func spanCovered(e model.Enrichment, span model.Span) bool {
+	for i := span.Start; i <= span.End; i++ {
+		if !tokenCovered(e, i) {
+			return false
+		}
+	}
+	return true
+}
+
+// tokenCovered reports whether token index i falls within at least one sentence
+// range in e.
+func tokenCovered(e model.Enrichment, i int) bool {
+	for _, s := range e.Sentences {
+		if i >= s.StartIndex && i <= s.EndIndex {
+			return true
+		}
+	}
+	return false
 }
 
 // backoff sleeps for the attempt's exponential back-off, returning false if ctx
@@ -629,6 +857,87 @@ func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
 	}
 
 	return nil
+}
+
+// sanitizeEnrichment returns a copy of e with every individually-invalid
+// annotation dropped, rather than rejecting the whole batch. The step-wise and
+// incremental enrich paths feed each LLM addition through this before merging,
+// so one bad entry — an empty translation, an out-of-range index, a phrase
+// whose echoed text drifted from its range — costs only that annotation instead
+// of failing the chunk and, after exhausted retries, the whole article (the bug
+// behind "chunk validation failed … empty translation"). Whatever is dropped
+// stays uncovered and is picked up by a later top-up pass.
+//
+// The accept/reject predicates mirror validateEnrichment exactly; only the
+// action differs (skip the entry vs. return an error). Glossary items are not
+// validated, so they pass through unchanged. The input is never mutated.
+func sanitizeEnrichment(e model.Enrichment, tokens []model.Token) model.Enrichment {
+	tokenCount := len(tokens)
+
+	var words []model.DifficultWord
+	for _, dw := range e.DifficultWords {
+		if dw.TokenIndex < 0 || dw.TokenIndex >= tokenCount {
+			continue
+		}
+		if strings.TrimSpace(dw.Translation) == "" {
+			continue
+		}
+		words = append(words, dw)
+	}
+
+	var phrases []model.Phrase
+	for _, ph := range e.Phrases {
+		if ph.StartIndex < 0 || ph.StartIndex >= tokenCount {
+			continue
+		}
+		if ph.EndIndex < 0 || ph.EndIndex >= tokenCount {
+			continue
+		}
+		if ph.StartIndex > ph.EndIndex {
+			continue
+		}
+		if strings.TrimSpace(ph.Translation) == "" || strings.TrimSpace(ph.Text) == "" {
+			continue
+		}
+		want := normalizePhraseText(joinTokenText(tokens, ph.StartIndex, ph.EndIndex))
+		if normalizePhraseText(ph.Text) != want {
+			continue
+		}
+		phrases = append(phrases, ph)
+	}
+
+	var sentences []model.Sentence
+	for _, s := range e.Sentences {
+		if s.StartIndex < 0 || s.StartIndex >= tokenCount {
+			continue
+		}
+		if s.EndIndex < 0 || s.EndIndex >= tokenCount {
+			continue
+		}
+		if s.StartIndex > s.EndIndex {
+			continue
+		}
+		if strings.TrimSpace(s.Translation) == "" {
+			continue
+		}
+		sentences = append(sentences, s)
+	}
+
+	return model.Enrichment{
+		DifficultWords: words,
+		Phrases:        phrases,
+		Sentences:      sentences,
+		Glossary:       e.Glossary,
+	}
+}
+
+// droppedCount reports how many word/phrase/sentence annotations sanitizeEnrichment
+// removed (clean must be the sanitized form of original). Glossary is excluded
+// because it is never sanitized.
+func droppedCount(original, clean model.Enrichment) int {
+	return (len(original.DifficultWords) - len(clean.DifficultWords)) +
+		(len(original.Phrases) - len(clean.Phrases)) +
+		(len(original.Sentences) - len(clean.Sentences))
 }
 
 // ---------------------------------------------------------------------------

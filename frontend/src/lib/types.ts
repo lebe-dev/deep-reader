@@ -18,6 +18,8 @@
  * - `enriched`      — ready (terminal success)
  * - `fetch_failed`  — fetch stage failed (retry re-fetches)
  * - `enrich_failed` — processing stage failed (retry re-enriches; content kept)
+ * - `blocked`       — fetched a bot-verification / captcha page, not the article
+ *                     (detected before any LLM call; retry re-fetches)
  */
 export type Status =
 	| 'queued'
@@ -27,6 +29,7 @@ export type Status =
 	| 'enriched'
 	| 'fetch_failed'
 	| 'enrich_failed'
+	| 'blocked'
 	| 'topup_queued';
 
 /**
@@ -147,6 +150,8 @@ export interface ArticleMeta {
 	 * part of the article unannotated. Zero until enriched.
 	 */
 	enrichment_coverage: number;
+	/** Short LLM-produced abstract; empty until the article has been summarized. */
+	summary?: string;
 }
 
 /**
@@ -157,6 +162,8 @@ export interface ArticlePayload {
 	id: string;
 	original_text: string;
 	tokens: Token[];
+	/** Short LLM-produced abstract shown in the reader. Empty until summarized. */
+	summary?: string;
 	enrichment: Enrichment;
 	enrichment_version: number;
 	status: Status;
@@ -200,6 +207,12 @@ export interface Settings {
 	markdown_warn_threshold: number;
 	/** Custom enrichment system-prompt template. Empty = use the server default. */
 	enrichment_prompt: string;
+	/** Custom summary system-prompt template. Empty = use the server default. */
+	summary_prompt: string;
+	/** Custom bot-wall / captcha signatures (one per line). Empty = use the server defaults. */
+	bot_wall_signatures: string;
+	/** Step-wise enrichment window size (tokens per chunk). 0 = use the server default. */
+	chunk_tokens: number;
 	updated_at: string;
 }
 
@@ -213,6 +226,9 @@ export type SettingsPatch = Partial<
 		| 'min_difficulty_to_highlight'
 		| 'markdown_warn_threshold'
 		| 'enrichment_prompt'
+		| 'summary_prompt'
+		| 'bot_wall_signatures'
+		| 'chunk_tokens'
 	>
 >;
 
@@ -237,10 +253,16 @@ export interface ServerInfo {
 	llm_max_concurrent: number;
 	llm_request_timeout: string;
 	llm_max_retries: number;
+	/** Default step-wise enrichment window size (tokens per chunk). */
+	llm_chunk_tokens: number;
 	readability_timeout: string;
 	enrichment_version: number;
 	/** Built-in enrichment prompt template the client pre-fills / resets to. */
 	enrichment_prompt_default: string;
+	/** Built-in summary prompt template the client pre-fills / resets to. */
+	summary_prompt_default: string;
+	/** Built-in bot-wall / captcha signature list the client pre-fills / resets to. */
+	bot_wall_signatures_default: string;
 	markdown_enabled: boolean;
 	markdown_base_url: string;
 	markdown_timeout: string;

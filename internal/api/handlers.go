@@ -330,7 +330,7 @@ func (s *Server) getStats(c fiber.Ctx) error {
 		switch metas[i].Status {
 		case model.StatusEnriched:
 			stats.Ready++
-		case model.StatusFetchFailed, model.StatusEnrichFailed:
+		case model.StatusFetchFailed, model.StatusEnrichFailed, model.StatusBlocked:
 			stats.Failed++
 		default:
 			// queued, fetching, fetched, enriching
@@ -370,25 +370,28 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		LoginAttemptWindow:   cfg.LoginAttemptWindow.String(),
 		LoginLockoutDuration: cfg.LoginLockoutDuration.String(),
 
-		LLMAPIBaseURL:           cfg.LLMAPIBaseURL,
-		LLMModel:                cfg.LLMModel,
-		LLMMaxConcurrent:        cfg.LLMMaxConcurrent,
-		LLMRequestTimeout:       cfg.LLMRequestTimeout.String(),
-		LLMMaxRetries:           cfg.LLMMaxRetries,
-		ReadabilityTimeout:      cfg.ReadabilityTimeout.String(),
-		EnrichmentVersion:       cfg.EnrichmentVersion,
-		EnrichmentPromptDefault: llm.DefaultEnrichmentPromptTemplate,
-		MarkdownEnabled:         cfg.MarkdownEnabled,
-		MarkdownBaseURL:         cfg.MarkdownBaseURL,
-		MarkdownTimeout:         cfg.MarkdownTimeout.String(),
-		MarkdownDailyLimit:      cfg.MarkdownDailyLimit,
-		MarkdownCostPerArticle:  cfg.MarkdownCostPerArticle,
-		LogLevel:                cfg.LogLevel,
-		LogFormat:               cfg.LogFormat,
-		SentryDSN:               maskSecret(cfg.SentryDSN),
-		SentryFrontendDSN:       maskSecret(cfg.SentryFrontendDSN),
-		SentryEnvironment:       cfg.SentryEnvironment,
-		Version:                 version.Version,
+		LLMAPIBaseURL:            cfg.LLMAPIBaseURL,
+		LLMModel:                 cfg.LLMModel,
+		LLMMaxConcurrent:         cfg.LLMMaxConcurrent,
+		LLMRequestTimeout:        cfg.LLMRequestTimeout.String(),
+		LLMMaxRetries:            cfg.LLMMaxRetries,
+		LLMChunkTokens:           cfg.LLMChunkTokens,
+		ReadabilityTimeout:       cfg.ReadabilityTimeout.String(),
+		EnrichmentVersion:        cfg.EnrichmentVersion,
+		EnrichmentPromptDefault:  llm.DefaultEnrichmentPromptTemplate,
+		SummaryPromptDefault:     llm.DefaultSummaryPromptTemplate,
+		BotWallSignaturesDefault: strings.Join(model.DefaultBotWallSignatures, "\n"),
+		MarkdownEnabled:          cfg.MarkdownEnabled,
+		MarkdownBaseURL:          cfg.MarkdownBaseURL,
+		MarkdownTimeout:          cfg.MarkdownTimeout.String(),
+		MarkdownDailyLimit:       cfg.MarkdownDailyLimit,
+		MarkdownCostPerArticle:   cfg.MarkdownCostPerArticle,
+		LogLevel:                 cfg.LogLevel,
+		LogFormat:                cfg.LogFormat,
+		SentryDSN:                maskSecret(cfg.SentryDSN),
+		SentryFrontendDSN:        maskSecret(cfg.SentryFrontendDSN),
+		SentryEnvironment:        cfg.SentryEnvironment,
+		Version:                  version.Version,
 	}
 }
 

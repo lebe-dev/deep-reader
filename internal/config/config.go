@@ -69,6 +69,12 @@ type Config struct {
 	// LLMMaxRetries is the number of retries on 429/5xx. Env: LLM_MAX_RETRIES
 	// (3).
 	LLMMaxRetries int
+	// LLMChunkTokens is the target token-window size for the step-wise enrichment:
+	// the article's tokens are split into windows of roughly this many tokens
+	// (snapped to sentence boundaries) and each window is annotated by its own
+	// bounded LLM call, so no single completion is long enough to be truncated.
+	// Env: LLM_CHUNK_TOKENS (500).
+	LLMChunkTokens int
 
 	// ReadabilityTimeout bounds fetch + extract for ingestion. Env:
 	// READABILITY_TIMEOUT (20s).
@@ -187,6 +193,12 @@ func Load() (*Config, error) {
 	}
 	cfg.LLMMaxRetries = maxRetries
 
+	chunkTokens, err := envInt("LLM_CHUNK_TOKENS", 500)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LLMChunkTokens = chunkTokens
+
 	readTimeout, err := envDuration("READABILITY_TIMEOUT", 20*time.Second)
 	if err != nil {
 		return nil, err
@@ -255,6 +267,9 @@ func (c *Config) validate() error {
 	}
 	if c.LLMMaxRetries < 0 {
 		errs = append(errs, fmt.Errorf("LLM_MAX_RETRIES must be >= 0, got %d", c.LLMMaxRetries))
+	}
+	if c.LLMChunkTokens < 1 {
+		errs = append(errs, fmt.Errorf("LLM_CHUNK_TOKENS must be >= 1, got %d", c.LLMChunkTokens))
 	}
 	if c.EnrichmentVersion < 1 {
 		errs = append(errs, fmt.Errorf("ENRICHMENT_VERSION must be >= 1, got %d", c.EnrichmentVersion))

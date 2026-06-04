@@ -185,6 +185,19 @@ type Store interface {
 	// EnrichedAt=enrichedAt, and stamps UpdatedAt. Atomic with the status flip.
 	SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time) error
 
+	// SaveSummary persists the article's summary text (the first step of the
+	// step-wise enrichment), stamping UpdatedAt without changing status. Returns
+	// ErrNotFound if the article was deleted in the meantime.
+	SaveSummary(ctx context.Context, id, summary string) error
+
+	// SaveEnrichmentProgress persists a partial enrichment blob produced by an
+	// intermediate step of the step-wise enrichment and recomputes the coverage
+	// signal, but leaves status unchanged (enriching) — so an article interrupted
+	// mid-enrichment is still re-selected by ListWork and resumed. The final step
+	// uses SaveEnrichment to flip status to enriched. Returns ErrNotFound if the
+	// article was deleted in the meantime.
+	SaveEnrichmentProgress(ctx context.Context, id string, e model.Enrichment) error
+
 	// ListWork returns up to `limit` articles awaiting pipeline work (any of
 	// model.WorkStatuses), oldest first, for the worker to drain.
 	ListWork(ctx context.Context, limit int) ([]model.Article, error)
@@ -250,6 +263,12 @@ type LLMClient interface {
 	// The caller merges the returned partial enrichment into the existing one.
 	// Like Enrich, it performs exactly one attempt.
 	EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, Usage, error)
+
+	// Summarize produces a short abstract of the article in the user's target
+	// language. It is the first step of the step-wise enrichment; the resulting
+	// summary is persisted and fed back as context into the per-chunk enrichment
+	// calls. Like Enrich, it performs exactly one attempt.
+	Summarize(ctx context.Context, a *model.Article, settings model.Settings) (string, Usage, error)
 }
 
 // Usage is the provider token-accounting for a single LLM call, logged for cost

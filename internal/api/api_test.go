@@ -115,6 +115,10 @@ func (f *fakeStore) GetArticleRaw(context.Context, string) (*model.ArticleRaw, e
 func (f *fakeStore) SaveEnrichment(context.Context, string, model.Enrichment, time.Time) error {
 	return nil
 }
+func (f *fakeStore) SaveEnrichmentProgress(context.Context, string, model.Enrichment) error {
+	return nil
+}
+func (f *fakeStore) SaveSummary(context.Context, string, string) error              { return nil }
 func (f *fakeStore) SaveContent(context.Context, string, ports.ContentUpdate) error { return nil }
 func (f *fakeStore) ListWork(context.Context, int) ([]model.Article, error)         { return nil, nil }
 
@@ -898,6 +902,34 @@ func TestPatchSettings(t *testing.T) {
 		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
 		long := strings.Repeat("x", model.MaxEnrichmentPromptLen+1)
 		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{EnrichmentPrompt: &long}, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("bot-wall signatures valid (including empty)", func(t *testing.T) {
+		var applied model.SettingsPatch
+		st := &fakeStore{
+			updateSettings: func(p model.SettingsPatch) (model.Settings, error) {
+				applied = p
+				return model.Settings{BotWallSignatures: *p.BotWallSignatures}, nil
+			},
+		}
+		s := newTestServer(t, st, &fakeIngestor{})
+		empty := ""
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{BotWallSignatures: &empty}, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("empty signatures: status = %d, want 200", resp.StatusCode)
+		}
+		if applied.BotWallSignatures == nil || *applied.BotWallSignatures != "" {
+			t.Errorf("patch not forwarded: %+v", applied)
+		}
+	})
+
+	t.Run("bot-wall signatures too long", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		long := strings.Repeat("x", model.MaxBotWallSignaturesLen+1)
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{BotWallSignatures: &long}, testToken)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}

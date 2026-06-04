@@ -364,7 +364,22 @@
 	</div>
 {:else if loadState === 'ready' && payload}
 	<!-- Article header -->
-	<div class="mb-6 flex flex-col gap-3">
+	<div class="relative mb-6 flex flex-col gap-3">
+		<Button
+			variant="ghost"
+			size="icon-sm"
+			onclick={togglePin}
+			aria-label={meta?.pinned ? 'Unpin article' : 'Pin article'}
+			title={meta?.pinned ? 'Unpin' : 'Pin to top'}
+			class="absolute right-0 top-0 {meta?.pinned ? 'text-primary' : 'text-muted-foreground'}"
+		>
+			{#if meta?.pinned}
+				<PinOffIcon class="size-4" />
+			{:else}
+				<PinIcon class="size-4" />
+			{/if}
+		</Button>
+
 		<div class="flex items-start justify-between gap-3">
 			<h1
 				class="text-xl font-semibold leading-snug sm:text-2xl"
@@ -372,34 +387,19 @@
 			>
 				{meta?.title ?? 'Article'}
 			</h1>
-			<div class="mt-0.5 flex shrink-0 items-center">
-				<Button
-					variant="ghost"
-					size="icon"
-					onclick={togglePin}
-					aria-label={meta?.pinned ? 'Unpin article' : 'Pin article'}
-					title={meta?.pinned ? 'Unpin' : 'Pin to top'}
-				>
-					{#if meta?.pinned}
-						<PinOffIcon class="text-primary size-5" />
-					{:else}
-						<PinIcon class="text-muted-foreground size-5" />
-					{/if}
-				</Button>
-				<Button
-					variant="ghost"
-					size="icon"
-					onclick={toggleRead}
-					aria-label={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
-					title={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
-				>
-					{#if progress?.is_read}
-						<BookOpenCheckIcon class="text-primary size-5" />
-					{:else}
-						<BookOpenIcon class="text-muted-foreground size-5" />
-					{/if}
-				</Button>
-			</div>
+			<Button
+				variant="ghost"
+				size="icon"
+				onclick={toggleRead}
+				aria-label={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
+				title={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
+			>
+				{#if progress?.is_read}
+					<BookOpenCheckIcon class="text-primary size-5" />
+				{:else}
+					<BookOpenIcon class="text-muted-foreground size-5" />
+				{/if}
+			</Button>
 		</div>
 
 		<div class="text-muted-foreground flex flex-wrap items-center gap-2 text-sm">
@@ -457,6 +457,18 @@
 			> = phrase · Tap to translate · Shift-click or long-press for sentence
 		</p>
 	</div>
+
+	<!-- Summary (if any) -->
+	{#if payload.summary}
+		<div class="bg-muted/40 mb-6 rounded-lg border p-4">
+			<h2
+				class="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase opacity-60"
+			>
+				Summary
+			</h2>
+			<p class="text-sm leading-relaxed">{payload.summary}</p>
+		</div>
+	{/if}
 
 	<!-- Token renderer -->
 	<div style="font-family: {getReaderFontCss(readerFont.value)}">

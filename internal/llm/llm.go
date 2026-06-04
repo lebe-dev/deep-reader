@@ -193,49 +193,99 @@ func renderPrompt(template string, settings model.Settings, enrichmentVersion in
 // enrichmentVersion is substituted into the template so that prompt changes can
 // be traced via the version number.
 func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion int) (system, user string) {
+	system = renderSystemPrompt(settings, enrichmentVersion)
+	user = buildUserPrompt(a, a.Tokens)
+	return system, user
+}
+
+// renderSystemPrompt renders the enrichment system prompt from the user's
+// configured template (or the built-in default when unset).
+func renderSystemPrompt(settings model.Settings, enrichmentVersion int) string {
 	template := settings.EnrichmentPrompt
 	if template == "" {
 		template = DefaultEnrichmentPromptTemplate
 	}
-	system = renderPrompt(template, settings, enrichmentVersion)
+	return renderPrompt(template, settings, enrichmentVersion)
+}
 
-	// User prompt: indexed token array.
+// buildUserPrompt renders the user message: the article title, an optional
+// summary for whole-article context, and the supplied tokens as an indexed
+// (index → text) JSON array.
+//
+// tokens may be a subset of the article's tokens — the step-wise / incremental
+// path sends only the tokens it is annotating instead of the whole article on
+// every chunk. The explicit per-token index field is what keeps that subset
+// aligned with the full article: the model echoes those same indices back, so
+// the references stay valid regardless of which slice was sent.
+func buildUserPrompt(a *model.Article, tokens []model.Token) string {
 	type indexedToken struct {
 		Index int    `json:"index"`
 		Text  string `json:"text"`
 	}
-	tokens := make([]indexedToken, len(a.Tokens))
-	for i, t := range a.Tokens {
-		tokens[i] = indexedToken{Index: t.Index, Text: t.Text}
+	idx := make([]indexedToken, len(tokens))
+	for i, t := range tokens {
+		idx[i] = indexedToken{Index: t.Index, Text: t.Text}
 	}
-	tokenJSON, _ := json.Marshal(tokens)
+	tokenJSON, _ := json.Marshal(idx)
 
 	var ub strings.Builder
+	fmt.Fprintf(&ub, "Article title: %s\n\n", a.Title)
+	if strings.TrimSpace(a.Summary) != "" {
+		// The summary (produced by the first enrichment step) gives the model
+		// whole-article context so per-chunk translations and term choices stay
+		// consistent across chunks even though each chunk sees only its own tokens.
+		fmt.Fprintf(&ub, "Article summary (for context only, do not annotate it):\n%s\n\n", a.Summary)
+	}
 	fmt.Fprintf(&ub,
-		"Article title: %s\n\nTokenized text (index → text):\n%s\n\n"+
-			"Return the enrichment JSON as specified.",
-		a.Title, tokenJSON,
+		"Tokenized text (index → text):\n%s\n\nReturn the enrichment JSON as specified.",
+		tokenJSON,
 	)
-	user = ub.String()
+	return ub.String()
+}
+
+// buildSpanPrompt returns the system and user messages for a span-restricted
+// enrichment call (the step-wise per-chunk pass and the incremental "top up"
+// pass). The user prompt carries ONLY the tokens inside the requested spans
+// (see tokensInSpans) rather than the whole article — this is what keeps each
+// per-chunk completion small, so a long article does not blow up the prompt to
+// tens of thousands of tokens (and minutes of latency) on every chunk. Token
+// indices are the original article indices, so the directive tells the model
+// they are not contiguous from zero.
+func buildSpanPrompt(a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (system, user string) {
+	ranges := formatSpans(spans)
+
+	system = renderSystemPrompt(settings, enrichmentVersion) +
+		"\nSPAN MODE: you are given ONLY a slice of the article's tokens. Their token_index " +
+		"values are the original indices from the full article, so they may not start at zero " +
+		"or be contiguous. Annotate ONLY the tokens within these inclusive token-index ranges: " +
+		ranges + ". Emit difficult_words only when token_index falls inside one of these ranges; " +
+		"emit phrases and sentences only when their entire [start_index, end_index] lies inside a " +
+		"single range. Do NOT emit anything for tokens outside these ranges. Within the ranges you " +
+		"MUST still translate every sentence. Keep using the original token_index values from the input array.\n"
+	user = buildUserPrompt(a, tokensInSpans(a.Tokens, spans)) +
+		"\n\nAnnotate only these inclusive token-index ranges: " + ranges + "."
 	return system, user
 }
 
-// buildSpanPrompt returns the system and user messages for an incremental
-// ("top up") enrichment call. It reuses buildPrompt's full token array (the
-// indices must stay aligned with the original article) and appends a directive
-// restricting the annotations to the supplied uncovered token-index ranges.
-func buildSpanPrompt(a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (system, user string) {
-	baseSystem, baseUser := buildPrompt(a, settings, enrichmentVersion)
-	ranges := formatSpans(spans)
-
-	system = baseSystem + "\nINCREMENTAL MODE: a previous pass already annotated most of this article. " +
-		"Annotate ONLY the tokens within these inclusive token-index ranges: " + ranges + ". " +
-		"Emit difficult_words only when token_index falls inside one of these ranges; emit phrases and " +
-		"sentences only when their entire [start_index, end_index] lies inside a single range. Do NOT emit " +
-		"anything for tokens outside these ranges. Within the ranges you MUST still translate every sentence. " +
-		"Keep using the original token_index values from the input array.\n"
-	user = baseUser + "\n\nAnnotate only these inclusive token-index ranges: " + ranges + "."
-	return system, user
+// tokensInSpans returns the article tokens whose original index falls inside at
+// least one of the inclusive spans, in order. This is what lets the step-wise /
+// incremental enrichment send only the tokens being annotated: each returned
+// token keeps its original index, so the model's token_index references stay
+// aligned with the full article. With no spans the full slice is returned.
+func tokensInSpans(tokens []model.Token, spans []model.Span) []model.Token {
+	if len(spans) == 0 {
+		return tokens
+	}
+	out := make([]model.Token, 0, len(tokens))
+	for _, t := range tokens {
+		for _, s := range spans {
+			if t.Index >= s.Start && t.Index <= s.End {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // formatSpans renders spans as a human/LLM-readable list like "[12-20], [45-45]".
@@ -272,19 +322,32 @@ func (e *APIError) Retryable() bool {
 // either the chat envelope or the enrichment JSON inside it — together with the
 // raw model output that could not be parsed. The enrichment pool persists Raw
 // (via the RawResponse() accessor) so the UI can show the unparsed answer for
-// inspection. These errors are permanent (not Retryable): re-sending the same
-// prompt yields the same malformed answer.
+// inspection.
+//
+// A DecodeError is retryable only when Transient is set. Transient marks a
+// truncated/empty HTTP envelope or an empty completion — the provider returned
+// nothing parseable (a network/gateway truncation or a dropped stream), which a
+// re-send commonly fixes. A present-but-malformed answer is left non-transient:
+// re-sending the same prompt yields the same garbage, so it fails fast and the
+// raw output is surfaced for inspection.
 type DecodeError struct {
 	// Raw is the verbatim text that failed to decode: the message content when
 	// the enrichment JSON is malformed, or the whole HTTP body when the chat
 	// envelope itself could not be parsed.
 	Raw string
 	Err error
+	// Transient reports whether re-sending the request might succeed (empty /
+	// truncated response) rather than reproduce the same failure.
+	Transient bool
 }
 
 func (e *DecodeError) Error() string { return e.Err.Error() }
 
 func (e *DecodeError) Unwrap() error { return e.Err }
+
+// Retryable reports whether the enrichment pool should retry this decode
+// failure. Only transient (empty/truncated) responses are retried.
+func (e *DecodeError) Retryable() bool { return e.Transient }
 
 // RawResponse returns the raw model output that failed to decode. It satisfies
 // the duck-typed accessor the enrichment pool uses to persist the response
@@ -310,6 +373,88 @@ func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Se
 func (c *Client) EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
 	systemPrompt, userPrompt := buildSpanPrompt(a, settings, enrichmentVersion, spans)
 	return c.complete(ctx, a.ID, modelName(c.model, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
+}
+
+// summarySchema is the JSON Schema for the summary step: a single short
+// abstract string. Kept tiny so the completion never truncates.
+const summarySchema = `{
+  "type": "object",
+  "required": ["summary"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {"type": "string"}
+  }
+}`
+
+// summaryResponse is the parsed summary completion.
+type summaryResponse struct {
+	Summary string `json:"summary"`
+}
+
+// DefaultSummaryPromptTemplate is the built-in system-prompt template for the
+// summary step, used when the user has not configured a custom one via settings.
+// The {{target_language}} placeholder is substituted by renderPrompt at request
+// time. The JSON schema is enforced separately via response_format.
+const DefaultSummaryPromptTemplate = "You are a language-learning assistant. Summarize the following article " +
+	"in English in 3–5 concise sentences. Identify the main topic, key arguments, notable facts, and " +
+	"recurring domain-specific terms. The summary will be used as background context when translating " +
+	"the article into {{target_language}}, so prioritize information that aids comprehension and word-choice. " +
+	"Return ONLY the JSON object matching the provided schema. No markdown, no prose."
+
+// buildSummaryPrompt returns the system and user messages for the summary step.
+// The system prompt comes from the user's configured summary template, falling
+// back to DefaultSummaryPromptTemplate when unset. The output is a short abstract
+// in English; the input is the article's plain original text
+// (summarization does not need token indices).
+func buildSummaryPrompt(a *model.Article, settings model.Settings) (system, user string) {
+	template := settings.SummaryPrompt
+	if template == "" {
+		template = DefaultSummaryPromptTemplate
+	}
+	system = renderPrompt(template, settings, 0)
+	user = "Article title: " + a.Title + "\n\nArticle text:\n" + a.OriginalText
+	return system, user
+}
+
+// Summarize produces a short abstract of the article in the user's target
+// language. It performs exactly one HTTP request; retry/backoff is the caller's
+// responsibility (enrich.Pool).
+func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model.Settings) (string, ports.Usage, error) {
+	systemPrompt, userPrompt := buildSummaryPrompt(a, settings)
+	reqBody := chatRequest{
+		Model: modelName(c.model, settings.LLMModel),
+		Messages: []chatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		ResponseFormat: responseFormat{
+			Type: "json_schema",
+			JSONSchema: &jsonSchema{
+				Name:   "summary",
+				Schema: json.RawMessage(summarySchema),
+				Strict: true,
+			},
+		},
+		Temperature: 0.2,
+	}
+
+	content, usage, err := c.postChat(ctx, reqBody)
+	if err != nil {
+		if isSchemaUnsupported(err) {
+			reqBody.ResponseFormat = responseFormat{Type: "json_object"}
+			content, usage, err = c.postChat(ctx, reqBody)
+		}
+		if err != nil {
+			return "", usage, err
+		}
+	}
+
+	var sr summaryResponse
+	if err := json.Unmarshal([]byte(content), &sr); err != nil {
+		transient := strings.TrimSpace(content) == ""
+		return "", usage, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal summary content: %w", err), Transient: transient}
+	}
+	return strings.TrimSpace(sr.Summary), usage, nil
 }
 
 // complete issues a single chat completion for the given prompts, decoding the
@@ -363,15 +508,33 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 // do sends the chat request and decodes the enrichment JSON from the first
 // choice's message content.
 func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, ports.Usage, error) {
+	content, usage, err := c.postChat(ctx, req)
+	if err != nil {
+		return nil, usage, err
+	}
+	var enrichment model.Enrichment
+	if err := json.Unmarshal([]byte(content), &enrichment); err != nil {
+		// An empty completion is a truncation/dropped-stream symptom (retry may
+		// succeed); a present-but-malformed answer is deterministic (fail fast).
+		transient := strings.TrimSpace(content) == ""
+		return nil, ports.Usage{}, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal enrichment content: %w", err), Transient: transient}
+	}
+	return &enrichment, usage, nil
+}
+
+// postChat sends the chat request, validates the HTTP status, and returns the
+// first choice's raw message content together with provider usage. Decoding the
+// content into a concrete shape is the caller's responsibility.
+func (c *Client) postChat(ctx context.Context, req chatRequest) (string, ports.Usage, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: marshal request: %w", err)
+		return "", ports.Usage{}, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
 	url := c.baseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: create request: %w", err)
+		return "", ports.Usage{}, fmt.Errorf("llm: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -379,13 +542,13 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: http: %w", err)
+		return "", ports.Usage{}, fmt.Errorf("llm: http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, ports.Usage{}, fmt.Errorf("llm: read response body: %w", err)
+		return "", ports.Usage{}, fmt.Errorf("llm: read response body: %w", err)
 	}
 
 	slog.Debug("llm: response received",
@@ -400,23 +563,22 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 		if len(snippet) > 256 {
 			snippet = snippet[:256] + "..."
 		}
-		return nil, ports.Usage{}, &APIError{StatusCode: resp.StatusCode, Body: snippet}
+		return "", ports.Usage{}, &APIError{StatusCode: resp.StatusCode, Body: snippet}
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: unmarshal response: %w", err)}
+		// The envelope is provider-generated JSON; a parse failure means the body
+		// was empty or truncated in transit (e.g. "unexpected end of JSON input"),
+		// which a re-send commonly fixes — so treat it as transient/retryable.
+		return "", ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: unmarshal response: %w", err), Transient: true}
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return nil, ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: response contains no choices")}
+		return "", ports.Usage{}, &DecodeError{Raw: string(respBody), Err: fmt.Errorf("llm: response contains no choices"), Transient: true}
 	}
 
 	content := chatResp.Choices[0].Message.Content
-	var enrichment model.Enrichment
-	if err := json.Unmarshal([]byte(content), &enrichment); err != nil {
-		return nil, ports.Usage{}, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal enrichment content: %w", err)}
-	}
 
 	usage := ports.Usage{}
 	if chatResp.Usage != nil {
@@ -434,7 +596,7 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 		)
 	}
 
-	return &enrichment, usage, nil
+	return content, usage, nil
 }
 
 // ---------------------------------------------------------------------------

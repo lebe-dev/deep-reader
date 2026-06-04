@@ -31,5 +31,21 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.EnrichmentPrompt != nil && len(*patch.EnrichmentPrompt) > model.MaxEnrichmentPromptLen {
 		return "enrichment_prompt is too long", false
 	}
+	// summary_prompt may be empty (= use the built-in default); only the upper
+	// length bound is enforced.
+	if patch.SummaryPrompt != nil && len(*patch.SummaryPrompt) > model.MaxEnrichmentPromptLen {
+		return "summary_prompt is too long", false
+	}
+	// bot_wall_signatures may be empty (= use the built-in defaults); only the
+	// upper length bound is enforced.
+	if patch.BotWallSignatures != nil && len(*patch.BotWallSignatures) > model.MaxBotWallSignaturesLen {
+		return "bot_wall_signatures is too long", false
+	}
+	// chunk_tokens: 0 means "use the deployment default"; any other value must
+	// fall within the supported window-size range.
+	if patch.ChunkTokens != nil && *patch.ChunkTokens != 0 &&
+		(*patch.ChunkTokens < model.MinChunkTokens || *patch.ChunkTokens > model.MaxChunkTokens) {
+		return "chunk_tokens must be 0 (default) or between 50 and 2000", false
+	}
 	return "", true
 }

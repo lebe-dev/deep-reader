@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"deep-reader/internal/llm"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
+	"deep-reader/internal/tokenize"
 )
 
 // ---------------------------------------------------------------------------
@@ -185,6 +187,30 @@ func (f *fakeStore) SaveEnrichment(_ context.Context, id string, e model.Enrichm
 	a.Status = model.StatusEnriched
 	a.EnrichedAt = enrichedAt
 	f.enrichments[id] = e
+	return nil
+}
+
+func (f *fakeStore) SaveEnrichmentProgress(_ context.Context, id string, e model.Enrichment) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	// Keep status unchanged (enriching) — only the enrichment blob is updated.
+	_ = a
+	f.enrichments[id] = e
+	return nil
+}
+
+func (f *fakeStore) SaveSummary(_ context.Context, id, summary string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return ports.ErrNotFound
+	}
+	a.Summary = summary
 	return nil
 }
 
@@ -403,6 +429,13 @@ type fakeLLM struct {
 	// recent spans argument.
 	spanCalls int
 	lastSpans []model.Span
+	// summaryCalls counts Summarize invocations; summaryErr, when set, makes
+	// Summarize fail.
+	summaryCalls int
+	summaryErr   error
+	// spanFunc, when set, computes the EnrichSpans result from the requested
+	// spans (used by the step-wise multi-chunk test).
+	spanFunc func([]model.Span) *model.Enrichment
 }
 
 func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Settings, _ int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
@@ -411,8 +444,14 @@ func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Setti
 	f.callCount++
 	f.spanCalls++
 	f.lastSpans = spans
+	if f.onEnrich != nil {
+		f.onEnrich()
+	}
 	if f.callCount <= f.failN {
 		return nil, ports.Usage{}, f.failErr
+	}
+	if f.spanFunc != nil {
+		return f.spanFunc(spans), ports.Usage{PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10}, nil
 	}
 	res := f.spanResult
 	if res == nil {
@@ -451,6 +490,19 @@ func (f *fakeLLM) calls() int {
 	return f.callCount
 }
 
+// Summarize is a no-op fake: it returns a fixed summary without touching
+// callCount/failN, so the per-chunk EnrichSpans failure injection is unaffected.
+// Tests that need summary failures can override summaryErr.
+func (f *fakeLLM) Summarize(_ context.Context, _ *model.Article, _ model.Settings) (string, ports.Usage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.summaryCalls++
+	if f.summaryErr != nil {
+		return "", ports.Usage{}, f.summaryErr
+	}
+	return "test summary", ports.Usage{PromptTokens: 3, CompletionTokens: 3, TotalTokens: 6}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -465,6 +517,7 @@ func testCfg(maxConcurrent, maxRetries int) *config.Config {
 		LLMMaxConcurrent:   maxConcurrent,
 		LLMRequestTimeout:  5 * time.Second,
 		LLMMaxRetries:      maxRetries,
+		LLMChunkTokens:     500,
 		ReadabilityTimeout: 10 * time.Second,
 		EnrichmentVersion:  1,
 		LogLevel:           "info",
@@ -711,114 +764,136 @@ func TestExhaustedRetriesMarksFailed(t *testing.T) {
 	}
 }
 
-// TestInvalidIndicesRejected verifies that an enrichment with out-of-range
-// token indices is treated as a validation error and retried (eventually failed).
-func TestInvalidIndicesRejected(t *testing.T) {
+// TestInvalidIndicesDropped verifies that an out-of-range difficult word is
+// silently dropped (not retried-then-failed) while the valid annotations in the
+// same chunk are kept and the article still completes. This is the tolerant
+// behaviour that replaced the all-or-nothing validation gate: one bad entry no
+// longer dooms the whole article.
+func TestInvalidIndicesDropped(t *testing.T) {
 	tokenCount := 3
 	article := makeArticle("article-5", tokenCount)
 	st := newFakeStore(article)
 
-	// The LLM always returns an enrichment with an OOB index.
-	badEnrichment := &model.Enrichment{
-		DifficultWords: []model.DifficultWord{
-			{TokenIndex: tokenCount + 5, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
+	// One valid difficult word + one out-of-range word + a valid sentence.
+	llm := &fakeLLM{
+		result: &model.Enrichment{
+			DifficultWords: []model.DifficultWord{
+				{TokenIndex: 0, Lemma: "word", Translation: "слово", CEFRLevel: model.CEFRB1},
+				{TokenIndex: tokenCount + 5, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
+			},
+			Sentences: []model.Sentence{
+				{StartIndex: 0, EndIndex: tokenCount - 1, Translation: "предложение"},
+			},
 		},
 	}
-	llm := &fakeLLM{
-		result: badEnrichment,
-	}
-	maxRetries := 2
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 2), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-5") == model.StatusEnrichFailed
+		return st.status("article-5") == model.StatusEnriched
 	})
-
 	if !ok {
-		t.Fatalf("expected status=failed after invalid indices exhausted retries, got %q", st.status("article-5"))
+		t.Fatalf("expected status=enriched (bad entry dropped, not failed), got %q", st.status("article-5"))
 	}
-	// Verify the enrichment was NOT saved.
-	if _, saved := st.savedEnrichment("article-5"); saved {
-		t.Error("expected enrichment NOT to be saved for invalid article")
+	e, saved := st.savedEnrichment("article-5")
+	if !saved {
+		t.Fatal("expected enrichment to be saved")
+	}
+	if len(e.DifficultWords) != 1 || e.DifficultWords[0].TokenIndex != 0 {
+		t.Errorf("expected only the valid difficult word kept, got %+v", e.DifficultWords)
 	}
 }
 
-// TestPhraseBoundsValidation verifies that start_index > end_index is rejected.
-func TestPhraseBoundsValidation(t *testing.T) {
+// TestPhraseBoundsDropped verifies that a phrase with start_index > end_index is
+// dropped while the article still completes.
+func TestPhraseBoundsDropped(t *testing.T) {
 	tokenCount := 5
 	article := makeArticle("article-6", tokenCount)
 	st := newFakeStore(article)
 
-	// Phrase where start > end.
-	badEnrichment := &model.Enrichment{
-		Phrases: []model.Phrase{
-			{StartIndex: 3, EndIndex: 1, Type: model.PhraseTypeIdiom, Translation: "x"},
+	llm := &fakeLLM{
+		result: &model.Enrichment{
+			Phrases: []model.Phrase{
+				{StartIndex: 3, EndIndex: 1, Type: model.PhraseTypeIdiom, Translation: "x"},
+			},
+			Sentences: []model.Sentence{
+				{StartIndex: 0, EndIndex: tokenCount - 1, Translation: "предложение"},
+			},
 		},
 	}
-	llm := &fakeLLM{
-		result: badEnrichment,
-	}
-	maxRetries := 1
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-6") == model.StatusEnrichFailed
+		return st.status("article-6") == model.StatusEnriched
 	})
-
 	if !ok {
-		t.Fatalf("expected status=failed for start>end phrase, got %q", st.status("article-6"))
+		t.Fatalf("expected status=enriched for dropped start>end phrase, got %q", st.status("article-6"))
+	}
+	e, _ := st.savedEnrichment("article-6")
+	if len(e.Phrases) != 0 {
+		t.Errorf("expected inverted phrase dropped, got %+v", e.Phrases)
 	}
 }
 
-// TestSentenceBoundsValidation verifies that sentence start_index > end_index is rejected.
-func TestSentenceBoundsValidation(t *testing.T) {
+// TestSentenceBoundsDropped verifies that a sentence with start_index > end_index
+// is dropped. With no other valid sentence the chunk stays uncovered, but the
+// article still leaves the queue as enriched (a later top-up can fill the gap).
+func TestSentenceBoundsDropped(t *testing.T) {
 	tokenCount := 4
 	article := makeArticle("article-7", tokenCount)
 	st := newFakeStore(article)
 
-	badEnrichment := &model.Enrichment{
-		Sentences: []model.Sentence{
-			{StartIndex: 2, EndIndex: 0, Translation: "x"},
+	llm := &fakeLLM{
+		result: &model.Enrichment{
+			Sentences: []model.Sentence{
+				{StartIndex: 2, EndIndex: 0, Translation: "x"},
+			},
 		},
 	}
-	llm := &fakeLLM{result: badEnrichment}
 	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-7") == model.StatusEnrichFailed
+		return st.status("article-7") == model.StatusEnriched
 	})
-
 	if !ok {
-		t.Fatalf("expected status=failed for sentence start>end, got %q", st.status("article-7"))
+		t.Fatalf("expected status=enriched for dropped sentence start>end, got %q", st.status("article-7"))
+	}
+	e, _ := st.savedEnrichment("article-7")
+	if len(e.Sentences) != 0 {
+		t.Errorf("expected inverted sentence dropped, got %+v", e.Sentences)
 	}
 }
 
-// TestPhraseTextMismatchRejected verifies that a phrase whose echoed Text does
-// not match the words actually spanned by [StartIndex, EndIndex] is rejected,
-// so an over-wide / drifted token range is retried rather than saved. This is
-// the regression guard for the "Term tooltip shows a whole clause" bug.
-func TestPhraseTextMismatchRejected(t *testing.T) {
+// TestPhraseTextMismatchDropped verifies that a phrase whose echoed Text does
+// not match the words actually spanned by [StartIndex, EndIndex] is dropped
+// (an over-wide / drifted token range), so the reader never shows a Term tooltip
+// spanning a whole clause — while the article still completes.
+func TestPhraseTextMismatchDropped(t *testing.T) {
 	article := makeArticle("article-phrasetext", 4) // tokens are all "word"
 	st := newFakeStore(article)
 
 	// Valid indices, non-empty translation — but Text claims a single term the
 	// 4-token range does not spell.
-	bad := &model.Enrichment{
-		Phrases: []model.Phrase{
-			{StartIndex: 0, EndIndex: 3, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},
+	llm := &fakeLLM{
+		result: &model.Enrichment{
+			Phrases: []model.Phrase{
+				{StartIndex: 0, EndIndex: 3, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},
+			},
+			Sentences: []model.Sentence{
+				{StartIndex: 0, EndIndex: 3, Translation: "предложение"},
+			},
 		},
 	}
-	llm := &fakeLLM{result: bad}
 	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
-		return st.status("article-phrasetext") == model.StatusEnrichFailed
+		return st.status("article-phrasetext") == model.StatusEnriched
 	})
 	if !ok {
-		t.Fatalf("expected status=failed for phrase text/range mismatch, got %q", st.status("article-phrasetext"))
+		t.Fatalf("expected status=enriched for dropped phrase text/range mismatch, got %q", st.status("article-phrasetext"))
 	}
-	if _, saved := st.savedEnrichment("article-phrasetext"); saved {
-		t.Error("expected enrichment NOT to be saved when phrase text mismatches its range")
+	e, _ := st.savedEnrichment("article-phrasetext")
+	if len(e.Phrases) != 0 {
+		t.Errorf("expected drifted phrase dropped, got %+v", e.Phrases)
 	}
 }
 
@@ -1068,6 +1143,114 @@ func TestValidateEnrichmentPhraseTextMatchPasses(t *testing.T) {
 // The real function lives in enrich package; we expose it via export_test.go.
 var validateEnrichmentExported = enrich.ValidateEnrichment
 
+// ---------------------------------------------------------------------------
+// Unit tests for sanitizeEnrichment (drop invalid entries, keep valid ones).
+// ---------------------------------------------------------------------------
+
+// TestSanitizeEnrichmentDropsInvalidKeepsValid verifies that every invalid
+// annotation kind is dropped while the valid ones in the same payload survive,
+// and that glossary passes through untouched.
+func TestSanitizeEnrichmentDropsInvalidKeepsValid(t *testing.T) {
+	tokens := tokensFromWords("counting", "semaphores", "are", "useful")
+	in := model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 1, Lemma: "semaphore", Translation: "семафор", CEFRLevel: model.CEFRB2}, // valid
+			{TokenIndex: 1, Lemma: "x", Translation: "  ", CEFRLevel: model.CEFRB2},              // empty translation
+			{TokenIndex: 99, Lemma: "y", Translation: "y", CEFRLevel: model.CEFRB2},              // OOB
+			{TokenIndex: -1, Lemma: "z", Translation: "z", CEFRLevel: model.CEFRB2},              // negative
+		},
+		Phrases: []model.Phrase{
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "counting semaphores", Translation: "счётный семафор"}, // valid
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},                   // text mismatch
+			{StartIndex: 3, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "x", Translation: "x"},                                 // start>end
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "counting semaphores", Translation: " "},               // empty translation
+		},
+		Sentences: []model.Sentence{
+			{StartIndex: 0, EndIndex: 3, Translation: "Семафоры полезны"}, // valid
+			{StartIndex: 2, EndIndex: 0, Translation: "x"},                // start>end
+			{StartIndex: 0, EndIndex: 3, Translation: "   "},              // empty translation
+			{StartIndex: 0, EndIndex: 99, Translation: "x"},               // OOB
+		},
+		Glossary: []model.GlossaryItem{{Term: "semaphore", Definition: "a sync primitive"}},
+	}
+
+	got := enrich.SanitizeEnrichment(in, tokens)
+
+	if len(got.DifficultWords) != 1 || got.DifficultWords[0].TokenIndex != 1 || got.DifficultWords[0].Translation != "семафор" {
+		t.Errorf("difficult words: want only the valid one, got %+v", got.DifficultWords)
+	}
+	if len(got.Phrases) != 1 || got.Phrases[0].Text != "counting semaphores" {
+		t.Errorf("phrases: want only the valid one, got %+v", got.Phrases)
+	}
+	if len(got.Sentences) != 1 || got.Sentences[0].Translation != "Семафоры полезны" {
+		t.Errorf("sentences: want only the valid one, got %+v", got.Sentences)
+	}
+	if len(got.Glossary) != 1 {
+		t.Errorf("glossary should pass through unchanged, got %+v", got.Glossary)
+	}
+}
+
+// TestSanitizeEnrichmentDoesNotMutateInput verifies sanitize returns fresh
+// slices and leaves the caller's enrichment untouched.
+func TestSanitizeEnrichmentDoesNotMutateInput(t *testing.T) {
+	tokens := wordTokens(3)
+	in := model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 0, Lemma: "word", Translation: "слово", CEFRLevel: model.CEFRB2},
+			{TokenIndex: 50, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB2},
+		},
+	}
+	_ = enrich.SanitizeEnrichment(in, tokens)
+	if len(in.DifficultWords) != 2 {
+		t.Errorf("input was mutated: %+v", in.DifficultWords)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for expandSpansToSentences.
+// ---------------------------------------------------------------------------
+
+// TestExpandSpansToSentences verifies a mid-sentence gap is widened to the
+// enclosing sentence boundaries.
+func TestExpandSpansToSentences(t *testing.T) {
+	// Three 3-word sentences (token indices 0-8).
+	text := "one two three. four five six. seven eight nine."
+	tokens := tokenize.Tokenize(text)
+
+	// A gap covering the middle of the second sentence (tokens 4-4) must expand
+	// to the whole second sentence (tokens 3-5).
+	got := enrich.ExpandSpansToSentences(text, tokens, []model.Span{{Start: 4, End: 4}})
+	want := []model.Span{{Start: 3, End: 5}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expand mid-sentence gap = %v, want %v", got, want)
+	}
+}
+
+// TestExpandSpansToSentencesCoalesces verifies overlapping/adjacent expansions
+// merge into a single span.
+func TestExpandSpansToSentencesCoalesces(t *testing.T) {
+	text := "one two three. four five six. seven eight nine."
+	tokens := tokenize.Tokenize(text)
+
+	// Two gaps in adjacent sentences expand to [0-2] and [3-5], which are
+	// adjacent and must coalesce into [0-5].
+	got := enrich.ExpandSpansToSentences(text, tokens, []model.Span{{Start: 1, End: 1}, {Start: 4, End: 4}})
+	want := []model.Span{{Start: 0, End: 5}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expand+coalesce = %v, want %v", got, want)
+	}
+}
+
+// TestExpandSpansToSentencesNoText verifies the guard: with no source text the
+// spans are returned unchanged (boundaries cannot be detected).
+func TestExpandSpansToSentencesNoText(t *testing.T) {
+	tokens := wordTokens(5)
+	in := []model.Span{{Start: 1, End: 2}}
+	if got := enrich.ExpandSpansToSentences("", tokens, in); !reflect.DeepEqual(got, in) {
+		t.Fatalf("no-text expand = %v, want %v unchanged", got, in)
+	}
+}
+
 // BackoffDuration tests
 func TestBackoffDurationGrowth(t *testing.T) {
 	cases := []struct {
@@ -1201,6 +1384,124 @@ func TestFetchFailedMarksFetchFailed(t *testing.T) {
 	}
 }
 
+// TestDetectBotWall covers the bot-wall/captcha detector in isolation: a known
+// signature in a short body is flagged, while real content and long bodies that
+// merely mention a signature term are not.
+func TestDetectBotWall(t *testing.T) {
+	longArticle := strings.Repeat("word ", enrich.BotWallMaxWordsForTest()+10)
+
+	cases := []struct {
+		name   string
+		result *ports.ExtractResult
+		want   bool
+	}{
+		{
+			name: "vercel security checkpoint",
+			result: &ports.ExtractResult{
+				Title: "Converted Content",
+				Text:  "We're verifying your browser\nWebsite owner? Click here to fix\nVercel Security Checkpoint\nlhr1::1780563122",
+			},
+			want: true,
+		},
+		{
+			name: "cloudflare just a moment",
+			result: &ports.ExtractResult{
+				Title: "Just a moment...",
+				Text:  "Checking your browser before accessing the site.",
+			},
+			want: true,
+		},
+		{
+			name:   "signature in title only",
+			result: &ports.ExtractResult{Title: "Attention Required! | Cloudflare", Text: "Please wait."},
+			want:   true,
+		},
+		{
+			name:   "real article",
+			result: &ports.ExtractResult{Title: "On AI safety", Text: "This essay argues that alignment is hard and important."},
+			want:   false,
+		},
+		{
+			name:   "long article mentioning cloudflare is not flagged",
+			result: &ports.ExtractResult{Title: "How Cloudflare works", Text: longArticle + " ddos protection by cloudflare"},
+			want:   false,
+		},
+		{
+			name:   "nil result",
+			result: nil,
+			want:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := enrich.DetectBotWall(tc.result, model.DefaultBotWallSignatures)
+			if got := reason != ""; got != tc.want {
+				t.Errorf("DetectBotWall flagged=%v (reason=%q), want %v", got, reason, tc.want)
+			}
+		})
+	}
+}
+
+// TestBotWallSignaturesFor verifies the override/default resolution: a non-empty
+// custom list (one signature per line) wins, an empty override falls back to the
+// built-in defaults, and a custom signature is matched while the defaults are not.
+func TestBotWallSignaturesFor(t *testing.T) {
+	def := enrich.BotWallSignaturesFor(model.Settings{})
+	if len(def) != len(model.DefaultBotWallSignatures) {
+		t.Errorf("empty override: got %d signatures, want defaults (%d)", len(def), len(model.DefaultBotWallSignatures))
+	}
+
+	custom := enrich.BotWallSignaturesFor(model.Settings{BotWallSignatures: "Are You A Robot?\n\n  blocked by acme  \n"})
+	want := []string{"are you a robot?", "blocked by acme"}
+	if len(custom) != len(want) || custom[0] != want[0] || custom[1] != want[1] {
+		t.Errorf("custom override: got %v, want %v", custom, want)
+	}
+
+	page := &ports.ExtractResult{Title: "Are you a robot?", Text: "Please confirm."}
+	if enrich.DetectBotWall(page, model.DefaultBotWallSignatures) != "" {
+		t.Error("custom-only signature must not match the default list")
+	}
+	if enrich.DetectBotWall(page, custom) == "" {
+		t.Error("custom signature should match")
+	}
+}
+
+// TestBotWallMarksBlocked verifies that when the fetch returns a captcha/bot-wall
+// page the article is marked blocked, no content is saved, and the LLM is never
+// called — the whole point of detecting it before the enrichment stage.
+func TestBotWallMarksBlocked(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-captcha", "https://example.com/a"))
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL: "https://example.com/a",
+		Title:        "Converted Content",
+		Text:         "We're verifying your browser\nVercel Security Checkpoint\nlhr1::1780563122",
+		Domain:       "example.com",
+		Lang:         "en",
+	}}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-captcha") == model.StatusBlocked
+	})
+	if !ok {
+		t.Fatalf("expected status=blocked, got %q", st.status("article-captcha"))
+	}
+	if llm.calls() != 0 {
+		t.Errorf("LLM must not be called for a bot-wall page: got %d calls", llm.calls())
+	}
+	if ex.callCount() != 1 {
+		t.Errorf("extractor calls: got %d, want 1 (no retry on bot-wall)", ex.callCount())
+	}
+	if _, saved := st.savedEnrichment("article-captcha"); saved {
+		t.Error("no enrichment should be saved for a blocked article")
+	}
+	if st.errMsg("article-captcha") == "" {
+		t.Error("expected a reason to be stored in the error field")
+	}
+}
+
 // TestRecoversInflightStatuses verifies an article stuck in an in-flight state
 // (e.g. the server crashed mid-stage) is re-selected and driven to completion:
 // fetching re-fetches, enriching re-enriches.
@@ -1215,7 +1516,7 @@ func TestRecoversInflightStatuses(t *testing.T) {
 	ex := &fakeExtractor{}
 	// No phrase: the two articles have different token texts (fetched "Hello
 	// world" vs. canned "word word"), so a single phrase text could not match
-	// both. Phrase text validation is covered by TestPhraseTextMismatchRejected.
+	// both. Phrase text validation is covered by TestPhraseTextMismatchDropped.
 	llm := &fakeLLM{result: goodEnrichmentNoPhrase(2)}
 	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
 

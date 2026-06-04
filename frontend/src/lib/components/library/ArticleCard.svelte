@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import * as Popover from '$lib/components/ui/popover';
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
@@ -13,6 +14,7 @@
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import PinIcon from '@lucide/svelte/icons/pin';
 	import PinOffIcon from '@lucide/svelte/icons/pin-off';
+	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
 
 	interface Props {
 		article: ArticleMeta;
@@ -28,7 +30,9 @@
 	let rawOpen = $state(false);
 
 	const isFailed = $derived(
-		article.status === 'fetch_failed' || article.status === 'enrich_failed'
+		article.status === 'fetch_failed' ||
+			article.status === 'enrich_failed' ||
+			article.status === 'blocked'
 	);
 
 	// A raw LLM response is only captured for enrichment-stage decode failures.
@@ -56,14 +60,21 @@
 				return 'Fetch failed';
 			case 'enrich_failed':
 				return 'Process failed';
+			case 'blocked':
+				return 'Blocked';
 		}
 	});
 
-	const failedMessage = $derived(
-		article.status === 'fetch_failed'
-			? 'Could not fetch the original content.'
-			: 'Could not process the article.'
-	);
+	const failedMessage = $derived.by(() => {
+		switch (article.status) {
+			case 'fetch_failed':
+				return 'Could not fetch the original content.';
+			case 'blocked':
+				return 'The site returned a bot-verification / captcha page instead of the article.';
+			default:
+				return 'Could not process the article.';
+		}
+	});
 
 	const safeSourceUrl = $derived(
 		article.source_url && /^https?:\/\//i.test(article.source_url) ? article.source_url : null
@@ -103,7 +114,25 @@
 	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
 </script>
 
-<div class="border-border bg-card rounded-xl border px-4 py-3">
+<div class="border-border bg-card group relative rounded-xl border px-4 py-3">
+	<Button
+		size="icon-sm"
+		variant="ghost"
+		onclick={handleTogglePin}
+		aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
+		title={article.pinned ? 'Unpin' : 'Pin to top'}
+		class="absolute right-2 top-2 transition-opacity
+			{article.pinned
+			? 'text-primary opacity-100'
+			: 'text-muted-foreground opacity-0 group-hover:opacity-100'}"
+	>
+		{#if article.pinned}
+			<PinOffIcon class="size-3.5" />
+		{:else}
+			<PinIcon class="size-3.5" />
+		{/if}
+	</Button>
+
 	<div class="flex items-start justify-between gap-3">
 		<div class="min-w-0 flex-1">
 			{#if article.status === 'enriched'}
@@ -124,9 +153,6 @@
 			{/if}
 		</div>
 		<div class="flex shrink-0 items-center gap-1">
-			{#if article.pinned}
-				<PinIcon class="text-primary size-3.5" aria-label="Pinned" />
-			{/if}
 			{#if article.status === 'enriched' && article.enrichment_coverage < 1}
 				<CoverageBadge coverage={article.enrichment_coverage} />
 			{/if}
@@ -163,6 +189,21 @@
 		<span class="shrink-0">{formatDate(article.created_at)}</span>
 
 		<div class="ml-auto flex items-center gap-1">
+			{#if article.summary}
+				<Popover.Root>
+					<Popover.Trigger
+						onclick={(e: MouseEvent) => e.stopPropagation()}
+						class="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex h-6 items-center gap-1 rounded-md px-2 text-xs transition-colors"
+						title="Show article summary"
+					>
+						<AlignLeftIcon class="size-3" />
+						Summary
+					</Popover.Trigger>
+					<Popover.Content class="w-80 text-sm leading-relaxed">
+						{article.summary}
+					</Popover.Content>
+				</Popover.Root>
+			{/if}
 			{#if canViewRaw}
 				<Button
 					size="sm"
@@ -184,20 +225,6 @@
 					Retry
 				</Button>
 			{/if}
-			<Button
-				size="icon-sm"
-				variant="ghost"
-				onclick={handleTogglePin}
-				aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
-				title={article.pinned ? 'Unpin' : 'Pin to top'}
-				class={article.pinned ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}
-			>
-				{#if article.pinned}
-					<PinOffIcon class="size-4" />
-				{:else}
-					<PinIcon class="size-4" />
-				{/if}
-			</Button>
 			<Button
 				size="icon-sm"
 				variant="ghost"

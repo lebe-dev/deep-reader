@@ -143,7 +143,7 @@ func parseTime(s string) (time.Time, error) {
 // GetSettings returns the singleton settings row. The row is guaranteed to
 // exist because the migration seeds it; if somehow absent, a default is returned.
 func (s *SQLite) GetSettings(ctx context.Context) (model.Settings, error) {
-	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, updated_at
+	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, bot_wall_signatures, chunk_tokens, updated_at
                FROM settings WHERE id = 1`
 	row := s.db.QueryRowContext(ctx, q)
 	return scanSettings(row)
@@ -156,7 +156,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	defer s.wmu.Unlock()
 
 	// Read current values first.
-	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, updated_at
+	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, bot_wall_signatures, chunk_tokens, updated_at
                   FROM settings WHERE id = 1`
 	row := s.write.QueryRowContext(ctx, selQ)
 	cur, err := scanSettings(row)
@@ -183,13 +183,22 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	if patch.EnrichmentPrompt != nil {
 		cur.EnrichmentPrompt = *patch.EnrichmentPrompt
 	}
+	if patch.SummaryPrompt != nil {
+		cur.SummaryPrompt = *patch.SummaryPrompt
+	}
+	if patch.BotWallSignatures != nil {
+		cur.BotWallSignatures = *patch.BotWallSignatures
+	}
+	if patch.ChunkTokens != nil {
+		cur.ChunkTokens = *patch.ChunkTokens
+	}
 	cur.UpdatedAt = now()
 
 	const updQ = `UPDATE settings SET cefr_level=?, target_language=?, llm_model=?,
-                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, updated_at=? WHERE id = 1`
+                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, bot_wall_signatures=?, chunk_tokens=?, updated_at=? WHERE id = 1`
 	if _, err := s.write.ExecContext(ctx, updQ,
 		cur.CEFRLevel, cur.TargetLanguage, cur.LLMModel,
-		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, fmtTime(cur.UpdatedAt),
+		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.BotWallSignatures, cur.ChunkTokens, fmtTime(cur.UpdatedAt),
 	); err != nil {
 		return model.Settings{}, fmt.Errorf("store: UpdateSettings write: %w", err)
 	}
@@ -208,7 +217,7 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 	var s model.Settings
 	var updatedAtStr string
 	if err := row.Scan(&s.CEFRLevel, &s.TargetLanguage, &s.LLMModel,
-		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &updatedAtStr); err != nil {
+		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.BotWallSignatures, &s.ChunkTokens, &updatedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return defaults if somehow the singleton row is missing.
 			return model.Settings{
@@ -288,12 +297,12 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	)
 	if since.IsZero() {
 		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage
+                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, '')
                    FROM articles ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q)
 	} else {
 		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage
+                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, '')
                    FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
 	}
@@ -309,7 +318,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		var pinned int
 		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
 			&m.Status, &pinned, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
-			&m.EnrichmentCoverage); err != nil {
+			&m.EnrichmentCoverage, &m.Summary); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
 		}
 		m.Pinned = pinned == 1
@@ -351,7 +360,7 @@ func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, err
 // Enrichment is nil when the article has no enrichment row.
 func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.ArticlePayload, error) {
 	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.tokens,
-                      a.status, a.enrichment_version, a.enrichment_coverage, e.enrichment
+                      a.summary, a.status, a.enrichment_version, a.enrichment_coverage, e.enrichment
                FROM articles a
                LEFT JOIN enrichments e ON e.article_id = a.id
                WHERE a.id = ?`
@@ -361,7 +370,7 @@ func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.Artic
 	var tokJSON string
 	var enrichJSON sql.NullString
 	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText,
-		&tokJSON, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &enrichJSON); err != nil {
+		&tokJSON, &p.Summary, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &enrichJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
 		}
@@ -539,13 +548,69 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 	return nil
 }
 
+// SaveEnrichmentProgress persists a partial enrichment blob from an intermediate
+// step-wise enrichment step and recomputes coverage, but leaves status unchanged
+// so an interrupted article is still re-selected by ListWork and resumed. It does
+// not stamp enriched_at (the article is not yet complete). The operation is
+// atomic. Returns [ports.ErrNotFound] if the article was deleted.
+func (s *SQLite) SaveEnrichmentProgress(ctx context.Context, id string, e model.Enrichment) error {
+	eJSON, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("store: SaveEnrichmentProgress marshal: %w", err)
+	}
+
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	tx, err := s.write.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: SaveEnrichmentProgress begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var tokenCount int
+	if err := tx.QueryRowContext(ctx, `SELECT json_array_length(tokens) FROM articles WHERE id=?`, id).Scan(&tokenCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ports.ErrNotFound
+		}
+		return fmt.Errorf("store: SaveEnrichmentProgress token count: %w", err)
+	}
+	coverage := sentenceCoverage(e, tokenCount)
+
+	const upsertEnrich = `INSERT INTO enrichments (article_id, enrichment)
+                          VALUES (?,?)
+                          ON CONFLICT(article_id) DO UPDATE SET enrichment=excluded.enrichment`
+	if _, err := tx.ExecContext(ctx, upsertEnrich, id, string(eJSON)); err != nil {
+		if isSQLiteForeignKey(err) {
+			return ports.ErrNotFound
+		}
+		return fmt.Errorf("store: SaveEnrichmentProgress upsert enrichment: %w", err)
+	}
+
+	const updArticle = `UPDATE articles SET updated_at=?, enrichment_coverage=? WHERE id=?`
+	res, err := tx.ExecContext(ctx, updArticle, fmtTime(now()), coverage, id)
+	if err != nil {
+		return fmt.Errorf("store: SaveEnrichmentProgress update article: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: SaveEnrichmentProgress commit: %w", err)
+	}
+	slog.Debug("store: enrichment progress saved", "article_id", id, "coverage", coverage)
+	return nil
+}
+
 // ListWork returns up to limit articles awaiting pipeline work — those in any
 // of model.WorkStatuses (queued/fetching need fetch, fetched/enriching need
 // enrich) — oldest first. The in-flight states are included so an article
 // stuck by a crash mid-stage is re-selected and re-processed.
 func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, tokens, status, enrichment_version, error,
+                      original_text, tokens, summary, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned
                FROM articles
                WHERE status IN ('queued','fetching','fetched','enriching','topup_queued')
@@ -600,6 +665,26 @@ func (s *SQLite) SaveContent(ctx context.Context, id string, c ports.ContentUpda
 		return ports.ErrNotFound
 	}
 	slog.Debug("store: article content saved", "article_id", id, "token_count", len(c.Tokens))
+	return nil
+}
+
+// SaveSummary persists the article's summary text (the first step of the
+// step-wise enrichment), stamping updated_at without touching status. Returns
+// [ports.ErrNotFound] if the article was deleted in the meantime.
+func (s *SQLite) SaveSummary(ctx context.Context, id, summary string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	const q = `UPDATE articles SET summary=?, updated_at=? WHERE id=?`
+	res, err := s.write.ExecContext(ctx, q, summary, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: SaveSummary: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article summary saved", "article_id", id, "summary_bytes", len(summary))
 	return nil
 }
 
@@ -898,7 +983,7 @@ func scanArticleRow(rows *sql.Rows) (*model.Article, error) {
 	var pinned int
 	if err := rows.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
-		&a.OriginalText, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
+		&a.OriginalText, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
 		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned,
 	); err != nil {
 		return nil, fmt.Errorf("store: scanArticleRow: %w", err)

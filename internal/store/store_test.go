@@ -122,6 +122,38 @@ func TestUpdateSettings_MarkdownWarnThreshold(t *testing.T) {
 	}
 }
 
+func TestUpdateSettings_ChunkTokens(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Default is 0 (use the deployment default).
+	got, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got.ChunkTokens != 0 {
+		t.Errorf("ChunkTokens default: got %d, want 0", got.ChunkTokens)
+	}
+
+	chunk := 300
+	got, err = s.UpdateSettings(ctx, model.SettingsPatch{ChunkTokens: &chunk})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.ChunkTokens != chunk {
+		t.Errorf("ChunkTokens after update: got %d, want %d", got.ChunkTokens, chunk)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.ChunkTokens != chunk {
+		t.Errorf("ChunkTokens after reload: got %d, want %d", got2.ChunkTokens, chunk)
+	}
+}
+
 func TestUpdateSettings_EnrichmentPrompt(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

@@ -7,7 +7,10 @@
 // rename them without updating the frontend contract.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Article status values stored in the articles.status column. They form an
 // explicit two-stage pipeline — fetch (extract original content) then enrich
@@ -44,6 +47,14 @@ const (
 	// enrichment (see enrich.Pool.runTopUp). The existing enrichment blob is
 	// preserved until the merge completes.
 	StatusTopupQueued = "topup_queued"
+	// StatusBlocked means the fetch succeeded but the retrieved content was
+	// recognised as a bot-verification / captcha interstitial (e.g. Cloudflare,
+	// Vercel Security Checkpoint) rather than the real article. It is detected in
+	// the fetch stage before any LLM call, so no tokens are spent annotating a
+	// challenge page. The reason is stored in Article.Error. It is terminal (the
+	// worker does not pick it up); a manual retry re-runs the fetch stage in case
+	// the wall has since cleared.
+	StatusBlocked = "blocked"
 )
 
 // WorkStatuses is the set of statuses the enrichment worker picks up. It
@@ -103,6 +114,59 @@ const MaxMarkdownWarnThreshold = 100
 // enrichment prompt template submitted via PATCH /api/settings.
 const MaxEnrichmentPromptLen = 8000
 
+// MaxBotWallSignaturesLen is the accepted upper bound (in bytes) for the custom
+// bot-wall signature list submitted via PATCH /api/settings.
+const MaxBotWallSignaturesLen = 4000
+
+// Chunk-size bounds for Settings.ChunkTokens, the user-tunable step-wise
+// enrichment window. A value of 0 means "use the deployment default"
+// (config.LLMChunkTokens); any non-zero value must fall within [Min, Max].
+// The lower bound keeps a chunk large enough to hold a sentence or two; the
+// upper bound keeps each completion short enough to avoid truncation.
+const (
+	MinChunkTokens = 50
+	MaxChunkTokens = 2000
+)
+
+// DefaultBotWallSignatures is the built-in set of lowercased substrings that
+// flag a bot-verification / captcha interstitial (Cloudflare, Vercel Security
+// Checkpoint, …) returned in place of the real article. The fetch stage matches
+// content against these — combined with a short-body guard — before any LLM call
+// so no tokens are spent annotating a challenge page. Users can override the list
+// via Settings.BotWallSignatures; an empty override falls back to this set.
+var DefaultBotWallSignatures = []string{
+	"vercel security checkpoint",
+	"we're verifying your browser",
+	"website owner? click here to fix",
+	"just a moment...",
+	"checking your browser before accessing",
+	"checking if the site connection is secure",
+	"attention required! | cloudflare",
+	"enable javascript and cookies to continue",
+	"verify you are human",
+	"verifying you are human",
+	"please verify you are a human",
+	"complete the security check to access",
+	"ddos protection by cloudflare",
+	"performance & security by cloudflare",
+	"needs to review the security of your connection",
+}
+
+// ParseBotWallSignatures splits a newline-separated signature list into the
+// normalised (trimmed, lowercased, non-empty) substrings used for matching. The
+// stored format is one signature per line so it is easy to edit in a textarea.
+func ParseBotWallSignatures(text string) []string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		sig := strings.ToLower(strings.TrimSpace(line))
+		if sig != "" {
+			out = append(out, sig)
+		}
+	}
+	return out
+}
+
 // Token is a single deterministic token produced by the tokenizer. Start and
 // End are byte offsets into Article.OriginalText such that
 // OriginalText[Start:End] == Text. Index is the token's position in the token
@@ -119,18 +183,21 @@ type Token struct {
 // text, the deterministic tokenization, and enrichment lifecycle fields. It is
 // the source of truth; the client mirrors a subset of it.
 type Article struct {
-	ID                string  `json:"id"`
-	SourceURL         string  `json:"source_url"`
-	URLHash           string  `json:"url_hash"`
-	Title             string  `json:"title"`
-	Author            string  `json:"author"`
-	SourceDomain      string  `json:"source_domain"`
-	Lang              string  `json:"lang"`
-	OriginalText      string  `json:"original_text"`
-	Tokens            []Token `json:"tokens"`
-	Status            string  `json:"status"`
-	EnrichmentVersion int     `json:"enrichment_version"`
-	Error             string  `json:"error,omitempty"`
+	ID           string  `json:"id"`
+	SourceURL    string  `json:"source_url"`
+	URLHash      string  `json:"url_hash"`
+	Title        string  `json:"title"`
+	Author       string  `json:"author"`
+	SourceDomain string  `json:"source_domain"`
+	Lang         string  `json:"lang"`
+	OriginalText string  `json:"original_text"`
+	Tokens       []Token `json:"tokens"`
+	// Summary is a short LLM-produced abstract of the article, generated as the
+	// first step of the step-wise enrichment. Empty until summarized.
+	Summary           string `json:"summary,omitempty"`
+	Status            string `json:"status"`
+	EnrichmentVersion int    `json:"enrichment_version"`
+	Error             string `json:"error,omitempty"`
 	// Pinned is a user flag keeping the article at the top of the library. It is
 	// synced as ordinary metadata (toggling it bumps UpdatedAt).
 	Pinned     bool      `json:"pinned"`
@@ -222,8 +289,23 @@ type Settings struct {
 	MarkdownWarnThreshold int `json:"markdown_warn_threshold"`
 	// EnrichmentPrompt is the user's custom enrichment system-prompt template.
 	// Empty means use the built-in default (llm.DefaultEnrichmentPromptTemplate).
-	EnrichmentPrompt string    `json:"enrichment_prompt"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	EnrichmentPrompt string `json:"enrichment_prompt"`
+	// SummaryPrompt is the user's custom summary system-prompt template (the
+	// first step of the step-wise enrichment). Empty means use the built-in
+	// default (llm.DefaultSummaryPromptTemplate).
+	SummaryPrompt string `json:"summary_prompt"`
+	// BotWallSignatures is the user's custom newline-separated list of bot-wall /
+	// captcha substrings the fetch stage matches against to detect a challenge
+	// page before any LLM call. Empty means use the built-in
+	// DefaultBotWallSignatures.
+	BotWallSignatures string `json:"bot_wall_signatures"`
+	// ChunkTokens is the user-tunable step-wise enrichment window size (target
+	// tokens per per-chunk LLM call). 0 means "use the deployment default"
+	// (config.LLMChunkTokens); a non-zero value must be within
+	// [MinChunkTokens, MaxChunkTokens]. Smaller chunks keep each completion
+	// shorter (less truncation risk) at the cost of more requests per article.
+	ChunkTokens int       `json:"chunk_tokens"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -236,6 +318,9 @@ type SettingsPatch struct {
 	MinDifficultyToHighlight *string `json:"min_difficulty_to_highlight,omitempty"`
 	MarkdownWarnThreshold    *int    `json:"markdown_warn_threshold,omitempty"`
 	EnrichmentPrompt         *string `json:"enrichment_prompt,omitempty"`
+	SummaryPrompt            *string `json:"summary_prompt,omitempty"`
+	BotWallSignatures        *string `json:"bot_wall_signatures,omitempty"`
+	ChunkTokens              *int    `json:"chunk_tokens,omitempty"`
 }
 
 // Progress is the reading progress for a single article. It is synced with LWW
@@ -268,6 +353,9 @@ type ArticleMeta struct {
 	// can tell when the LLM stopped annotating partway through. Zero until the
 	// article is enriched. See store.sentenceCoverage for the definition.
 	EnrichmentCoverage float64 `json:"enrichment_coverage"`
+	// Summary is the short LLM-produced abstract shown as a quick preview on the
+	// library card. Empty until the article has been summarized.
+	Summary string `json:"summary,omitempty"`
 }
 
 // ArticlePayload is the full enriched-article response from
@@ -275,13 +363,16 @@ type ArticleMeta struct {
 // enriched (in which case the handler typically returns 409, but Status
 // communicates the state either way).
 type ArticlePayload struct {
-	ID                string      `json:"id"`
-	Status            string      `json:"status"`
-	Title             string      `json:"title"`
-	Author            string      `json:"author"`
-	Lang              string      `json:"lang"`
-	OriginalText      string      `json:"original_text"`
-	Tokens            []Token     `json:"tokens"`
+	ID           string  `json:"id"`
+	Status       string  `json:"status"`
+	Title        string  `json:"title"`
+	Author       string  `json:"author"`
+	Lang         string  `json:"lang"`
+	OriginalText string  `json:"original_text"`
+	Tokens       []Token `json:"tokens"`
+	// Summary is the article abstract produced by the first enrichment step,
+	// shown in the reader. Empty until summarized.
+	Summary           string      `json:"summary,omitempty"`
 	Enrichment        *Enrichment `json:"enrichment,omitempty"`
 	EnrichmentVersion int         `json:"enrichment_version"`
 	// EnrichmentCoverage mirrors ArticleMeta.EnrichmentCoverage so the reader
@@ -320,12 +411,19 @@ type ServerInfo struct {
 	LLMMaxConcurrent  int    `json:"llm_max_concurrent"`
 	LLMRequestTimeout string `json:"llm_request_timeout"`
 	LLMMaxRetries     int    `json:"llm_max_retries"`
+	LLMChunkTokens    int    `json:"llm_chunk_tokens"`
 
 	ReadabilityTimeout string `json:"readability_timeout"`
 	EnrichmentVersion  int    `json:"enrichment_version"`
 	// EnrichmentPromptDefault is the built-in enrichment prompt template the
 	// client pre-fills the editor with and resets to. It is non-secret.
 	EnrichmentPromptDefault string `json:"enrichment_prompt_default"`
+	// SummaryPromptDefault is the built-in summary prompt template the client
+	// pre-fills the editor with and resets to. It is non-secret.
+	SummaryPromptDefault string `json:"summary_prompt_default"`
+	// BotWallSignaturesDefault is the built-in newline-separated bot-wall /
+	// captcha signature list the client pre-fills the editor with and resets to.
+	BotWallSignaturesDefault string `json:"bot_wall_signatures_default"`
 
 	MarkdownEnabled        bool   `json:"markdown_enabled"`
 	MarkdownBaseURL        string `json:"markdown_base_url"`

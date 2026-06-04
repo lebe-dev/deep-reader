@@ -1,8 +1,8 @@
 <!-- LLM settings card.
-     Manages: LLM model override and the enrichment system-prompt template.
-     Both sync to the server via enqueueSettings (outbox → PATCH /api/settings).
-     An empty value falls back to the server default (.env LLM_MODEL / built-in
-     enrichment prompt template).
+     Manages: LLM model override and the per-stage system-prompt templates
+     (summary, enrichment). All sync to the server via enqueueSettings
+     (outbox → PATCH /api/settings). An empty value falls back to the server
+     default (.env LLM_MODEL / built-in prompt templates).
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -10,13 +10,13 @@
 	import { liveQuery } from 'dexie';
 	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
-	import { Textarea } from '$lib/components/ui/textarea';
 	import { Label } from '$lib/components/ui/label';
-	import { Button } from '$lib/components/ui/button';
+	import { Separator } from '$lib/components/ui/separator';
+	import PromptEditor from '$lib/components/settings/PromptEditor.svelte';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
-	import type { Settings, ServerInfo } from '$lib/types';
+	import type { Settings, SettingsPatch, ServerInfo } from '$lib/types';
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -24,32 +24,6 @@
 
 	let settings = $state<Settings | undefined>(undefined);
 	let serverInfo = $state<ServerInfo | undefined>(undefined);
-
-	// Local draft for the prompt textarea so typing isn't clobbered by liveQuery
-	// echoes. Initialised from settings / server default on first load.
-	let promptDraft = $state('');
-	let promptTouched = $state(false);
-
-	// ---------------------------------------------------------------------------
-	// Derived
-	// ---------------------------------------------------------------------------
-
-	// The built-in default template, shown as the textarea value when the user
-	// has no custom prompt of their own.
-	const defaultPrompt = $derived(serverInfo?.enrichment_prompt_default ?? '');
-
-	// The value to persist: an exact match of the default is stored as "" so the
-	// server keeps tracking its built-in default rather than a frozen copy.
-	const promptToStore = $derived(promptDraft === defaultPrompt ? '' : promptDraft);
-
-	// There are unsaved changes when the value-to-store differs from what's saved.
-	const promptDirty = $derived((settings?.enrichment_prompt ?? '') !== promptToStore);
-
-	// Already on the default (nothing to reset) when the saved value is empty and
-	// the draft still equals the default template.
-	const isDefaultPrompt = $derived(
-		(settings?.enrichment_prompt ?? '') === '' && promptDraft === defaultPrompt
-	);
 
 	// ---------------------------------------------------------------------------
 	// Lifecycle — subscribe to the sync_state singleton (settings + serverInfo).
@@ -59,15 +33,7 @@
 		const sub = liveQuery(() => db.sync_state.get(SYNC_STATE_ID)).subscribe({
 			next(state) {
 				if (state?.serverInfo) serverInfo = state.serverInfo;
-				if (!state?.settings) return;
-				settings = state.settings;
-				// Seed the draft with the saved prompt, or the default template when
-				// none is set — so the textarea is always populated, never blank.
-				// Re-seeds on later syncs until the user starts editing.
-				if (!promptTouched) {
-					promptDraft =
-						state.settings.enrichment_prompt || (state.serverInfo?.enrichment_prompt_default ?? '');
-				}
+				if (state?.settings) settings = state.settings;
 			},
 			error(err) {
 				console.error('[settings] sync_state liveQuery error', err);
@@ -81,7 +47,7 @@
 	// Helpers
 	// ---------------------------------------------------------------------------
 
-	async function patchField(patch: Partial<Settings>) {
+	async function patchField(patch: SettingsPatch) {
 		try {
 			await enqueueSettings(patch);
 			const state = await getSyncState();
@@ -103,34 +69,31 @@
 		patchField({ llm_model: next });
 	}
 
-	function handlePromptInput(raw: string) {
-		promptTouched = true;
-		promptDraft = raw;
-	}
-
-	function savePrompt() {
-		if (!settings || !promptDirty) return;
-		patchField({ enrichment_prompt: promptToStore });
-		promptTouched = false;
-	}
-
-	function resetPrompt() {
-		// Restore the built-in default into the editor and clear the saved
-		// override (empty = the server keeps using its default template).
-		promptDraft = defaultPrompt;
-		promptTouched = false;
-		if (settings && settings.enrichment_prompt !== '') {
-			patchField({ enrichment_prompt: '' });
+	function handleChunkTokensChange(raw: string) {
+		if (!settings) return;
+		const trimmed = raw.trim();
+		// Empty field = revert to the server default (stored as 0).
+		const next = trimmed === '' ? 0 : Math.trunc(Number(trimmed));
+		if (Number.isNaN(next)) {
+			toast.error('Chunk size must be a number');
+			return;
 		}
+		// 0 (default) is allowed; any other value must be within the backend bounds.
+		if (next !== 0 && (next < 50 || next > 2000)) {
+			toast.error('Chunk size must be 0 (default) or between 50 and 2000');
+			return;
+		}
+		if (next === settings.chunk_tokens) return;
+		patchField({ chunk_tokens: next });
 	}
 </script>
 
 <Card.Root>
 	<Card.Header>
 		<Card.Title>LLM</Card.Title>
-		<Card.Description
-			>Configure the model and enrichment prompt used to annotate articles.</Card.Description
-		>
+		<Card.Description>
+			Configure the model and the per-stage prompts used to annotate articles.
+		</Card.Description>
 	</Card.Header>
 
 	<Card.Content class="space-y-5">
@@ -161,33 +124,69 @@
 				</p>
 			</div>
 
-			<!-- Enrichment prompt template -->
+			<!-- Chunk size (step-wise enrichment window) -->
 			<div class="grid gap-1.5">
-				<Label for="enrichment-prompt">Enrichment prompt</Label>
-				<Textarea
-					id="enrichment-prompt"
-					rows={14}
-					class="font-mono text-xs"
-					value={promptDraft}
-					oninput={(e) => handlePromptInput(e.currentTarget.value)}
+				<Label for="chunk-tokens-input">Chunk size (tokens)</Label>
+				<Input
+					id="chunk-tokens-input"
+					type="number"
+					min="50"
+					max="2000"
+					placeholder={String(serverInfo?.llm_chunk_tokens ?? 500)}
+					value={settings.chunk_tokens === 0 ? '' : settings.chunk_tokens}
+					onchange={(e) => handleChunkTokensChange(e.currentTarget.value)}
 				/>
 				<p class="text-muted-foreground text-xs">
+					How many tokens each article is annotated in per LLM call. Smaller chunks make each
+					request shorter and more reliable on weaker models, at the cost of more requests. Clear
+					the field to keep the server default
+					{#if serverInfo?.llm_chunk_tokens}(<code>{serverInfo.llm_chunk_tokens}</code>){/if}.
+					Allowed: 50–2000.
+				</p>
+			</div>
+
+			<Separator />
+
+			<!-- Summary prompt (step 1 of the step-wise enrichment) -->
+			<PromptEditor
+				id="summary-prompt"
+				label="Summary prompt"
+				rows={8}
+				saved={settings.summary_prompt}
+				defaultValue={serverInfo?.summary_prompt_default ?? ''}
+				onSave={(value) => patchField({ summary_prompt: value })}
+				onReset={() => patchField({ summary_prompt: '' })}
+			>
+				{#snippet help()}
+					System prompt for the summary step. Pre-filled with the default template — edit it to
+					customise. Supported placeholder: <code>{'{{target_language}}'}</code>.
+				{/snippet}
+			</PromptEditor>
+
+			<Separator />
+
+			<!-- Enrichment prompt (per-chunk translation) -->
+			<PromptEditor
+				id="enrichment-prompt"
+				label="Enrichment prompt"
+				rows={14}
+				saved={settings.enrichment_prompt}
+				defaultValue={serverInfo?.enrichment_prompt_default ?? ''}
+				onSave={(value) => patchField({ enrichment_prompt: value })}
+				onReset={() => patchField({ enrichment_prompt: '' })}
+			>
+				{#snippet help()}
 					System prompt for article enrichment. Pre-filled with the default template — edit it to
 					customise. Supported placeholders:
 					<code>{'{{target_language}}'}</code>, <code>{'{{cefr_level}}'}</code>,
 					<code>{'{{min_difficulty}}'}</code>, <code>{'{{enrichment_version}}'}</code>.
-				</p>
-				<div class="flex gap-2 pt-1">
-					<Button size="sm" onclick={savePrompt} disabled={!promptDirty}>Save prompt</Button>
-					<Button size="sm" variant="outline" onclick={resetPrompt} disabled={isDefaultPrompt}>
-						Reset to default
-					</Button>
-				</div>
-				<p class="text-muted-foreground text-xs">
-					Changes apply to newly enriched articles. Use “Retry” on an article to re-enrich it with
-					the new prompt.
-				</p>
-			</div>
+				{/snippet}
+			</PromptEditor>
+
+			<p class="text-muted-foreground text-xs">
+				Changes apply to newly enriched articles. Use “Retry” on an article to re-enrich it with the
+				new prompts.
+			</p>
 		{/if}
 	</Card.Content>
 </Card.Root>

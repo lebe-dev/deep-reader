@@ -346,10 +346,10 @@ func TestEnrich_DecodeErrorCarriesRaw(t *testing.T) {
 		t.Errorf("RawResponse() = %q, want %q", decErr.RawResponse(), badContent)
 	}
 
-	// A decode failure must be permanent: retrying yields the same bad answer.
-	var re interface{ Retryable() bool }
-	if errors.As(err, &re) {
-		t.Errorf("DecodeError should not be retryable, but Retryable() = %v", re.Retryable())
+	// A present-but-malformed answer is permanent: retrying yields the same bad
+	// answer, so Retryable() must be false (the content was non-empty garbage).
+	if decErr.Retryable() {
+		t.Error("present-but-malformed DecodeError should not be retryable")
 	}
 }
 
@@ -477,6 +477,78 @@ func TestEnrich_PromptContainsTokens(t *testing.T) {
 	// User prompt must contain at least one token text from the article.
 	if !strings.Contains(userPrompt, "quick") {
 		t.Error("user prompt does not contain article token text 'quick'")
+	}
+}
+
+// summaryServer returns a fake summary completion and captures the system
+// prompt the client sent.
+func summaryServer(t *testing.T, capture *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		for _, m := range body.Messages {
+			if m.Role == "system" {
+				*capture = m.Content
+			}
+		}
+		resp := `{"choices":[{"message":{"content":"{\"summary\":\"краткое содержание\"}"}}],` +
+			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(resp))
+	}))
+}
+
+// TestSummarize_DefaultPrompt asserts the summary step uses the built-in default
+// template (with {{target_language}} substituted) and decodes the summary.
+func TestSummarize_DefaultPrompt(t *testing.T) {
+	var systemPrompt string
+	srv := summaryServer(t, &systemPrompt)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	settings := testSettings()
+	summary, _, err := client.Summarize(context.Background(), testArticle(), settings)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if summary != "краткое содержание" {
+		t.Errorf("unexpected summary %q", summary)
+	}
+	// The {{target_language}} placeholder must have been substituted.
+	if !strings.Contains(systemPrompt, settings.TargetLanguage) {
+		t.Errorf("system prompt does not contain target language %q: %q", settings.TargetLanguage, systemPrompt)
+	}
+	if strings.Contains(systemPrompt, "{{target_language}}") {
+		t.Error("system prompt still contains the unsubstituted {{target_language}} placeholder")
+	}
+}
+
+// TestSummarize_CustomPrompt asserts a user-configured summary template overrides
+// the built-in default.
+func TestSummarize_CustomPrompt(t *testing.T) {
+	var systemPrompt string
+	srv := summaryServer(t, &systemPrompt)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	settings := testSettings()
+	settings.SummaryPrompt = "CUSTOM SUMMARY in {{target_language}} please."
+	if _, _, err := client.Summarize(context.Background(), testArticle(), settings); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if !strings.Contains(systemPrompt, "CUSTOM SUMMARY") {
+		t.Errorf("custom summary prompt was not used: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, settings.TargetLanguage) {
+		t.Errorf("custom prompt placeholder not substituted: %q", systemPrompt)
 	}
 }
 
@@ -742,13 +814,79 @@ func TestEnrichSpans_RestrictsToRanges(t *testing.T) {
 	}
 
 	// Both prompts must reference the requested range so the model restricts itself.
-	if !strings.Contains(systemPrompt, "INCREMENTAL MODE") {
-		t.Error("system prompt missing incremental-mode directive")
+	if !strings.Contains(systemPrompt, "SPAN MODE") {
+		t.Error("system prompt missing span-mode directive")
 	}
 	if !strings.Contains(systemPrompt, "[1-3]") {
 		t.Errorf("system prompt missing span range [1-3]: %q", systemPrompt)
 	}
 	if !strings.Contains(userPrompt, "[1-3]") {
 		t.Errorf("user prompt missing span range [1-3]: %q", userPrompt)
+	}
+
+	// The user prompt must carry ONLY the spanned tokens (indices 1–3), not the
+	// whole article — this is the change that keeps per-chunk prompts small.
+	if !strings.Contains(userPrompt, `"index":1`) ||
+		!strings.Contains(userPrompt, `"index":2`) ||
+		!strings.Contains(userPrompt, `"index":3`) {
+		t.Errorf("user prompt missing spanned tokens 1-3: %q", userPrompt)
+	}
+	if strings.Contains(userPrompt, `"index":0`) {
+		t.Errorf("user prompt leaked out-of-span token 0 (full article sent?): %q", userPrompt)
+	}
+}
+
+// TestEnrich_EmptyBodyIsRetryable asserts that a 2xx response with an empty
+// body (a truncated / dropped stream — the "unexpected end of JSON input" case)
+// yields a retryable DecodeError so the enrichment pool re-sends instead of
+// failing the chunk permanently.
+func TestEnrich_EmptyBodyIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Write nothing: an empty body.
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if !decErr.Retryable() {
+		t.Error("empty/truncated envelope DecodeError should be retryable")
+	}
+}
+
+// TestEnrich_EmptyCompletionIsRetryable asserts that a valid envelope carrying
+// an empty completion content is retryable (the model returned nothing).
+func TestEnrich_EmptyCompletionIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		type choice struct {
+			Message message `json:"message"`
+		}
+		type resp struct {
+			Choices []choice `json:"choices"`
+		}
+		b, _ := json.Marshal(resp{Choices: []choice{{Message: message{Role: "assistant", Content: "  "}}}})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if !decErr.Retryable() {
+		t.Error("empty-completion DecodeError should be retryable")
 	}
 }
