@@ -134,11 +134,24 @@ func TestSubErrorLevelsAreNotForwarded(t *testing.T) {
 	log := newLogger(hub)
 
 	log.Info("info")
-	log.Warn("warn", "err", errors.New("transient"))
 	log.Debug("debug")
 
 	if n := len(transport.captured()); n != 0 {
 		t.Fatalf("want 0 forwarded events, got %d", n)
+	}
+}
+
+func TestWarnIsForwarded(t *testing.T) {
+	hub, transport := newHub(t)
+	log := newLogger(hub)
+
+	log.Warn("http 4xx", "status", 404)
+
+	if n := len(transport.captured()); n != 1 {
+		t.Fatalf("want 1 forwarded event, got %d", n)
+	}
+	if transport.captured()[0].Level != sentry.LevelWarning {
+		t.Errorf("level = %q, want warning", transport.captured()[0].Level)
 	}
 }
 

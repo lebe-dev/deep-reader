@@ -11,9 +11,10 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
-// forwardLevel is the minimum slog level forwarded to Sentry. ERROR and above
-// are worth an alert; INFO/WARN stay in the log stream only.
-const forwardLevel = slog.LevelError
+// forwardLevel is the minimum slog level forwarded to Sentry. WARN and above
+// are forwarded; this captures 4xx HTTP responses (logged at Warn) as well as
+// errors.
+const forwardLevel = slog.LevelWarn
 
 // errorChainDepth bounds how deep a wrapped-error chain is unwound into Sentry
 // exception entries; it mirrors sentry-go's own default.
