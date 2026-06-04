@@ -17,6 +17,7 @@ import (
 
 	"deep-reader/internal/config"
 	"deep-reader/internal/model"
+	"deep-reader/internal/normalize"
 	"deep-reader/internal/ports"
 )
 
@@ -455,6 +456,69 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 		return "", usage, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal summary content: %w", err), Transient: transient}
 	}
 	return strings.TrimSpace(sr.Summary), usage, nil
+}
+
+// normalizeSchema constrains the normalization completion to a single
+// cleaned-text field, mirroring the summary wrapper.
+const normalizeSchema = `{
+  "type": "object",
+  "required": ["content"],
+  "additionalProperties": false,
+  "properties": {
+    "content": {"type": "string"}
+  }
+}`
+
+// normalizeResponse is the parsed normalization completion.
+type normalizeResponse struct {
+	Content string `json:"content"`
+}
+
+// Normalize runs the content-normalization pass of the fetch stage: it sends the
+// extracted article text to the LLM with the (possibly user-customized)
+// normalization prompt and returns the cleaned body, with the leftover
+// navigation / chrome / boilerplate removed. The fail-open guard
+// (normalize.Apply) keeps the original text whenever the model returns empty or
+// over-deletes, so a bad pass can never destroy the article. It performs exactly
+// one HTTP request; retry/backoff is the caller's responsibility (enrich.Pool).
+func (c *Client) Normalize(ctx context.Context, title, text string, settings model.Settings) (string, ports.Usage, error) {
+	systemPrompt := normalize.RenderSystemPrompt(settings)
+	userPrompt := "Article title: " + title + "\n\nArticle text:\n" + text
+	reqBody := chatRequest{
+		Model: modelName(c.model, settings.LLMModel),
+		Messages: []chatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		ResponseFormat: responseFormat{
+			Type: "json_schema",
+			JSONSchema: &jsonSchema{
+				Name:   "normalized_content",
+				Schema: json.RawMessage(normalizeSchema),
+				Strict: true,
+			},
+		},
+		Temperature: 0,
+	}
+
+	content, usage, err := c.postChat(ctx, reqBody)
+	if err != nil {
+		if isSchemaUnsupported(err) {
+			reqBody.ResponseFormat = responseFormat{Type: "json_object"}
+			content, usage, err = c.postChat(ctx, reqBody)
+		}
+		if err != nil {
+			return "", usage, err
+		}
+	}
+
+	var nr normalizeResponse
+	if err := json.Unmarshal([]byte(content), &nr); err != nil {
+		transient := strings.TrimSpace(content) == ""
+		return "", usage, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal normalize content: %w", err), Transient: transient}
+	}
+	cleaned, _ := normalize.Apply(text, nr.Content)
+	return cleaned, usage, nil
 }
 
 // complete issues a single chat completion for the given prompts, decoding the

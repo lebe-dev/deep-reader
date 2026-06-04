@@ -433,6 +433,12 @@ type fakeLLM struct {
 	// Summarize fail.
 	summaryCalls int
 	summaryErr   error
+	// normalizeCalls counts Normalize invocations. normalizeFunc, when set,
+	// transforms the input text (simulating boilerplate removal); normalizeErr,
+	// when set, makes Normalize fail.
+	normalizeCalls int
+	normalizeFunc  func(string) string
+	normalizeErr   error
 	// spanFunc, when set, computes the EnrichSpans result from the requested
 	// spans (used by the step-wise multi-chunk test).
 	spanFunc func([]model.Span) *model.Enrichment
@@ -501,6 +507,23 @@ func (f *fakeLLM) Summarize(_ context.Context, _ *model.Article, _ model.Setting
 		return "", ports.Usage{}, f.summaryErr
 	}
 	return "test summary", ports.Usage{PromptTokens: 3, CompletionTokens: 3, TotalTokens: 6}, nil
+}
+
+// Normalize is a configurable fake for the fetch-stage normalization step. By
+// default it is a pass-through (returns the text unchanged) so existing fetch
+// tests tokenize the same content. Tests can inject a transform via
+// normalizeFunc or an error via normalizeErr; it never touches callCount/failN.
+func (f *fakeLLM) Normalize(_ context.Context, _ string, text string, _ model.Settings) (string, ports.Usage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.normalizeCalls++
+	if f.normalizeErr != nil {
+		return "", ports.Usage{}, f.normalizeErr
+	}
+	if f.normalizeFunc != nil {
+		text = f.normalizeFunc(text)
+	}
+	return text, ports.Usage{PromptTokens: 2, CompletionTokens: 2, TotalTokens: 4}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,6 +1379,71 @@ func TestFetchDecodesHTMLEntities(t *testing.T) {
 	want := "First & foremost it’s loaded."
 	if got := st.originalText("article-entities"); got != want {
 		t.Errorf("decoded text:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestFetchNormalizesBeforeTokenizing verifies the fetch stage runs the LLM
+// normalization pass on the extracted body — stripping leftover nav / chrome —
+// and tokenizes the cleaned text, so the stored OriginalText is the normalized
+// version. It also asserts Normalize was called exactly once.
+func TestFetchNormalizesBeforeTokenizing(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-normalize", "https://example.com/a"))
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL: "https://example.com/a",
+		Title:        "Gemma model",
+		Text:         "Skip to content\nThe model runs on any laptop with sixteen gigabytes of memory.\nMinimize to nav\nPrev story",
+		Domain:       "example.com",
+		Lang:         "en",
+	}}
+	const cleaned = "The model runs on any laptop with sixteen gigabytes of memory."
+	llm := &fakeLLM{
+		result: &model.Enrichment{},
+		// Simulate the model returning only the article sentence.
+		normalizeFunc: func(string) string { return cleaned },
+	}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-normalize") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-normalize"))
+	}
+	if got := st.originalText("article-normalize"); got != cleaned {
+		t.Errorf("normalized original text:\n got %q\nwant %q", got, cleaned)
+	}
+	if llm.normalizeCalls != 1 {
+		t.Errorf("normalize calls: got %d, want 1", llm.normalizeCalls)
+	}
+}
+
+// TestFetchNormalizeFailureKeepsOriginal verifies normalization is best-effort:
+// when the LLM normalize call returns a non-retryable error, the fetch stage
+// falls back to the unnormalized extracted text rather than failing the fetch.
+func TestFetchNormalizeFailureKeepsOriginal(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-normfail", "https://example.com/a"))
+	const raw = "Some article body here."
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL: "https://example.com/a",
+		Title:        "Title",
+		Text:         raw,
+		Domain:       "example.com",
+		Lang:         "en",
+	}}
+	llm := &fakeLLM{
+		result:       &model.Enrichment{},
+		normalizeErr: &fakeError{msg: "normalize boom", retryable: false},
+	}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-normfail") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-normfail"))
+	}
+	if got := st.originalText("article-normfail"); got != raw {
+		t.Errorf("expected unnormalized text kept on normalize failure:\n got %q\nwant %q", got, raw)
 	}
 }
 

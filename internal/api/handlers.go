@@ -12,6 +12,7 @@ import (
 	"deep-reader/internal/config"
 	"deep-reader/internal/llm"
 	"deep-reader/internal/model"
+	"deep-reader/internal/normalize"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/version"
 )
@@ -380,6 +381,7 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		EnrichmentVersion:        cfg.EnrichmentVersion,
 		EnrichmentPromptDefault:  llm.DefaultEnrichmentPromptTemplate,
 		SummaryPromptDefault:     llm.DefaultSummaryPromptTemplate,
+		NormalizePromptDefault:   normalize.DefaultPromptTemplate,
 		BotWallSignaturesDefault: strings.Join(model.DefaultBotWallSignatures, "\n"),
 		MarkdownEnabled:          cfg.MarkdownEnabled,
 		MarkdownBaseURL:          cfg.MarkdownBaseURL,

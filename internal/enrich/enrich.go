@@ -400,11 +400,18 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		// Decode HTML entities before tokenizing so token byte offsets stay
 		// consistent with the stored OriginalText.
 		text := html.UnescapeString(result.Text)
+		title := html.UnescapeString(result.Title)
+
+		// Normalize the extracted body — strip leftover navigation / chrome /
+		// boilerplate — BEFORE tokenizing, so tokens (and every downstream
+		// enrichment span) align with the cleaned text. Best-effort: a normalize
+		// failure leaves the original text in place.
+		text = p.runNormalize(ctx, log, title, text, settings)
 		tokens := tokenize.Tokenize(text)
 
 		update := ports.ContentUpdate{
 			SourceURL:    result.CanonicalURL,
-			Title:        html.UnescapeString(result.Title),
+			Title:        title,
 			Author:       html.UnescapeString(result.Author),
 			SourceDomain: result.Domain,
 			Lang:         result.Lang,
@@ -578,6 +585,50 @@ func (p *Pool) runSummarize(ctx context.Context, log *slog.Logger, a *model.Arti
 	}
 	log.Warn("enrich: summary retries exhausted, continuing without it")
 	return "", false
+}
+
+// runNormalize performs the content-normalization step of the fetch stage: an
+// LLM pass that strips leftover navigation / chrome / boilerplate the extractor
+// leaked into the article body. It runs after extraction and before
+// tokenization so the resulting tokens — and every downstream enrichment span —
+// align with the cleaned text. It is best-effort and non-terminal: any error
+// (or a guard rejection inside llm.Normalize) leaves the original text in place,
+// so normalization can only improve the body, never block the fetch. Transient
+// errors are retried with the shared back-off.
+func (p *Pool) runNormalize(ctx context.Context, log *slog.Logger, title, text string, settings model.Settings) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	maxRetries := p.cfg.LLMMaxRetries
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return text
+		}
+		if attempt > 0 && !p.backoff(ctx, log, attempt) {
+			return text
+		}
+
+		cleaned, usage, err := p.llm.Normalize(ctx, title, text, settings)
+		if err != nil {
+			if isRetryable(err) {
+				log.Warn("enrich: normalize transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
+				continue
+			}
+			log.Warn("enrich: normalize failed, using unnormalized text", "err", err)
+			return text
+		}
+		if cleaned != text {
+			log.Info("enrich: content normalized",
+				"original_bytes", len(text),
+				"normalized_bytes", len(cleaned),
+				"prompt_tokens", usage.PromptTokens,
+				"completion_tokens", usage.CompletionTokens,
+			)
+		}
+		return cleaned
+	}
+	log.Warn("enrich: normalize retries exhausted, using unnormalized text")
+	return text
 }
 
 // enrichChunk annotates a single token span with retry/backoff, merges the

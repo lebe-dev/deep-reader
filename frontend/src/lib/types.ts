@@ -209,6 +209,8 @@ export interface Settings {
 	enrichment_prompt: string;
 	/** Custom summary system-prompt template. Empty = use the server default. */
 	summary_prompt: string;
+	/** Custom content-normalization system-prompt template. Empty = use the server default. */
+	normalize_prompt: string;
 	/** Custom bot-wall / captcha signatures (one per line). Empty = use the server defaults. */
 	bot_wall_signatures: string;
 	/** Step-wise enrichment window size (tokens per chunk). 0 = use the server default. */
@@ -227,6 +229,7 @@ export type SettingsPatch = Partial<
 		| 'markdown_warn_threshold'
 		| 'enrichment_prompt'
 		| 'summary_prompt'
+		| 'normalize_prompt'
 		| 'bot_wall_signatures'
 		| 'chunk_tokens'
 	>
@@ -261,6 +264,8 @@ export interface ServerInfo {
 	enrichment_prompt_default: string;
 	/** Built-in summary prompt template the client pre-fills / resets to. */
 	summary_prompt_default: string;
+	/** Built-in content-normalization prompt template the client pre-fills / resets to. */
+	normalize_prompt_default: string;
 	/** Built-in bot-wall / captcha signature list the client pre-fills / resets to. */
 	bot_wall_signatures_default: string;
 	markdown_enabled: boolean;

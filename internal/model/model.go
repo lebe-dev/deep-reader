@@ -294,6 +294,12 @@ type Settings struct {
 	// first step of the step-wise enrichment). Empty means use the built-in
 	// default (llm.DefaultSummaryPromptTemplate).
 	SummaryPrompt string `json:"summary_prompt"`
+	// NormalizePrompt is the user's custom content-normalization system-prompt
+	// template. The normalization step runs in the fetch stage (after extraction,
+	// before tokenization) and strips navigation / chrome / boilerplate the
+	// extractor leaked into the article body. Empty means use the built-in
+	// default (normalize.DefaultPromptTemplate).
+	NormalizePrompt string `json:"normalize_prompt"`
 	// BotWallSignatures is the user's custom newline-separated list of bot-wall /
 	// captcha substrings the fetch stage matches against to detect a challenge
 	// page before any LLM call. Empty means use the built-in
@@ -319,6 +325,7 @@ type SettingsPatch struct {
 	MarkdownWarnThreshold    *int    `json:"markdown_warn_threshold,omitempty"`
 	EnrichmentPrompt         *string `json:"enrichment_prompt,omitempty"`
 	SummaryPrompt            *string `json:"summary_prompt,omitempty"`
+	NormalizePrompt          *string `json:"normalize_prompt,omitempty"`
 	BotWallSignatures        *string `json:"bot_wall_signatures,omitempty"`
 	ChunkTokens              *int    `json:"chunk_tokens,omitempty"`
 }
@@ -421,6 +428,9 @@ type ServerInfo struct {
 	// SummaryPromptDefault is the built-in summary prompt template the client
 	// pre-fills the editor with and resets to. It is non-secret.
 	SummaryPromptDefault string `json:"summary_prompt_default"`
+	// NormalizePromptDefault is the built-in content-normalization prompt template
+	// the client pre-fills the editor with and resets to. It is non-secret.
+	NormalizePromptDefault string `json:"normalize_prompt_default"`
 	// BotWallSignaturesDefault is the built-in newline-separated bot-wall /
 	// captcha signature list the client pre-fills the editor with and resets to.
 	BotWallSignaturesDefault string `json:"bot_wall_signatures_default"`

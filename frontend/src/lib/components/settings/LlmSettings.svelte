@@ -1,6 +1,6 @@
 <!-- LLM settings card.
      Manages: LLM model override and the per-stage system-prompt templates
-     (summary, enrichment). All sync to the server via enqueueSettings
+     (normalization, summary, enrichment). All sync to the server via enqueueSettings
      (outbox → PATCH /api/settings). An empty value falls back to the server
      default (.env LLM_MODEL / built-in prompt templates).
 -->
@@ -144,6 +144,27 @@
 					Allowed: 50–2000.
 				</p>
 			</div>
+
+			<Separator />
+
+			<!-- Normalization prompt (fetch stage: strips nav / chrome / boilerplate) -->
+			<PromptEditor
+				id="normalize-prompt"
+				label="Normalization prompt"
+				rows={12}
+				saved={settings.normalize_prompt}
+				defaultValue={serverInfo?.normalize_prompt_default ?? ''}
+				onSave={(value) => patchField({ normalize_prompt: value })}
+				onReset={() => patchField({ normalize_prompt: '' })}
+			>
+				{#snippet help()}
+					System prompt for the content-normalization step, which runs right after an article is
+					fetched (before tokenization) to strip leftover navigation, reader chrome, subscribe
+					banners, author bios, comment sections and prev/next-story links the extractor leaked into
+					the body. Pre-filled with the default template — edit it to customise. Supported
+					placeholder: <code>{'{{target_language}}'}</code>.
+				{/snippet}
+			</PromptEditor>
 
 			<Separator />
 

@@ -269,6 +269,16 @@ type LLMClient interface {
 	// summary is persisted and fed back as context into the per-chunk enrichment
 	// calls. Like Enrich, it performs exactly one attempt.
 	Summarize(ctx context.Context, a *model.Article, settings model.Settings) (string, Usage, error)
+
+	// Normalize runs the content-normalization pass of the fetch stage: it strips
+	// leftover navigation / chrome / boilerplate from the extracted article text
+	// and returns the cleaned body. It runs after extraction and before
+	// tokenization so the tokens — and therefore every downstream enrichment span
+	// — are computed against the cleaned text. The implementation must fail open
+	// (return the original text) when the model over-deletes or returns empty, so
+	// a bad pass never destroys the article. Like Enrich, it performs exactly one
+	// attempt.
+	Normalize(ctx context.Context, title, text string, settings model.Settings) (string, Usage, error)
 }
 
 // Usage is the provider token-accounting for a single LLM call, logged for cost

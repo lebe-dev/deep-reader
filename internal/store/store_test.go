@@ -196,6 +196,48 @@ func TestUpdateSettings_EnrichmentPrompt(t *testing.T) {
 	}
 }
 
+func TestUpdateSettings_NormalizePrompt(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Default is empty (use built-in template).
+	got, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got.NormalizePrompt != "" {
+		t.Errorf("default NormalizePrompt: got %q, want empty", got.NormalizePrompt)
+	}
+
+	prompt := "Strip nav and chrome for {{target_language}} learners"
+	got, err = s.UpdateSettings(ctx, model.SettingsPatch{NormalizePrompt: &prompt})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.NormalizePrompt != prompt {
+		t.Errorf("NormalizePrompt after update: got %q, want %q", got.NormalizePrompt, prompt)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.NormalizePrompt != prompt {
+		t.Errorf("NormalizePrompt after reload: got %q, want %q", got2.NormalizePrompt, prompt)
+	}
+
+	// Empty string resets to the built-in default.
+	empty := ""
+	got3, err := s.UpdateSettings(ctx, model.SettingsPatch{NormalizePrompt: &empty})
+	if err != nil {
+		t.Fatalf("UpdateSettings reset: %v", err)
+	}
+	if got3.NormalizePrompt != "" {
+		t.Errorf("NormalizePrompt after reset: got %q, want empty", got3.NormalizePrompt)
+	}
+}
+
 // ── Articles ──────────────────────────────────────────────────────────────────
 
 func TestCreateArticle_And_GetByHash(t *testing.T) {
