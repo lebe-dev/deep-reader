@@ -71,6 +71,8 @@ func newRequestLogger(log *slog.Logger) fiber.Handler {
 			level = slog.LevelError
 		case status >= 400:
 			level = slog.LevelWarn
+		case c.Path() == "/healthz":
+			level = slog.LevelDebug
 		}
 		log.LogAttrs(c.Context(), level, "http_request",
 			slog.String("method", c.Method()),
