@@ -13,7 +13,6 @@
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import PinIcon from '@lucide/svelte/icons/pin';
-	import PinOffIcon from '@lucide/svelte/icons/pin-off';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
 
 	interface Props {
@@ -126,11 +125,7 @@
 			? 'text-primary opacity-100'
 			: 'text-muted-foreground opacity-0 group-hover:opacity-100'}"
 	>
-		{#if article.pinned}
-			<PinOffIcon class="size-3.5" />
-		{:else}
-			<PinIcon class="size-3.5" />
-		{/if}
+		<PinIcon class="size-3.5" fill={article.pinned ? 'currentColor' : 'none'} />
 	</Button>
 
 	<div class="flex items-start justify-between gap-3">

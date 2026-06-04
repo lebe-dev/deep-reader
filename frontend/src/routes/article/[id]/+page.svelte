@@ -12,7 +12,7 @@
 	import { onDestroy } from 'svelte';
 	import { db } from '$lib/db';
 	import { getArticle } from '$lib/api';
-	import { enqueueProgress, enqueuePin, enqueueReEnrich } from '$lib/sync/engine';
+	import { enqueueProgress, enqueueReEnrich } from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
 	import type { ArticleMeta, ArticlePayload, Progress, ReEnrichMode } from '$lib/types';
 	import TokenRenderer from '$lib/components/reader/TokenRenderer.svelte';
@@ -29,8 +29,6 @@
 	import { toast } from 'svelte-sonner';
 	import BookOpenCheckIcon from '@lucide/svelte/icons/book-open-check';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
-	import PinIcon from '@lucide/svelte/icons/pin';
-	import PinOffIcon from '@lucide/svelte/icons/pin-off';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
 	import AlertCircleIcon from '@lucide/svelte/icons/circle-alert';
@@ -226,20 +224,6 @@
 	// ---------------------------------------------------------------------------
 
 	// ---------------------------------------------------------------------------
-	// Pin toggle
-	// ---------------------------------------------------------------------------
-
-	async function togglePin() {
-		if (!meta) return;
-		const next = !meta.pinned;
-		// Optimistic UI; enqueuePin persists + syncs the change.
-		meta = { ...meta, pinned: next };
-		try {
-			await enqueuePin(meta.id, next);
-		} catch {
-			meta = { ...meta, pinned: !next };
-		}
-	}
 
 	function toggleRead() {
 		if (!articleId) return;
@@ -365,21 +349,6 @@
 {:else if loadState === 'ready' && payload}
 	<!-- Article header -->
 	<div class="relative mb-6 flex flex-col gap-3">
-		<Button
-			variant="ghost"
-			size="icon-sm"
-			onclick={togglePin}
-			aria-label={meta?.pinned ? 'Unpin article' : 'Pin article'}
-			title={meta?.pinned ? 'Unpin' : 'Pin to top'}
-			class="absolute right-0 top-0 {meta?.pinned ? 'text-primary' : 'text-muted-foreground'}"
-		>
-			{#if meta?.pinned}
-				<PinOffIcon class="size-4" />
-			{:else}
-				<PinIcon class="size-4" />
-			{/if}
-		</Button>
-
 		<div class="flex items-start justify-between gap-3">
 			<h1
 				class="text-xl font-semibold leading-snug sm:text-2xl"
