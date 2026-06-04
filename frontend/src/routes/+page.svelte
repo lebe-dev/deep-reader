@@ -81,6 +81,10 @@
 	}
 </script>
 
+<svelte:head>
+	<title>Deep Reader</title>
+</svelte:head>
+
 <div class="space-y-4">
 	<!-- Header row: title + actions -->
 	<div class="flex flex-wrap items-center justify-between gap-3">

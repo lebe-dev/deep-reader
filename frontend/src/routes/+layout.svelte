@@ -73,7 +73,6 @@
 </script>
 
 <svelte:head>
-	<title>Deep Reader</title>
 	<link rel="icon" href={favicon} />
 </svelte:head>
 

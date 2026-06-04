@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import * as Popover from '$lib/components/ui/popover';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+	import * as Dialog from '$lib/components/ui/dialog';
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
@@ -13,6 +14,7 @@
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import PinIcon from '@lucide/svelte/icons/pin';
+	import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
 
 	interface Props {
@@ -27,6 +29,7 @@
 
 	let deleteOpen = $state(false);
 	let rawOpen = $state(false);
+	let summaryOpen = $state(false);
 
 	const isFailed = $derived(
 		article.status === 'fetch_failed' ||
@@ -114,20 +117,6 @@
 </script>
 
 <div class="border-border bg-card group relative rounded-xl border px-4 py-3">
-	<Button
-		size="icon-sm"
-		variant="ghost"
-		onclick={handleTogglePin}
-		aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
-		title={article.pinned ? 'Unpin' : 'Pin to top'}
-		class="absolute right-2 top-2 transition-opacity
-			{article.pinned
-			? 'text-primary opacity-100'
-			: 'text-muted-foreground opacity-0 group-hover:opacity-100'}"
-	>
-		<PinIcon class="size-3.5" fill={article.pinned ? 'currentColor' : 'none'} />
-	</Button>
-
 	<div class="flex items-start justify-between gap-3">
 		<div class="min-w-0 flex-1">
 			{#if article.status === 'enriched'}
@@ -154,6 +143,51 @@
 			{#if article.status !== 'enriched'}
 				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
 			{/if}
+			<Button
+				size="icon-sm"
+				variant="ghost"
+				onclick={handleTogglePin}
+				aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
+				title={article.pinned ? 'Unpin' : 'Pin to top'}
+				class="transition-opacity
+					{article.pinned
+					? 'text-primary opacity-100'
+					: 'text-muted-foreground opacity-0 group-hover:opacity-100'}"
+			>
+				<PinIcon class="size-3.5" fill={article.pinned ? 'currentColor' : 'none'} />
+			</Button>
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							size="icon-sm"
+							variant="ghost"
+							onclick={(e: MouseEvent) => e.stopPropagation()}
+							class="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+							aria-label="Article actions"
+						>
+							<EllipsisVerticalIcon class="size-4" />
+						</Button>
+					{/snippet}
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end">
+					{#if article.summary}
+						<DropdownMenu.Item onclick={() => (summaryOpen = true)} class="gap-2">
+							<AlignLeftIcon class="size-4" />
+							Summary
+						</DropdownMenu.Item>
+						<DropdownMenu.Separator />
+					{/if}
+					<DropdownMenu.Item
+						onclick={() => (deleteOpen = true)}
+						class="text-destructive focus:text-destructive gap-2"
+					>
+						<TrashIcon class="size-4" />
+						Delete
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
 		</div>
 	</div>
 
@@ -183,53 +217,31 @@
 		{/if}
 		<span class="shrink-0">{formatDate(article.created_at)}</span>
 
-		<div class="ml-auto flex items-center gap-1">
-			{#if article.summary}
-				<Popover.Root>
-					<Popover.Trigger
-						onclick={(e: MouseEvent) => e.stopPropagation()}
-						class="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex h-6 items-center gap-1 rounded-md px-2 text-xs transition-colors"
-						title="Show article summary"
+		{#if canViewRaw || isFailed}
+			<div class="ml-auto flex items-center gap-1">
+				{#if canViewRaw}
+					<Button
+						size="sm"
+						variant="ghost"
+						onclick={(e: MouseEvent) => {
+							e.stopPropagation();
+							rawOpen = true;
+						}}
+						class="h-6 text-xs"
+						title="View the raw LLM response"
 					>
-						<AlignLeftIcon class="size-3" />
-						Summary
-					</Popover.Trigger>
-					<Popover.Content class="w-80 text-sm leading-relaxed">
-						{article.summary}
-					</Popover.Content>
-				</Popover.Root>
-			{/if}
-			{#if canViewRaw}
-				<Button
-					size="sm"
-					variant="ghost"
-					onclick={(e: MouseEvent) => {
-						e.stopPropagation();
-						rawOpen = true;
-					}}
-					class="h-6 text-xs"
-					title="View the raw LLM response"
-				>
-					<FileTextIcon class="size-3" />
-					Raw
-				</Button>
-			{/if}
-			{#if isFailed}
-				<Button size="sm" variant="secondary" onclick={handleRetry} class="h-6 text-xs">
-					<RefreshCwIcon class="size-3" />
-					Retry
-				</Button>
-			{/if}
-			<Button
-				size="icon-sm"
-				variant="ghost"
-				onclick={() => (deleteOpen = true)}
-				aria-label="Delete article"
-				class="text-muted-foreground hover:text-destructive"
-			>
-				<TrashIcon class="size-4" />
-			</Button>
-		</div>
+						<FileTextIcon class="size-3" />
+						Raw
+					</Button>
+				{/if}
+				{#if isFailed}
+					<Button size="sm" variant="secondary" onclick={handleRetry} class="h-6 text-xs">
+						<RefreshCwIcon class="size-3" />
+						Retry
+					</Button>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	{#if showProgress}
@@ -251,4 +263,15 @@
 
 {#if canViewRaw}
 	<RawResponseDialog bind:open={rawOpen} articleId={article.id} />
+{/if}
+
+{#if article.summary}
+	<Dialog.Root bind:open={summaryOpen}>
+		<Dialog.Content class="max-w-sm">
+			<Dialog.Header>
+				<Dialog.Title>Summary</Dialog.Title>
+			</Dialog.Header>
+			<p class="text-muted-foreground text-sm leading-relaxed">{article.summary}</p>
+		</Dialog.Content>
+	</Dialog.Root>
 {/if}
