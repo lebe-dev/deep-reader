@@ -68,17 +68,25 @@ type conn struct {
 	model   string
 }
 
-// resolveConn returns the active provider's connection together with a flag
-// reporting whether it came from a profile (vs. the cfg-derived fallback used
-// when no resolver is set or no profile is configured). The flag decides model
-// precedence in effectiveModel: a profile's model is authoritative, whereas the
-// env fallback keeps the legacy "settings.llm_model overrides the deploy
-// default" behaviour.
+// resolveConn returns the connection for a single call together with a flag
+// reporting whether it came from an active provider profile.
+//
+// When a resolver is wired (the production path, see cmd/server wiring) the
+// active UI profile is the SOLE source of the connection — base URL, API key
+// and model. We deliberately do NOT fall back to the env-derived cfg values
+// here: the LLM_* env vars are only a first-boot seed for the provider table
+// (store.seedLLMProvider), never a request-time source. So if the user has no
+// usable active profile (e.g. they deleted the last one) the returned conn is
+// empty and the call fails clearly, rather than silently resurrecting stale
+// env config. The cfg-derived fallback below applies only when no resolver is
+// set at all (library/test construction).
 func (c *Client) resolveConn(ctx context.Context) (conn, bool) {
 	if c.resolver != nil {
-		if p, err := c.resolver.GetActiveLLMProvider(ctx); err == nil && p.BaseURL != "" {
-			return conn{baseURL: strings.TrimRight(p.BaseURL, "/"), apiKey: p.APIKey, model: p.Model}, true
+		p, err := c.resolver.GetActiveLLMProvider(ctx)
+		if err != nil || p.BaseURL == "" {
+			return conn{}, false
 		}
+		return conn{baseURL: strings.TrimRight(p.BaseURL, "/"), apiKey: p.APIKey, model: p.Model}, true
 	}
 	return conn{baseURL: c.baseURL, apiKey: c.apiKey, model: c.model}, false
 }

@@ -438,6 +438,40 @@ func (f fakeResolver) GetActiveLLMProvider(context.Context) (model.LLMProvider, 
 	return f.provider, nil
 }
 
+// noProviderResolver is a ports.LLMProviderResolver with no active profile,
+// modelling a deployment where every UI profile has been deleted.
+type noProviderResolver struct{}
+
+func (noProviderResolver) GetActiveLLMProvider(context.Context) (model.LLMProvider, error) {
+	return model.LLMProvider{}, ports.ErrNotFound
+}
+
+// TestEnrich_NoEnvFallbackWhenResolverPresent asserts that once a resolver is
+// wired (the production path), the env-derived cfg connection is never used at
+// request time: with no active profile the call must fail without ever sending
+// the configured env model/key to the cfg base URL. This guards the rule that
+// the backend reads the model and token only from the UI, never from env.
+func TestEnrich_NoEnvFallbackWhenResolverPresent(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buildCannedResponse(t))
+	}))
+	defer srv.Close()
+
+	// testConfig wires the env-derived base URL/key/model to the fake server.
+	// With a resolver present but no active profile, none of it must be used.
+	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(noProviderResolver{}))
+	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1); err == nil {
+		t.Fatal("expected an error when no active profile is configured, got nil")
+	}
+	if hits != 0 {
+		t.Errorf("env-configured server was hit %d time(s); the cfg/env connection must not be used when a resolver is wired", hits)
+	}
+}
+
 // captureModelWithProvider runs Enrich against a fake server while an active
 // provider profile (with the given model) is resolved, returning the model name
 // the client put in the request body. The resolved profile's base URL is wired
