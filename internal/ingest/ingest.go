@@ -25,6 +25,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"deep-reader/internal/config"
+	"deep-reader/internal/markdown"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/tokenize"
@@ -193,6 +194,7 @@ func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string)
 		Title:             title,
 		Status:            model.StatusFetched,
 		OriginalText:      text,
+		ContentFormat:     markdown.DetectFormat(text),
 		Tokens:            tokenize.Tokenize(text),
 		EnrichmentVersion: ing.cfg.EnrichmentVersion,
 		CreatedAt:         now,

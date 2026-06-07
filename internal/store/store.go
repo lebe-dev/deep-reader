@@ -274,12 +274,12 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 
 	const q = `INSERT INTO articles
                (id, source_url, url_hash, title, author, source_domain, lang,
-                original_text, tokens, status, enrichment_version, error,
+                original_text, content_format, tokens, status, enrichment_version, error,
                 created_at, enriched_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err = s.write.ExecContext(ctx, q,
 		a.ID, a.SourceURL, a.URLHash, a.Title, a.Author, a.SourceDomain, a.Lang,
-		a.OriginalText, string(tokJSON), a.Status, a.EnrichmentVersion, a.Error,
+		a.OriginalText, contentFormatOrDefault(a.ContentFormat), string(tokJSON), a.Status, a.EnrichmentVersion, a.Error,
 		fmtTime(a.CreatedAt), fmtTime(a.EnrichedAt), fmtTime(a.UpdatedAt),
 	)
 	if err != nil {
@@ -296,7 +296,7 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 // [ports.ErrNotFound] if it does not exist.
 func (s *SQLite) GetArticleByHash(ctx context.Context, urlHash string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, tokens, status, enrichment_version, error,
+                      original_text, content_format, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE url_hash = ?`
 	row := s.db.QueryRowContext(ctx, q, urlHash)
@@ -364,7 +364,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 // GetArticle returns the full server-side article record, or [ports.ErrNotFound].
 func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, tokens, status, enrichment_version, error,
+                      original_text, content_format, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, q, id)
@@ -381,7 +381,7 @@ func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, err
 // GetArticlePayload returns the client-facing payload (tokens + enrichment).
 // Enrichment is nil when the article has no enrichment row.
 func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.ArticlePayload, error) {
-	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.tokens,
+	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.content_format, a.tokens,
                       a.summary, a.status, a.enrichment_version, a.enrichment_coverage, a.progress_stage, a.llm_model, e.enrichment
                FROM articles a
                LEFT JOIN enrichments e ON e.article_id = a.id
@@ -391,7 +391,7 @@ func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.Artic
 	var p model.ArticlePayload
 	var tokJSON string
 	var enrichJSON sql.NullString
-	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText,
+	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText, &p.ContentFormat,
 		&tokJSON, &p.Summary, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &p.ProgressStage, &p.LLMModel, &enrichJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
@@ -659,7 +659,7 @@ func (s *SQLite) SaveEnrichmentProgress(ctx context.Context, id string, e model.
 // stuck by a crash mid-stage is re-selected and re-processed.
 func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, tokens, summary, status, enrichment_version, error,
+                      original_text, content_format, tokens, summary, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles
                WHERE status IN ('queued','fetching','fetched','enriching','topup_queued')
@@ -1045,7 +1045,7 @@ func scanArticle(row *sql.Row) (*model.Article, error) {
 	var pinned int
 	if err := row.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
-		&a.OriginalText, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
+		&a.OriginalText, &a.ContentFormat, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
 		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, err // let caller handle sql.ErrNoRows
@@ -1061,13 +1061,23 @@ func scanArticleRow(rows *sql.Rows) (*model.Article, error) {
 	var pinned int
 	if err := rows.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
-		&a.OriginalText, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
+		&a.OriginalText, &a.ContentFormat, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
 		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, fmt.Errorf("store: scanArticleRow: %w", err)
 	}
 	a.Pinned = pinned == 1
 	return finishArticle(&a, tokJSON, createdAtStr, enrichedAtStr, updatedAtStr)
+}
+
+// contentFormatOrDefault normalises an Article.ContentFormat for persistence:
+// an empty value is stored as model.ContentFormatPlain so the column always
+// holds an explicit format (matching the schema default).
+func contentFormatOrDefault(format string) string {
+	if format == "" {
+		return model.ContentFormatPlain
+	}
+	return format
 }
 
 // finishArticle parses JSON and timestamps into the Article struct.

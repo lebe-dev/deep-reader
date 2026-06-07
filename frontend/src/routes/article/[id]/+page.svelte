@@ -664,6 +664,7 @@
 			tokens={payload.tokens}
 			originalText={payload.original_text}
 			enrichment={payload.enrichment}
+			format={payload.content_format}
 			initialPosition={progress?.position ?? 0}
 			onProgress={handleProgress}
 			onWordClick={handleWordClick}

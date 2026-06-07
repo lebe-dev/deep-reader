@@ -22,7 +22,9 @@ export function readingProgressPercent(position: number, tokenCount: number): nu
 }
 
 function isProcessing(status: ArticleMeta['status']): boolean {
-	return status === 'queued' || status === 'fetching' || status === 'fetched' || status === 'enriching';
+	return (
+		status === 'queued' || status === 'fetching' || status === 'fetched' || status === 'enriching'
+	);
 }
 
 /**

@@ -26,6 +26,7 @@
 		type PopoverContent,
 		type SentenceMenuContent
 	} from './reader-utils';
+	import { buildMarkdownBlocks, type InlineMark, type InlineSegment } from './markdown-blocks';
 	import ImageLightbox from './ImageLightbox.svelte';
 	import { cn } from '$lib/utils';
 
@@ -33,6 +34,10 @@
 		tokens: Token[];
 		originalText: string;
 		enrichment: Enrichment;
+		/** Article content format. 'markdown' renders Markdown structure (headings,
+		 *  lists, blockquotes, emphasis, code, tables) while keeping words
+		 *  interactive; anything else renders the token stream as prose. */
+		format?: string;
 		/** Furthest-read token index (for restore-position scroll). */
 		initialPosition?: number;
 		/** Called with the furthest-seen token index as the user scrolls (debounce externally). */
@@ -47,6 +52,7 @@
 		tokens,
 		originalText,
 		enrichment,
+		format,
 		initialPosition = 0,
 		onProgress,
 		onWordClick,
@@ -93,6 +99,28 @@
 	// image/link spans surviving in originalText. See buildRenderSegments.
 
 	const segments = $derived(buildRenderSegments(tokens, originalText));
+
+	// Markdown rendering: when the article is Markdown, parse it into structural
+	// blocks (headings, lists, blockquotes, code, tables) whose inline runs keep
+	// the same interactive word tokens. Plain articles use the flat `segments`.
+	const isMarkdown = $derived(format === 'markdown');
+	const blocks = $derived(isMarkdown ? buildMarkdownBlocks(tokens, originalText) : []);
+
+	/** Map inline emphasis marks to the CSS classes that render them. */
+	function marksClass(marks: InlineMark[]): string {
+		if (marks.length === 0) return '';
+		let c = '';
+		if (marks.includes('strong')) c += ' font-semibold';
+		if (marks.includes('em')) c += ' italic';
+		if (marks.includes('strike')) c += ' line-through';
+		if (marks.includes('code')) c += ' reader-inline-code';
+		return c;
+	}
+
+	/** Open the lightbox for a markdown/inline image. */
+	function openLightbox(seg: Extract<InlineSegment, { kind: 'image' }>) {
+		lightboxImage = { url: seg.url, alt: seg.alt };
+	}
 
 	// ---------------------------------------------------------------------------
 	// Highlight state
@@ -312,40 +340,124 @@
 	}
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="reader-content" role="document">
-	{#each segments as segment, i (i)}
-		{#if segment.kind === 'word'}
+<!-- Interactive word token — shared by the plain and Markdown render paths. -->
+{#snippet wordSpan(index: number, text: string, extra: string)}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<span
+		use:track={index}
+		data-index={index}
+		class="{tokenClass(index)}{extra}"
+		onclick={(e) => handleWordClick(e, index)}
+		oncontextmenu={(e) => handleContextMenu(e, index)}
+		ontouchstart={(e) => handleTouchStart(e, index)}
+		ontouchend={(e) => handleTouchEnd(e, index)}
+		ontouchmove={handleTouchMove}>{text}</span
+	>
+{/snippet}
+
+<!-- A run of Markdown inline segments (words keep their token interactivity). -->
+{#snippet inline(segs: InlineSegment[])}
+	{#each segs as seg, i (i)}
+		{#if seg.kind === 'word'}
+			{@render wordSpan(seg.index, seg.text, marksClass(seg.marks))}
+		{:else if seg.kind === 'image'}
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<span
-				use:track={segment.index}
-				data-index={segment.index}
-				class={tokenClass(segment.index)}
-				onclick={(e) => handleWordClick(e, segment.index)}
-				oncontextmenu={(e) => handleContextMenu(e, segment.index)}
-				ontouchstart={(e) => handleTouchStart(e, segment.index)}
-				ontouchend={(e) => handleTouchEnd(e, segment.index)}
-				ontouchmove={handleTouchMove}>{segment.text}</span
-			>
-		{:else if segment.kind === 'image'}
-			<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 			<img
 				class="reader-image"
-				src={segment.url}
-				alt={segment.alt}
+				src={seg.url}
+				alt={seg.alt}
 				loading="lazy"
-				onclick={() => (lightboxImage = { url: segment.url, alt: segment.alt })}
+				onclick={() => openLightbox(seg)}
 			/>
-		{:else if segment.kind === 'link'}
-			<a class="reader-link" href={segment.url} target="_blank" rel="noopener noreferrer"
-				>{segment.text}</a
+		{:else if seg.kind === 'link'}
+			<a
+				class="reader-link{marksClass(seg.marks)}"
+				href={seg.url}
+				target="_blank"
+				rel="noopener noreferrer">{seg.text}</a
 			>
+		{:else if seg.marks.length > 0}
+			<span class={marksClass(seg.marks).trim()}>{seg.text}</span>
 		{:else}
-			{segment.text}
+			{seg.text}
 		{/if}
 	{/each}
-</div>
+{/snippet}
+
+{#if isMarkdown}
+	<div class="reader-content reader-markdown" role="document">
+		{#each blocks as block, bi (bi)}
+			{#if block.kind === 'heading'}
+				<svelte:element this={`h${block.level}`} class="reader-heading"
+					>{@render inline(block.inline)}</svelte:element
+				>
+			{:else if block.kind === 'paragraph'}
+				<p>{@render inline(block.inline)}</p>
+			{:else if block.kind === 'blockquote'}
+				<blockquote class="reader-blockquote">{@render inline(block.inline)}</blockquote>
+			{:else if block.kind === 'list'}
+				{#if block.ordered}
+					<ol class="reader-list reader-list-ordered">
+						{#each block.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
+					</ol>
+				{:else}
+					<ul class="reader-list reader-list-unordered">
+						{#each block.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
+					</ul>
+				{/if}
+			{:else if block.kind === 'code'}
+				<pre class="reader-pre"><code>{block.text}</code></pre>
+			{:else if block.kind === 'table'}
+				<div class="reader-table-wrap">
+					<table class="reader-table">
+						<thead>
+							<tr
+								>{#each block.header as cell, ci (ci)}<th>{@render inline(cell)}</th>{/each}</tr
+							>
+						</thead>
+						<tbody>
+							{#each block.rows as row, ri (ri)}
+								<tr
+									>{#each row as cell, ci (ci)}<td>{@render inline(cell)}</td>{/each}</tr
+								>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{:else if block.kind === 'hr'}
+				<hr class="reader-hr" />
+			{/if}
+		{/each}
+	</div>
+{:else}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="reader-content" role="document">
+		{#each segments as segment, i (i)}
+			{#if segment.kind === 'word'}
+				{@render wordSpan(segment.index, segment.text, '')}
+			{:else if segment.kind === 'image'}
+				<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+				<img
+					class="reader-image"
+					src={segment.url}
+					alt={segment.alt}
+					loading="lazy"
+					onclick={() => (lightboxImage = { url: segment.url, alt: segment.alt })}
+				/>
+			{:else if segment.kind === 'link'}
+				<a class="reader-link" href={segment.url} target="_blank" rel="noopener noreferrer"
+					>{segment.text}</a
+				>
+			{:else}
+				{segment.text}
+			{/if}
+		{/each}
+	</div>
+{/if}
 
 <ImageLightbox image={lightboxImage} onclose={() => (lightboxImage = null)} />
 
@@ -386,5 +498,115 @@
 		text-decoration-thickness: 1px;
 		text-underline-offset: 2px;
 		cursor: pointer;
+	}
+
+	/* ── Markdown render mode ──────────────────────────────────────────────
+	   When the article is Markdown the document is laid out as real block
+	   elements, so the pre-wrap whitespace handling of the plain token stream is
+	   replaced by normal block flow. Word tokens inside keep their interactivity
+	   and styling (the .token rules above still apply). */
+	.reader-markdown {
+		white-space: normal;
+	}
+
+	.reader-heading {
+		font-weight: 650;
+		line-height: 1.3;
+		margin: 1.6em 0 0.6em;
+	}
+	.reader-heading:first-child {
+		margin-top: 0;
+	}
+	:global(h1.reader-heading) {
+		font-size: 1.6em;
+	}
+	:global(h2.reader-heading) {
+		font-size: 1.35em;
+	}
+	:global(h3.reader-heading) {
+		font-size: 1.18em;
+	}
+	:global(h4.reader-heading),
+	:global(h5.reader-heading),
+	:global(h6.reader-heading) {
+		font-size: 1.05em;
+	}
+
+	.reader-markdown p {
+		margin: 0 0 1em;
+	}
+
+	.reader-list {
+		margin: 0 0 1em;
+		padding-left: 1.6em;
+	}
+	.reader-list-unordered {
+		list-style: disc;
+	}
+	.reader-list-ordered {
+		list-style: decimal;
+	}
+	.reader-list li {
+		margin: 0.2em 0;
+	}
+
+	.reader-blockquote {
+		margin: 0 0 1em;
+		padding: 0.2em 0 0.2em 1em;
+		border-left: 3px solid var(--color-border, #d4d4d8);
+		color: var(--color-muted-foreground, #6b7280);
+		font-style: italic;
+	}
+
+	.reader-pre {
+		margin: 0 0 1em;
+		padding: 0.9em 1em;
+		overflow-x: auto;
+		border-radius: 0.5rem;
+		background: var(--color-muted, #f4f4f5);
+		font-size: 0.9em;
+		line-height: 1.5;
+		white-space: pre;
+	}
+	.reader-pre code {
+		font-family:
+			ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+	}
+
+	/* Inline emphasis marks applied to interactive word tokens. */
+	:global(.reader-inline-code) {
+		font-family:
+			ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+		font-size: 0.9em;
+		padding: 0.1em 0.3em;
+		border-radius: 0.25rem;
+		background: var(--color-muted, #f4f4f5);
+	}
+
+	.reader-table-wrap {
+		margin: 0 0 1em;
+		overflow-x: auto;
+	}
+	.reader-table {
+		border-collapse: collapse;
+		width: 100%;
+		font-size: 0.95em;
+	}
+	.reader-table th,
+	.reader-table td {
+		border: 1px solid var(--color-border, #d4d4d8);
+		padding: 0.4em 0.7em;
+		text-align: left;
+		vertical-align: top;
+	}
+	.reader-table th {
+		font-weight: 650;
+		background: var(--color-muted, #f4f4f5);
+	}
+
+	.reader-hr {
+		margin: 1.6em 0;
+		border: 0;
+		border-top: 1px solid var(--color-border, #d4d4d8);
 	}
 </style>

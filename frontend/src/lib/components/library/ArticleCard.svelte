@@ -151,8 +151,14 @@
 	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
 </script>
 
-<div class="bg-card group relative rounded-xl px-4 py-3 {isProcessing ? 'card-processing' : 'border-border border'}">
-	<div class="flex items-start justify-between gap-3">
+<div
+	class="bg-card group relative rounded-xl px-4 pt-2 pb-3 {isProcessing
+		? 'card-processing'
+		: article.pinned
+			? 'border-primary/40 border'
+			: 'border-border border'}"
+>
+	<div class="flex items-center justify-between gap-3">
 		<div class="min-w-0 flex-1">
 			{#if article.status === 'enriched'}
 				<a
@@ -197,7 +203,7 @@
 						</Button>
 					{/snippet}
 				</DropdownMenu.Trigger>
-				<DropdownMenu.Content align="end">
+				<DropdownMenu.Content align="end" class="min-w-44">
 					<DropdownMenu.Item onclick={handleTogglePin} class="gap-2">
 						<PinIcon class="size-4" fill={article.pinned ? 'currentColor' : 'none'} />
 						{article.pinned ? 'Unpin' : 'Pin to top'}
@@ -340,15 +346,15 @@
 
 <style>
 	.card-processing {
-		border: 1px solid transparent;
+		border: 2px solid transparent;
 		background:
 			linear-gradient(var(--card), var(--card)) padding-box,
 			linear-gradient(
 					90deg,
-					oklch(0.55 0.18 242) 0%,
-					oklch(0.65 0.2 280) 40%,
-					oklch(0.6 0.18 220) 60%,
-					oklch(0.55 0.18 242) 100%
+					oklch(0.5 0.1 242) 0%,
+					oklch(0.58 0.13 280) 40%,
+					oklch(0.54 0.11 220) 60%,
+					oklch(0.5 0.1 242) 100%
 				)
 				border-box;
 		background-size:

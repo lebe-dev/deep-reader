@@ -84,7 +84,7 @@ export type RenderSegment =
 	| { kind: 'link'; text: string; url: string };
 
 /** A markdown image/link occurrence located in the source text (string indices). */
-interface MarkdownSpan {
+export interface MarkdownSpan {
 	start: number;
 	end: number;
 	kind: 'image' | 'link';
@@ -97,7 +97,7 @@ interface MarkdownSpan {
 const MARKDOWN_SPAN_RE = /(!?)\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+[^)]*)?\)/g;
 
 /** Only http(s) URLs are rendered, to avoid javascript:/data: injection. */
-function isHttpUrl(url: string): boolean {
+export function isHttpUrl(url: string): boolean {
 	return /^https?:\/\//i.test(url);
 }
 
@@ -116,7 +116,7 @@ function utf8Len(cp: number): number {
  * The returned array has length byteCount + 1 (the final entry maps the
  * exclusive end offset to text.length).
  */
-function buildByteToStrMap(text: string): number[] {
+export function buildByteToStrMap(text: string): number[] {
 	const map: number[] = [];
 	let byte = 0;
 	for (let s = 0; s < text.length; ) {
@@ -132,7 +132,7 @@ function buildByteToStrMap(text: string): number[] {
 }
 
 /** Locate markdown image/link spans (with safe http(s) URLs) in source order. */
-function findMarkdownSpans(text: string): MarkdownSpan[] {
+export function findMarkdownSpans(text: string): MarkdownSpan[] {
 	const spans: MarkdownSpan[] = [];
 	for (const m of text.matchAll(MARKDOWN_SPAN_RE)) {
 		const url = m[3];

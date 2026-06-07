@@ -279,6 +279,10 @@ func TestAddText_New(t *testing.T) {
 	if art.Title != "First line is the title" {
 		t.Errorf("derived title: got %q", art.Title)
 	}
+	// Plain prose is classified as plain (not Markdown).
+	if art.ContentFormat != model.ContentFormatPlain {
+		t.Errorf("content format: got %q, want %q", art.ContentFormat, model.ContentFormatPlain)
+	}
 
 	// Persisted and retrievable under its content hash.
 	stored, err := st.GetArticleByHash(context.Background(), art.URLHash)
@@ -287,6 +291,24 @@ func TestAddText_New(t *testing.T) {
 	}
 	if stored.ID != art.ID {
 		t.Errorf("stored id mismatch: got %q, want %q", stored.ID, art.ID)
+	}
+}
+
+func TestAddText_MarkdownFormat(t *testing.T) {
+	st := newFakeStore()
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{})
+
+	const body = "# Title\n\nIntro paragraph.\n\n- one\n- two\n- three"
+	art, err := ing.AddText(context.Background(), "Title", "", body)
+	if err != nil {
+		t.Fatalf("AddText: unexpected error: %v", err)
+	}
+	if art.ContentFormat != model.ContentFormatMarkdown {
+		t.Errorf("content format: got %q, want %q", art.ContentFormat, model.ContentFormatMarkdown)
+	}
+	// The Markdown is stored verbatim so the reader can render its structure.
+	if art.OriginalText != body {
+		t.Errorf("markdown not persisted verbatim: got %q", art.OriginalText)
 	}
 }
 

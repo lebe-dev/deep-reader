@@ -178,6 +178,13 @@ export interface ArticleMeta {
 export interface ArticlePayload {
 	id: string;
 	original_text: string;
+	/**
+	 * Structural format of `original_text`. `'markdown'` → the reader renders
+	 * Markdown structure (headings, lists, blockquotes, emphasis, code, tables)
+	 * while keeping words interactive; `'plain'` (the default, also when absent) →
+	 * the token stream is rendered as prose.
+	 */
+	content_format?: 'plain' | 'markdown';
 	tokens: Token[];
 	/** Short LLM-produced abstract shown in the reader. Empty until summarized. */
 	summary?: string;

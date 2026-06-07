@@ -199,6 +199,17 @@ func ParseBotWallSignatures(text string) []string {
 	return out
 }
 
+// Content format values for Article.ContentFormat / ArticlePayload.ContentFormat.
+// They tell the reader how to render OriginalText.
+const (
+	// ContentFormatPlain renders the token stream as prose (the default). An
+	// empty ContentFormat is treated as plain.
+	ContentFormatPlain = "plain"
+	// ContentFormatMarkdown renders Markdown structure (headings, lists,
+	// blockquotes, emphasis, code, tables) while keeping words interactive.
+	ContentFormatMarkdown = "markdown"
+)
+
 // Token is a single deterministic token produced by the tokenizer. Start and
 // End are byte offsets into Article.OriginalText such that
 // OriginalText[Start:End] == Text. Index is the token's position in the token
@@ -224,6 +235,11 @@ type Article struct {
 	Lang         string  `json:"lang"`
 	OriginalText string  `json:"original_text"`
 	Tokens       []Token `json:"tokens"`
+	// ContentFormat is the structural format of OriginalText: ContentFormatPlain
+	// (render the token stream as prose) or ContentFormatMarkdown (render Markdown
+	// structure in the reader). URL articles are always plain (the extractor strips
+	// Markdown); pasted text is classified at ingest. Empty is treated as plain.
+	ContentFormat string `json:"content_format,omitempty"`
 	// Summary is a short LLM-produced abstract of the article, generated as the
 	// first step of the step-wise enrichment. Empty until summarized.
 	Summary           string `json:"summary,omitempty"`
@@ -535,6 +551,9 @@ type ArticlePayload struct {
 	Lang         string  `json:"lang"`
 	OriginalText string  `json:"original_text"`
 	Tokens       []Token `json:"tokens"`
+	// ContentFormat mirrors Article.ContentFormat so the reader knows whether to
+	// render OriginalText as Markdown. Empty is treated as plain.
+	ContentFormat string `json:"content_format,omitempty"`
 	// Summary is the article abstract produced by the first enrichment step,
 	// shown in the reader. Empty until summarized.
 	Summary           string      `json:"summary,omitempty"`
