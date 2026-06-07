@@ -139,11 +139,13 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 // It tokenizes the text, persists the article already in status=fetched (with
 // its content saved to the database), and notifies the worker, which runs the
 // enrich stage asynchronously. title is optional; when empty a heading is
-// derived from the first line of text.
+// derived from the first line of text. sourceURL is optional metadata — a link
+// back to the original article; when set it is normalized and its host recorded
+// as the source domain (the text is still used verbatim, never fetched).
 //
 // Dedup is by a SHA-256 of the text (prefixed so it cannot collide with a URL
 // hash). A matching article at the current enrichment version is returned as-is.
-func (ing *Ingestor) AddText(ctx context.Context, title, text string) (*model.Article, error) {
+func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string) (*model.Article, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, fmt.Errorf("ingest: empty text")
@@ -151,6 +153,20 @@ func (ing *Ingestor) AddText(ctx context.Context, title, text string) (*model.Ar
 	title = strings.TrimSpace(title)
 	if title == "" {
 		title = deriveTitle(text)
+	}
+
+	// The source URL is optional metadata; normalize it only when provided so an
+	// invalid link is surfaced rather than silently stored.
+	var sourceDomain string
+	if strings.TrimSpace(sourceURL) != "" {
+		normalized, err := NormalizeURL(sourceURL)
+		if err != nil {
+			return nil, fmt.Errorf("ingest: invalid source URL: %w", err)
+		}
+		sourceURL = normalized
+		sourceDomain = hostOf(normalized)
+	} else {
+		sourceURL = ""
 	}
 
 	hash := URLHash("text:" + text)
@@ -172,6 +188,8 @@ func (ing *Ingestor) AddText(ctx context.Context, title, text string) (*model.Ar
 	article := &model.Article{
 		ID:                ulid.Make().String(),
 		URLHash:           hash,
+		SourceURL:         sourceURL,
+		SourceDomain:      sourceDomain,
 		Title:             title,
 		Status:            model.StatusFetched,
 		OriginalText:      text,

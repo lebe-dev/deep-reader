@@ -205,15 +205,20 @@ export function addArticle(url: string, signal?: AbortSignal): Promise<AddArticl
 	return request<AddArticleResponse>('/api/articles', { method: 'POST', body: { url }, signal });
 }
 
-/** `POST /api/articles` — add an article from pasted raw text (title optional). */
+/**
+ * `POST /api/articles` — add an article from pasted raw text. Both the title
+ * and the source URL (a link back to the original article, stored as metadata)
+ * are optional.
+ */
 export function addArticleText(
 	text: string,
 	title?: string,
+	sourceUrl?: string,
 	signal?: AbortSignal
 ): Promise<AddArticleResponse> {
 	return request<AddArticleResponse>('/api/articles', {
 		method: 'POST',
-		body: { text, title: title ?? '' },
+		body: { text, title: title ?? '', url: sourceUrl ?? '' },
 		signal
 	});
 }

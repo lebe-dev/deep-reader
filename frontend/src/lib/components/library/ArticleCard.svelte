@@ -6,7 +6,6 @@
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
-	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { enqueueRetry, enqueuePin } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
@@ -16,6 +15,7 @@
 	import PinIcon from '@lucide/svelte/icons/pin';
 	import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
+	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 
 	interface Props {
 		article: ArticleMeta;
@@ -66,6 +66,19 @@
 				return 'Blocked';
 		}
 	});
+
+	// In-flight pipeline states (everything between ingestion and the terminal
+	// enriched/failed states). For these the card shows live processing info.
+	const isProcessing = $derived(
+		article.status === 'queued' ||
+			article.status === 'fetching' ||
+			article.status === 'fetched' ||
+			article.status === 'enriching'
+	);
+
+	// Prefer the worker's fine-grained stage label ("Translating (3/5)") over the
+	// generic status label ("Processing…") when one is set.
+	const processingLabel = $derived(article.progress_stage?.trim() || statusLabel);
 
 	const failedMessage = $derived.by(() => {
 		switch (article.status) {
@@ -137,11 +150,13 @@
 			{/if}
 		</div>
 		<div class="flex shrink-0 items-center gap-1">
-			{#if article.status === 'enriched' && article.enrichment_coverage < 1}
-				<CoverageBadge coverage={article.enrichment_coverage} />
-			{/if}
 			{#if article.status !== 'enriched'}
-				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
+				<Badge variant={statusVariant} class="gap-1 rounded-md">
+					{#if isProcessing}
+						<LoaderCircleIcon class="size-3 animate-spin" />
+					{/if}
+					{processingLabel}
+				</Badge>
 			{/if}
 			<!-- Actions menu: always visible (touch devices have no hover, so a
 			     hover-revealed trigger would be unreachable). -->

@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -32,6 +33,9 @@ type fakeStore struct {
 	failedCalls map[string]int
 	// rawResponses records the raw LLM response captured per article via SetFailed.
 	rawResponses map[string]string
+	// stages records the ordered sequence of progress-stage labels set per
+	// article via SetProgressStage, so tests can assert the worker reported them.
+	stages map[string][]string
 }
 
 func newFakeStore(articles ...*model.Article) *fakeStore {
@@ -40,6 +44,7 @@ func newFakeStore(articles ...*model.Article) *fakeStore {
 		enrichments:  make(map[string]model.Enrichment),
 		failedCalls:  make(map[string]int),
 		rawResponses: make(map[string]string),
+		stages:       make(map[string][]string),
 		settings: model.Settings{
 			CEFRLevel:                model.CEFRA2,
 			TargetLanguage:           model.DefaultTargetLanguage,
@@ -158,6 +163,16 @@ func (f *fakeStore) SetStatus(_ context.Context, id, status, errMsg string) erro
 	return nil
 }
 
+func (f *fakeStore) SetProgressStage(_ context.Context, id, stage string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.articles[id]; !ok {
+		return ports.ErrNotFound
+	}
+	f.stages[id] = append(f.stages[id], stage)
+	return nil
+}
+
 func (f *fakeStore) SetFailed(_ context.Context, id, status, errMsg, raw string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -201,7 +216,7 @@ func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpd
 	return nil
 }
 
-func (f *fakeStore) SaveEnrichment(_ context.Context, id string, e model.Enrichment, enrichedAt time.Time) error {
+func (f *fakeStore) SaveEnrichment(_ context.Context, id string, e model.Enrichment, enrichedAt time.Time, llmModel string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	a, ok := f.articles[id]
@@ -210,6 +225,10 @@ func (f *fakeStore) SaveEnrichment(_ context.Context, id string, e model.Enrichm
 	}
 	a.Status = model.StatusEnriched
 	a.EnrichedAt = enrichedAt
+	// Mirror the store: keep the prior model when an empty model is passed.
+	if llmModel != "" {
+		a.LLMModel = llmModel
+	}
 	f.enrichments[id] = e
 	return nil
 }
@@ -368,6 +387,14 @@ func (f *fakeStore) rawResponse(id string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.rawResponses[id]
+}
+
+// stageList returns a copy of the ordered progress-stage labels recorded for id
+// via SetProgressStage.
+func (f *fakeStore) stageList(id string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.stages[id]...)
 }
 
 // originalText returns the stored original text for id.
@@ -706,6 +733,55 @@ func TestSuccess(t *testing.T) {
 	}
 	if len(e.Sentences) != 1 {
 		t.Errorf("expected 1 sentence, got %d", len(e.Sentences))
+	}
+}
+
+// TestProgressStagesReported verifies the worker reports the translation
+// progress stages as it enriches an article: a "Summarizing" step followed by
+// "Translating (n/total)" labels that advance to a final done==total.
+func TestProgressStagesReported(t *testing.T) {
+	article := makeArticle("article-stages", 5)
+	st := newFakeStore(article)
+	llm := &fakeLLM{result: goodEnrichment(5)}
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-stages") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-stages"))
+	}
+
+	stages := st.stageList("article-stages")
+	if len(stages) == 0 {
+		t.Fatal("expected progress stages to be reported, got none")
+	}
+
+	var sawSummarizing, sawTranslating bool
+	for _, s := range stages {
+		if s == "Summarizing" {
+			sawSummarizing = true
+		}
+		if strings.HasPrefix(s, "Translating (") {
+			sawTranslating = true
+		}
+	}
+	if !sawSummarizing {
+		t.Errorf("expected a Summarizing stage, got %v", stages)
+	}
+	if !sawTranslating {
+		t.Errorf("expected at least one Translating stage, got %v", stages)
+	}
+
+	// The final translation label must show every chunk done (done == total),
+	// signalling completion rather than stopping partway.
+	last := stages[len(stages)-1]
+	var done, total int
+	if _, err := fmt.Sscanf(last, "Translating (%d/%d)", &done, &total); err != nil {
+		t.Fatalf("final stage %q is not a Translating label: %v", last, err)
+	}
+	if total == 0 || done != total {
+		t.Errorf("final translation stage %q: want done==total>0", last)
 	}
 }
 

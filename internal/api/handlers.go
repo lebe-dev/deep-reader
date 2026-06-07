@@ -163,7 +163,7 @@ func (s *Server) addArticle(c fiber.Ctx) error {
 	)
 	switch {
 	case strings.TrimSpace(req.Text) != "":
-		article, err = s.ingest.AddText(c.Context(), req.Title, req.Text)
+		article, err = s.ingest.AddText(c.Context(), req.Title, req.URL, req.Text)
 	case req.URL != "":
 		article, err = s.ingest.Add(c.Context(), req.URL)
 	default:

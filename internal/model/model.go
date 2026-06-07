@@ -230,6 +230,9 @@ type Article struct {
 	Status            string `json:"status"`
 	EnrichmentVersion int    `json:"enrichment_version"`
 	Error             string `json:"error,omitempty"`
+	// LLMModel is the effective model name that produced the enrichment, stamped
+	// when the article is flipped to status=enriched. Empty until enriched.
+	LLMModel string `json:"llm_model,omitempty"`
 	// Pinned is a user flag keeping the article at the top of the library. It is
 	// synced as ordinary metadata (toggling it bumps UpdatedAt).
 	Pinned     bool      `json:"pinned"`
@@ -501,6 +504,14 @@ type ArticleMeta struct {
 	// Summary is the short LLM-produced abstract shown as a quick preview on the
 	// library card. Empty until the article has been summarized.
 	Summary string `json:"summary,omitempty"`
+	// LLMModel is the model name that enriched the article (see Article.LLMModel).
+	// Empty until enriched.
+	LLMModel string `json:"llm_model,omitempty"`
+	// ProgressStage is a short, human-readable label of the pipeline step the
+	// article is currently in (e.g. "Fetching content", "Translating (3/5)"),
+	// set by the enrichment worker. Empty for articles at rest (queued, enriched,
+	// or failed). The UI shows it during processing.
+	ProgressStage string `json:"progress_stage,omitempty"`
 }
 
 // ArticlePayload is the full enriched-article response from
@@ -523,6 +534,13 @@ type ArticlePayload struct {
 	// EnrichmentCoverage mirrors ArticleMeta.EnrichmentCoverage so the reader
 	// page header can show completeness without a separate library lookup.
 	EnrichmentCoverage float64 `json:"enrichment_coverage"`
+	// LLMModel mirrors ArticleMeta.LLMModel so the reader can show which model
+	// produced the enrichment. Empty until enriched.
+	LLMModel string `json:"llm_model,omitempty"`
+	// ProgressStage mirrors ArticleMeta.ProgressStage so the reader's
+	// processing screen can show the current pipeline step. Empty when the
+	// article is at rest.
+	ProgressStage string `json:"progress_stage,omitempty"`
 }
 
 // ArticleRaw is the raw LLM output captured when the enrichment stage failed to

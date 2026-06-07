@@ -12,7 +12,7 @@
 	import { onDestroy } from 'svelte';
 	import { liveQuery } from 'dexie';
 	import { db, SYNC_STATE_ID } from '$lib/db';
-	import { getArticle } from '$lib/api';
+	import { getArticle, ApiError } from '$lib/api';
 	import { enqueueProgress, enqueueReEnrich } from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
 	import type {
@@ -83,6 +83,13 @@
 	let payload: ArticlePayload | undefined = $state();
 	let progress: Progress | undefined = $state();
 
+	// Live processing info for the "not ready yet" screen, refreshed by the poll
+	// loop while an article is still being processed: the current pipeline stage
+	// label and the sentence-coverage fraction (0→1) reached so far.
+	let processingStage: string | undefined = $state();
+	let processingCoverage = $state(0);
+	const processingPercent = $derived(Math.round(processingCoverage * 100));
+
 	// only allow http(s) source links to avoid javascript:/data: href injection
 	const safeSourceUrl = $derived(
 		meta?.source_url && /^https?:\/\//i.test(meta.source_url) ? meta.source_url : null
@@ -91,6 +98,10 @@
 	// Enrichment completeness for the header indicator. The payload is the
 	// authoritative source on this page (meta may be absent on a cold network load).
 	const coverage = $derived(payload?.enrichment_coverage ?? null);
+
+	// Model that produced the enrichment, shown in the header so the reader can
+	// tell which model they're reading. Empty until enriched.
+	const llmModel = $derived(payload?.llm_model || meta?.llm_model || null);
 
 	// Reader typography, driven by the synced Appearance settings. Applied to the
 	// reader via CSS custom properties so font size / line spacing react live.
@@ -144,11 +155,6 @@
 			// fetched fresh rather than served from the immutable HTTP cache.
 			const fetched = await getArticle(id, undefined, { version: cachedMeta?.updated_at });
 
-			if (fetched.status !== 'enriched') {
-				loadState = 'not-enriched';
-				return;
-			}
-
 			// Cache for offline use.
 			await db.articles_payload.put(fetched);
 
@@ -160,8 +166,30 @@
 				loadState = 'offline';
 				return;
 			}
+			// A still-processing article comes back as 409 with the payload as its
+			// body. Surface the live stage/coverage and poll until it's ready.
+			const proc = processingPayloadFrom(err);
+			if (proc) {
+				processingStage = proc.progress_stage;
+				processingCoverage = proc.enrichment_coverage ?? 0;
+				loadState = 'not-enriched';
+				startPolling(id);
+				return;
+			}
 			errorMessage = err instanceof Error ? err.message : String(err);
 			loadState = 'error';
+		}
+	}
+
+	// processingPayloadFrom extracts the article payload carried by a 409
+	// "still processing" response (the getArticle endpoint returns the payload as
+	// the 409 body). Returns null for any other error.
+	function processingPayloadFrom(err: unknown): ArticlePayload | null {
+		if (!(err instanceof ApiError) || err.status !== 409) return null;
+		try {
+			return JSON.parse(err.body) as ArticlePayload;
+		} catch {
+			return null;
 		}
 	}
 
@@ -207,8 +235,18 @@
 					reEnrichMode = undefined;
 					return;
 				}
-			} catch {
-				// 409 (still processing) and offline errors are expected — keep polling.
+				// Still processing (200 with a non-enriched status) — refresh the
+				// live stage/coverage so the waiting screen advances.
+				processingStage = fetched.progress_stage;
+				processingCoverage = fetched.enrichment_coverage ?? 0;
+			} catch (err) {
+				// 409 still carries the payload — refresh the live stage/coverage from
+				// it. Offline / other errors are expected here; keep polling.
+				const proc = processingPayloadFrom(err);
+				if (proc) {
+					processingStage = proc.progress_stage;
+					processingCoverage = proc.enrichment_coverage ?? 0;
+				}
 			}
 			if (id !== currentId) return;
 			if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
@@ -417,11 +455,31 @@
 	</div>
 {:else if loadState === 'not-enriched'}
 	<div class="flex flex-col items-center gap-4 py-16 text-center">
-		<AlertCircleIcon class="text-muted-foreground size-12" />
-		<h2 class="text-lg font-semibold">Not ready yet</h2>
+		<LoaderCircleIcon class="text-primary size-12 animate-spin" />
+		<h2 class="text-lg font-semibold">{processingStage?.trim() || 'Processing…'}</h2>
 		<p class="text-muted-foreground max-w-xs text-sm">
-			This article is still being processed. Check back in a moment.
+			This article is still being processed. The page updates automatically when it's ready.
 		</p>
+		{#if processingPercent > 0}
+			<div class="w-full max-w-xs">
+				<div class="text-muted-foreground mb-1.5 text-right text-xs tabular-nums">
+					{processingPercent}%
+				</div>
+				<div
+					class="bg-muted h-1.5 w-full overflow-hidden rounded-full"
+					role="progressbar"
+					aria-valuenow={processingPercent}
+					aria-valuemin={0}
+					aria-valuemax={100}
+					aria-label="Processing progress"
+				>
+					<div
+						class="bg-primary h-full rounded-full transition-[width] duration-500"
+						style="width: {processingPercent}%"
+					></div>
+				</div>
+			</div>
+		{/if}
 		<Button variant="outline" href="/">Back to library</Button>
 	</div>
 {:else if loadState === 'reenriching'}
@@ -488,6 +546,10 @@
 			{/if}
 			{#if coverage !== null}
 				<CoverageBadge {coverage} showLabel />
+			{/if}
+			{#if llmModel}
+				<span aria-hidden="true">·</span>
+				<span class="font-mono text-xs" title="Model used for translation">{llmModel}</span>
 			{/if}
 			<DropdownMenu.Root>
 				<DropdownMenu.Trigger

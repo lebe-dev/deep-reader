@@ -178,8 +178,12 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 			return;
 		}
 		case 'add_text': {
-			const { text, title } = entry.payload as { text: string; title: string };
-			await apiAddArticleText(text, title);
+			const { text, title, url } = entry.payload as {
+				text: string;
+				title: string;
+				url?: string;
+			};
+			await apiAddArticleText(text, title, url);
 			return;
 		}
 		case 'delete_article': {
@@ -286,9 +290,9 @@ export async function enqueueAddArticle(url: string): Promise<void> {
 	if (isOnline()) sync().catch(console.warn);
 }
 
-/** Enqueue adding an article from pasted raw text (title optional). */
-export async function enqueueAddArticleText(text: string, title = ''): Promise<void> {
-	await enqueueOutbox('add_text', { text, title });
+/** Enqueue adding an article from pasted raw text (title and source URL optional). */
+export async function enqueueAddArticleText(text: string, title = '', url = ''): Promise<void> {
+	await enqueueOutbox('add_text', { text, title, url });
 	if (isOnline()) sync().catch(console.warn);
 }
 

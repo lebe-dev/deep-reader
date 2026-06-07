@@ -44,6 +44,23 @@ const (
 	maxBackoff = 60 * time.Second
 )
 
+// Progress-stage labels persisted via store.SetProgressStage so the UI can show
+// which pipeline step an article is in during processing. The translation stage
+// label is built per chunk (see stageTranslating). These are user-facing copy,
+// kept in step with the English status labels the frontend already uses.
+const (
+	stageFetching    = "Fetching content"
+	stageNormalizing = "Cleaning up content"
+	stageSummarizing = "Summarizing"
+	stageFillingGaps = "Filling in missing translation"
+)
+
+// stageTranslating builds the per-chunk translation progress label, e.g.
+// "Translating (3/5)".
+func stageTranslating(done, total int) string {
+	return fmt.Sprintf("Translating (%d/%d)", done, total)
+}
+
 // Pool is a fixed-size worker pool that drives the fetch→enrich pipeline for
 // articles awaiting work. Construct it with NewPool; run Start in its own
 // goroutine.
@@ -173,6 +190,22 @@ func (p *Pool) drain(ctx context.Context, workerID int) {
 func (p *Pool) processArticle(ctx context.Context, workerID int, a *model.Article) {
 	log := slog.With("worker", workerID, "article_id", a.ID)
 
+	// Bracket the whole pipeline with start/finish logs so the lifecycle of an
+	// article is visible in the stream: when work began, and on completion how
+	// long it took and what state it ended in (the stage functions keep a.Status
+	// truthful, including on terminal failure). a is processed by a single worker
+	// at a time, so reading a.Status in the deferred log is race-free.
+	start := time.Now()
+	entryStatus := a.Status
+	log.Info("enrich: processing started", "status", entryStatus, "url", a.SourceURL, "token_count", len(a.Tokens))
+	defer func() {
+		log.Info("enrich: processing finished",
+			"entry_status", entryStatus,
+			"final_status", a.Status,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}()
+
 	if a.Status == model.StatusQueued || a.Status == model.StatusFetching {
 		if !p.runFetch(ctx, log, a) {
 			return // fetch failed, article deleted, or ctx cancelled
@@ -227,7 +260,8 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	if len(spans) == 0 {
 		// Already fully covered — nothing to add. Restore the enriched state so
 		// the article leaves the work queue (SaveEnrichment recomputes coverage).
-		if err := p.store.SaveEnrichment(ctx, a.ID, existing, time.Now().UTC()); err != nil && !errors.Is(err, ports.ErrNotFound) {
+		// No LLM call ran, so pass "" to keep the previously recorded model.
+		if err := p.store.SaveEnrichment(ctx, a.ID, existing, time.Now().UTC(), ""); err != nil && !errors.Is(err, ports.ErrNotFound) {
 			log.Error("enrich: topup save (no gaps) failed", "err", err)
 		}
 		log.Info("enrich: topup found no uncovered spans, nothing to do")
@@ -239,6 +273,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	spans = expandSpansToSentences(text, tokens, spans)
 
 	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
+	p.setStage(ctx, log, a.ID, stageFillingGaps)
 
 	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
@@ -258,7 +293,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 				continue
 			}
 			log.Error("enrich: topup permanent error", "err", err)
-			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+			p.setFailed(ctx, a, model.StatusEnrichFailed, err)
 			return
 		}
 		if addition == nil {
@@ -274,7 +309,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		}
 		merged := mergeEnrichment(existing, clean)
 
-		if err := p.store.SaveEnrichment(ctx, a.ID, merged, time.Now().UTC()); err != nil {
+		if err := p.store.SaveEnrichment(ctx, a.ID, merged, time.Now().UTC(), usage.Model); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
 				log.Info("enrich: article deleted during topup, skipping")
 				return
@@ -284,10 +319,11 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 			if isRetryable(err) {
 				continue
 			}
-			p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+			p.setFailed(ctx, a, model.StatusEnrichFailed, err)
 			return
 		}
 
+		a.Status = model.StatusEnriched
 		log.Info("enrich: article topped up (incremental)",
 			"spans", len(spans),
 			"prompt_tokens", usage.PromptTokens,
@@ -299,7 +335,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 
 	log.Error("enrich: topup retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
 	if lastErr != nil {
-		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
+		p.setFailed(ctx, a, model.StatusEnrichFailed, lastErr)
 	}
 }
 
@@ -354,6 +390,7 @@ func detectBotWall(result *ports.ExtractResult, signatures []string) string {
 // continue, false on terminal failure, deletion, or cancellation.
 func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article) bool {
 	p.setStatus(ctx, log, a.ID, model.StatusFetching, "")
+	p.setStage(ctx, log, a.ID, stageFetching)
 
 	// Load the bot-wall signature list once for this fetch. A settings read error
 	// must not block fetching — fall back to the built-in defaults.
@@ -381,7 +418,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 				continue
 			}
 			log.Error("enrich: permanent fetch error", "err", err)
-			p.setFailed(ctx, a.ID, model.StatusFetchFailed, err)
+			p.setFailed(ctx, a, model.StatusFetchFailed, err)
 			return false
 		}
 
@@ -393,7 +430,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		// re-runs the fetch.
 		if reason := detectBotWall(result, signatures); reason != "" {
 			log.Warn("enrich: bot-wall/captcha detected, aborting before LLM", "reason", reason)
-			p.setFailed(ctx, a.ID, model.StatusBlocked, fmt.Errorf("%w: %s", ErrBotWall, reason))
+			p.setFailed(ctx, a, model.StatusBlocked, fmt.Errorf("%w: %s", ErrBotWall, reason))
 			return false
 		}
 
@@ -406,6 +443,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		// boilerplate — BEFORE tokenizing, so tokens (and every downstream
 		// enrichment span) align with the cleaned text. Best-effort: a normalize
 		// failure leaves the original text in place.
+		p.setStage(ctx, log, a.ID, stageNormalizing)
 		text = p.runNormalize(ctx, log, title, text, settings)
 		tokens := tokenize.Tokenize(text)
 
@@ -428,7 +466,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 			if isRetryable(err) {
 				continue
 			}
-			p.setFailed(ctx, a.ID, model.StatusFetchFailed, err)
+			p.setFailed(ctx, a, model.StatusFetchFailed, err)
 			return false
 		}
 
@@ -449,7 +487,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 
 	log.Error("enrich: fetch retries exhausted", "attempts", maxRetries+1, "last_err", lastErr)
 	if lastErr != nil {
-		p.setFailed(ctx, a.ID, model.StatusFetchFailed, lastErr)
+		p.setFailed(ctx, a, model.StatusFetchFailed, lastErr)
 	}
 	return false
 }
@@ -475,6 +513,7 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 
 	// Step 1: summary (best-effort — a summary failure must not block translation).
 	if strings.TrimSpace(a.Summary) == "" {
+		p.setStage(ctx, log, a.ID, stageSummarizing)
 		if summary, ok := p.runSummarize(ctx, log, a, settings); ok {
 			a.Summary = summary
 		}
@@ -487,13 +526,37 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 	chunks := chunkSpans(a.OriginalText, a.Tokens, p.chunkTokens(settings))
 	if len(chunks) == 0 {
 		// No tokens to annotate — persist (possibly empty) enrichment as enriched.
-		if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC()); err != nil && !errors.Is(err, ports.ErrNotFound) {
+		// No LLM call ran, so pass "" to keep any previously recorded model.
+		if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC(), ""); err != nil && !errors.Is(err, ports.ErrNotFound) {
 			log.Error("enrich: save (no chunks) failed", "err", err)
 		}
+		a.Status = model.StatusEnriched
 		return
 	}
 
+	total := len(chunks)
+	// Count chunks a prior run already annotated. When non-zero this is a resume
+	// after an interruption (a crash, a restart, or a retry of a partially-failed
+	// run); log it explicitly and seed the progress label so the UI shows where
+	// processing picked back up rather than restarting the count from zero.
+	done := 0
+	for _, span := range chunks {
+		if spanCovered(running, span) {
+			done++
+		}
+	}
+	if done > 0 {
+		log.Info("enrich: resuming step-wise enrichment", "chunks_done", done, "of", total)
+	} else {
+		log.Info("enrich: starting step-wise enrichment", "chunks", total)
+	}
+	p.setStage(ctx, log, a.ID, stageTranslating(done, total))
+
 	var lastErr error
+	// lastModel is the model that produced the most recent chunk, stamped onto the
+	// article on the final SaveEnrichment. It stays "" when every chunk was already
+	// covered by a prior run (resume), so SaveEnrichment keeps the prior model.
+	var lastModel string
 	for ci, span := range chunks {
 		if ctx.Err() != nil {
 			return
@@ -502,7 +565,7 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 			continue // already annotated by a prior run
 		}
 
-		merged, err := p.enrichChunk(ctx, log, a, settings, running, span, ci, len(chunks))
+		merged, chunkModel, err := p.enrichChunk(ctx, log, a, settings, running, span, ci, total)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -511,6 +574,7 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 			continue // keep going; preserve the chunks that did succeed
 		}
 		running = merged
+		lastModel = chunkModel
 
 		if err := p.store.SaveEnrichmentProgress(ctx, a.ID, running); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
@@ -520,25 +584,32 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 			lastErr = err
 			log.Error("enrich: save progress failed", "chunk", ci, "err", err)
 		}
+
+		// Advance the progress label after each persisted chunk so the UI tracks
+		// translation as it goes. A failed chunk (continued above) does not bump
+		// the count, so the label reflects only chunks actually committed.
+		done++
+		p.setStage(ctx, log, a.ID, stageTranslating(done, total))
 	}
 
 	if lastErr != nil {
 		log.Error("enrich: one or more chunks failed", "chunks", len(chunks), "last_err", lastErr)
-		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, lastErr)
+		p.setFailed(ctx, a, model.StatusEnrichFailed, lastErr)
 		return
 	}
 
-	// All chunks done — flip to enriched.
-	if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC()); err != nil {
+	// All chunks done — flip to enriched, stamping the model that produced them.
+	if err := p.store.SaveEnrichment(ctx, a.ID, running, time.Now().UTC(), lastModel); err != nil {
 		if errors.Is(err, ports.ErrNotFound) {
 			log.Info("enrich: article deleted during enrichment, skipping")
 			return
 		}
 		log.Error("enrich: final save enrichment failed", "err", err)
-		p.setFailed(ctx, a.ID, model.StatusEnrichFailed, err)
+		p.setFailed(ctx, a, model.StatusEnrichFailed, err)
 		return
 	}
-	log.Info("enrich: article enriched (step-wise)", "chunks", len(chunks))
+	a.Status = model.StatusEnriched
+	log.Info("enrich: article enriched (step-wise)", "chunks", total)
 }
 
 // runSummarize runs the summary step with retry/backoff and persists the result.
@@ -633,17 +704,18 @@ func (p *Pool) runNormalize(ctx context.Context, log *slog.Logger, title, text s
 
 // enrichChunk annotates a single token span with retry/backoff, merges the
 // addition into the running enrichment, validates the merged result, and returns
-// it. It returns errArticleDeleted if the article vanished, ctx.Err() on
-// cancellation, or the last error after exhausting retries.
-func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings, existing model.Enrichment, span model.Span, idx, total int) (model.Enrichment, error) {
+// it together with the model name that produced the chunk. It returns
+// errArticleDeleted if the article vanished, ctx.Err() on cancellation, or the
+// last error after exhausting retries.
+func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings, existing model.Enrichment, span model.Span, idx, total int) (model.Enrichment, string, error) {
 	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if ctx.Err() != nil {
-			return model.Enrichment{}, ctx.Err()
+			return model.Enrichment{}, "", ctx.Err()
 		}
 		if attempt > 0 && !p.backoff(ctx, log, attempt) {
-			return model.Enrichment{}, ctx.Err()
+			return model.Enrichment{}, "", ctx.Err()
 		}
 
 		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, []model.Span{span})
@@ -654,7 +726,7 @@ func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Artic
 				continue
 			}
 			log.Error("enrich: chunk permanent error", "chunk", idx+1, "of", total, "err", err)
-			return model.Enrichment{}, err
+			return model.Enrichment{}, "", err
 		}
 		if addition == nil {
 			addition = &model.Enrichment{}
@@ -675,11 +747,11 @@ func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Artic
 			"prompt_tokens", usage.PromptTokens,
 			"completion_tokens", usage.CompletionTokens,
 		)
-		return merged, nil
+		return merged, usage.Model, nil
 	}
 
 	log.Error("enrich: chunk retries exhausted", "chunk", idx+1, "of", total, "attempts", maxRetries+1, "last_err", lastErr)
-	return model.Enrichment{}, lastErr
+	return model.Enrichment{}, "", lastErr
 }
 
 // chunkTokens resolves the effective step-wise enrichment window size: the
@@ -756,13 +828,31 @@ func (p *Pool) setStatus(ctx context.Context, log *slog.Logger, id, status, errM
 	}
 }
 
-// setFailed records a terminal stage failure with its error message. When the
-// error carries a raw LLM response that failed to decode (rawResponseOf), that
-// response is persisted alongside the error so the UI can show it verbatim.
-func (p *Pool) setFailed(ctx context.Context, id, status string, err error) {
-	if setErr := p.store.SetFailed(ctx, id, status, err.Error(), rawResponseOf(err)); setErr != nil {
+// setStage records the article's current pipeline step (a human-readable label
+// the UI shows during processing) and logs the transition. Best-effort: a store
+// error other than the article being deleted is logged but never aborts the
+// pipeline. The store side bumps updated_at so the change rides the next delta
+// sync to the client.
+func (p *Pool) setStage(ctx context.Context, log *slog.Logger, id, stage string) {
+	log.Info("enrich: stage", "stage", stage)
+	if err := p.store.SetProgressStage(ctx, id, stage); err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return // article deleted; the next store call handles it
+		}
+		log.Warn("enrich: set progress stage failed", "stage", stage, "err", err)
+	}
+}
+
+// setFailed records a terminal stage failure with its error message and reflects
+// the failed status onto the in-memory article so the processing-finished log
+// reports the true outcome. When the error carries a raw LLM response that failed
+// to decode (rawResponseOf), that response is persisted alongside the error so
+// the UI can show it verbatim.
+func (p *Pool) setFailed(ctx context.Context, a *model.Article, status string, err error) {
+	a.Status = status
+	if setErr := p.store.SetFailed(ctx, a.ID, status, err.Error(), rawResponseOf(err)); setErr != nil {
 		slog.Error("enrich: failed to set failed status",
-			"article_id", id,
+			"article_id", a.ID,
 			"status", status,
 			"set_err", setErr,
 			"original_err", err,

@@ -297,7 +297,7 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 func (s *SQLite) GetArticleByHash(ctx context.Context, urlHash string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at, pinned
+                      created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE url_hash = ?`
 	row := s.db.QueryRowContext(ctx, q, urlHash)
 	a, err := scanArticle(row)
@@ -319,12 +319,12 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	)
 	if since.IsZero() {
 		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, '')
+                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, ''), progress_stage, llm_model
                    FROM articles ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q)
 	} else {
 		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, '')
+                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, ''), progress_stage, llm_model
                    FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
 	}
@@ -340,7 +340,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		var pinned int
 		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
 			&m.Status, &pinned, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
-			&m.EnrichmentCoverage, &m.Summary); err != nil {
+			&m.EnrichmentCoverage, &m.Summary, &m.ProgressStage, &m.LLMModel); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
 		}
 		m.Pinned = pinned == 1
@@ -365,7 +365,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at, pinned
+                      created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, q, id)
 	a, err := scanArticle(row)
@@ -382,7 +382,7 @@ func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, err
 // Enrichment is nil when the article has no enrichment row.
 func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.ArticlePayload, error) {
 	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.tokens,
-                      a.summary, a.status, a.enrichment_version, a.enrichment_coverage, e.enrichment
+                      a.summary, a.status, a.enrichment_version, a.enrichment_coverage, a.progress_stage, a.llm_model, e.enrichment
                FROM articles a
                LEFT JOIN enrichments e ON e.article_id = a.id
                WHERE a.id = ?`
@@ -392,7 +392,7 @@ func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.Artic
 	var tokJSON string
 	var enrichJSON sql.NullString
 	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText,
-		&tokJSON, &p.Summary, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &enrichJSON); err != nil {
+		&tokJSON, &p.Summary, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &p.ProgressStage, &p.LLMModel, &enrichJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
 		}
@@ -455,13 +455,36 @@ func (s *SQLite) SetStatus(ctx context.Context, id, status, errMsg string) error
 	return nil
 }
 
+// SetProgressStage updates the article's human-readable progress label (the
+// pipeline step it is currently in) and bumps updated_at so the change rides the
+// next delta sync to the client. It is called frequently by the enrichment
+// worker (once per stage, and once per translated chunk), so it touches only the
+// two columns and leaves status/error untouched. Returns [ports.ErrNotFound] if
+// the article was deleted in the meantime.
+func (s *SQLite) SetProgressStage(ctx context.Context, id, stage string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	const q = `UPDATE articles SET progress_stage=?, updated_at=? WHERE id=?`
+	res, err := s.write.ExecContext(ctx, q, stage, fmtTime(now()), id)
+	if err != nil {
+		return fmt.Errorf("store: SetProgressStage: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ports.ErrNotFound
+	}
+	slog.Debug("store: article progress stage updated", "article_id", id, "stage", stage)
+	return nil
+}
+
 // SetFailed records a terminal stage failure, storing the error message and the
 // raw LLM response (when available) for inspection, and stamps updated_at.
 func (s *SQLite) SetFailed(ctx context.Context, id, status, errMsg, rawLLMResponse string) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
-	const q = `UPDATE articles SET status=?, error=?, raw_llm_response=?, updated_at=? WHERE id=?`
+	const q = `UPDATE articles SET status=?, error=?, raw_llm_response=?, updated_at=?, progress_stage='' WHERE id=?`
 	res, err := s.write.ExecContext(ctx, q, status, errMsg, rawLLMResponse, fmtTime(now()), id)
 	if err != nil {
 		return fmt.Errorf("store: SetFailed: %w", err)
@@ -512,9 +535,10 @@ func sentenceCoverage(e model.Enrichment, tokenCount int) float64 {
 }
 
 // SaveEnrichment persists the enrichment blob, sets status=enriched, records
-// enriched_at, computes the sentence-coverage completeness signal, and stamps
-// updated_at. The operation is atomic.
-func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time) error {
+// enriched_at, computes the sentence-coverage completeness signal, records the
+// model that produced the enrichment (llmModel; left untouched when empty), and
+// stamps updated_at. The operation is atomic.
+func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time, llmModel string) error {
 	eJSON, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("store: SaveEnrichment marshal: %w", err)
@@ -553,8 +577,11 @@ func (s *SQLite) SaveEnrichment(ctx context.Context, id string, e model.Enrichme
 		return fmt.Errorf("store: SaveEnrichment upsert enrichment: %w", err)
 	}
 
-	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=?, enrichment_coverage=?, raw_llm_response='' WHERE id=?`
-	res, err := tx.ExecContext(ctx, updArticle, fmtTime(enrichedAt), fmtTime(now()), coverage, id)
+	// Overwrite llm_model only when a model was supplied: a resume / no-op save
+	// (all chunks already covered) passes "" and must not erase the model a prior
+	// successful pass recorded.
+	const updArticle = `UPDATE articles SET status='enriched', enriched_at=?, updated_at=?, enrichment_coverage=?, llm_model=CASE WHEN ?<>'' THEN ? ELSE llm_model END, raw_llm_response='', progress_stage='' WHERE id=?`
+	res, err := tx.ExecContext(ctx, updArticle, fmtTime(enrichedAt), fmtTime(now()), coverage, llmModel, llmModel, id)
 	if err != nil {
 		return fmt.Errorf("store: SaveEnrichment update article: %w", err)
 	}
@@ -633,7 +660,7 @@ func (s *SQLite) SaveEnrichmentProgress(ctx context.Context, id string, e model.
 func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
                       original_text, tokens, summary, status, enrichment_version, error,
-                      created_at, enriched_at, updated_at, pinned
+                      created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles
                WHERE status IN ('queued','fetching','fetched','enriching','topup_queued')
                ORDER BY created_at ASC LIMIT ?`
@@ -731,6 +758,7 @@ func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 	               error = '',
 	               raw_llm_response = '',
 	               enriched_at = '',
+	               progress_stage = '',
 	               updated_at = ?
 	           WHERE id = ?`
 	res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
@@ -758,7 +786,7 @@ func (s *SQLite) ReEnrich(ctx context.Context, id, mode string) error {
 	defer s.wmu.Unlock()
 
 	if mode == model.ReEnrichModeTopup {
-		const q = `UPDATE articles SET status='topup_queued', error='', raw_llm_response='', updated_at=? WHERE id=?`
+		const q = `UPDATE articles SET status='topup_queued', error='', raw_llm_response='', progress_stage='', updated_at=? WHERE id=?`
 		res, err := s.write.ExecContext(ctx, q, fmtTime(now()), id)
 		if err != nil {
 			return fmt.Errorf("store: ReEnrich: %w", err)
@@ -781,7 +809,7 @@ func (s *SQLite) ReEnrich(ctx context.Context, id, mode string) error {
 
 	const updArticle = `UPDATE articles
 	                    SET status='fetched', error='', raw_llm_response='',
-	                        enriched_at='', enrichment_coverage=0, updated_at=?
+	                        enriched_at='', enrichment_coverage=0, progress_stage='', updated_at=?
 	                    WHERE id=?`
 	res, err := tx.ExecContext(ctx, updArticle, fmtTime(now()), id)
 	if err != nil {
@@ -1018,7 +1046,7 @@ func scanArticle(row *sql.Row) (*model.Article, error) {
 	if err := row.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
 		&a.OriginalText, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
-		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned,
+		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, err // let caller handle sql.ErrNoRows
 	}
@@ -1034,7 +1062,7 @@ func scanArticleRow(rows *sql.Rows) (*model.Article, error) {
 	if err := rows.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
 		&a.OriginalText, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
-		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned,
+		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, fmt.Errorf("store: scanArticleRow: %w", err)
 	}

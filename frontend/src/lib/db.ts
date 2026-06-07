@@ -37,7 +37,7 @@ export interface OutboxPayloadMap {
 	progress: { article_id: string } & ProgressUpdate;
 	settings: SettingsPatch;
 	add_article: { url: string };
-	add_text: { text: string; title: string };
+	add_text: { text: string; title: string; url?: string };
 	delete_article: { id: string };
 	retry: { id: string };
 	reenrich: { id: string; mode: ReEnrichMode };

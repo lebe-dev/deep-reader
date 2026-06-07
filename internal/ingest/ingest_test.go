@@ -138,13 +138,16 @@ func (f *fakeStore) DeleteArticle(_ context.Context, _ string) error { return ni
 func (f *fakeStore) SetStatus(_ context.Context, _, _, _ string) error {
 	return nil
 }
+func (f *fakeStore) SetProgressStage(_ context.Context, _, _ string) error {
+	return nil
+}
 func (f *fakeStore) SetFailed(_ context.Context, _, _, _, _ string) error {
 	return nil
 }
 func (f *fakeStore) GetArticleRaw(_ context.Context, _ string) (*model.ArticleRaw, error) {
 	return nil, ports.ErrNotFound
 }
-func (f *fakeStore) SaveEnrichment(_ context.Context, _ string, _ model.Enrichment, _ time.Time) error {
+func (f *fakeStore) SaveEnrichment(_ context.Context, _ string, _ model.Enrichment, _ time.Time, _ string) error {
 	return nil
 }
 func (f *fakeStore) SaveEnrichmentProgress(_ context.Context, _ string, _ model.Enrichment) error {
@@ -253,7 +256,7 @@ func TestAddText_New(t *testing.T) {
 	ing := ingest.New(cfg, st, wk)
 
 	const body = "First line is the title\nSecond paragraph with the body."
-	art, err := ing.AddText(context.Background(), "", body)
+	art, err := ing.AddText(context.Background(), "", "", body)
 	if err != nil {
 		t.Fatalf("AddText: unexpected error: %v", err)
 	}
@@ -287,12 +290,44 @@ func TestAddText_New(t *testing.T) {
 	}
 }
 
+func TestAddText_SourceURL(t *testing.T) {
+	st := newFakeStore()
+	wk := &fakeWorker{}
+	ing := ingest.New(defaultCfg(), st, wk)
+
+	// A valid source URL is normalized (utm_* stripped) and its host recorded.
+	art, err := ing.AddText(context.Background(), "T", "https://Example.com/post?utm_source=x", "Body text")
+	if err != nil {
+		t.Fatalf("AddText: %v", err)
+	}
+	if art.SourceURL != "https://example.com/post" {
+		t.Errorf("source URL: got %q, want %q", art.SourceURL, "https://example.com/post")
+	}
+	if art.SourceDomain != "example.com" {
+		t.Errorf("source domain: got %q, want %q", art.SourceDomain, "example.com")
+	}
+
+	// An invalid source URL is rejected (no host) before a record is created.
+	if _, err := ing.AddText(context.Background(), "", "not a url", "Other text"); err == nil {
+		t.Fatal("AddText: expected error for invalid source URL")
+	}
+
+	// An empty source URL is fine — the article just has no source metadata.
+	plain, err := ing.AddText(context.Background(), "", "", "Plain text")
+	if err != nil {
+		t.Fatalf("AddText (no URL): %v", err)
+	}
+	if plain.SourceURL != "" || plain.SourceDomain != "" {
+		t.Errorf("expected empty source metadata, got url=%q domain=%q", plain.SourceURL, plain.SourceDomain)
+	}
+}
+
 func TestAddText_DedupAndEmpty(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}
 	ing := ingest.New(defaultCfg(), st, wk)
 
-	first, err := ing.AddText(context.Background(), "Custom title", "Same content")
+	first, err := ing.AddText(context.Background(), "Custom title", "", "Same content")
 	if err != nil {
 		t.Fatalf("AddText first: %v", err)
 	}
@@ -301,7 +336,7 @@ func TestAddText_DedupAndEmpty(t *testing.T) {
 	}
 
 	// Same text → dedup hit returns the existing article.
-	second, err := ing.AddText(context.Background(), "", "Same content")
+	second, err := ing.AddText(context.Background(), "", "", "Same content")
 	if err != nil {
 		t.Fatalf("AddText second: %v", err)
 	}
@@ -310,7 +345,7 @@ func TestAddText_DedupAndEmpty(t *testing.T) {
 	}
 
 	// Empty text is rejected before any record is created.
-	if _, err := ing.AddText(context.Background(), "", "   "); err == nil {
+	if _, err := ing.AddText(context.Background(), "", "", "   "); err == nil {
 		t.Fatal("AddText: expected error for empty text")
 	}
 }

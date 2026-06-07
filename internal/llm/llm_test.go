@@ -242,8 +242,8 @@ func TestEnrich_DecodesEnrichment(t *testing.T) {
 		t.Errorf("Glossary[0].Term = %q, want fox", g.Term)
 	}
 
-	// usage.
-	wantUsage := ports.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150}
+	// usage (Model is the request model, echoed back independent of the usage block).
+	wantUsage := ports.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, Model: "test-model"}
 	if usage != wantUsage {
 		t.Errorf("usage = %+v, want %+v", usage, wantUsage)
 	}
@@ -799,9 +799,11 @@ func TestEnrich_UsageZeroWhenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
-	want := ports.Usage{}
+	// Token counts are zero when the provider omits the usage block, but Model is
+	// still the request model the client echoes back regardless.
+	want := ports.Usage{Model: "test-model"}
 	if usage != want {
-		t.Errorf("usage = %+v, want zero value", usage)
+		t.Errorf("usage = %+v, want %+v", usage, want)
 	}
 }
 

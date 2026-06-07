@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -403,7 +404,7 @@ func TestEnrichmentRoundtrip(t *testing.T) {
 		},
 	}
 	enrichedAt := time.Now().UTC().Truncate(time.Second)
-	if err := s.SaveEnrichment(ctx, a.ID, enrichment, enrichedAt); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, enrichedAt, ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -457,6 +458,53 @@ func TestEnrichmentRoundtrip(t *testing.T) {
 	}
 }
 
+// TestSaveEnrichment_RecordsLLMModel verifies that the model name passed to
+// SaveEnrichment is persisted and surfaced on both the payload and the library
+// metadata projection — and that a later no-op save with an empty model keeps
+// the recorded value rather than erasing it (the resume case).
+func TestSaveEnrichment_RecordsLLMModel(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/model")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), "gpt-4o-mini"); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.LLMModel != "gpt-4o-mini" {
+		t.Errorf("payload llm_model: got %q, want %q", payload.LLMModel, "gpt-4o-mini")
+	}
+
+	metas, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta: %v", err)
+	}
+	if len(metas) != 1 || metas[0].LLMModel != "gpt-4o-mini" {
+		t.Errorf("meta llm_model: got %+v, want one row with gpt-4o-mini", metas)
+	}
+
+	// A subsequent save with an empty model (e.g. a resume that re-flips the
+	// already-covered article) must not erase the recorded model.
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), ""); err != nil {
+		t.Fatalf("SaveEnrichment (resume): %v", err)
+	}
+	payload, err = s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload after resume: %v", err)
+	}
+	if payload.LLMModel != "gpt-4o-mini" {
+		t.Errorf("llm_model after empty save: got %q, want %q", payload.LLMModel, "gpt-4o-mini")
+	}
+}
+
 // TestSaveEnrichment_PartialCoverage verifies that the sentence-coverage signal
 // reflects a lazy/truncated LLM response: when the sentences only span the first
 // half of the tokens, coverage is the covered fraction, not 1.0.
@@ -479,7 +527,7 @@ func TestSaveEnrichment_PartialCoverage(t *testing.T) {
 	enrichment := model.Enrichment{
 		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 1, Translation: "ab"}},
 	}
-	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -527,7 +575,7 @@ func TestSaveEnrichment_CoverageEdgeCases(t *testing.T) {
 				t.Fatalf("CreateArticle: %v", err)
 			}
 
-			if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{Sentences: tc.sentences}, time.Now().UTC()); err != nil {
+			if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{Sentences: tc.sentences}, time.Now().UTC(), ""); err != nil {
 				t.Fatalf("SaveEnrichment: %v", err)
 			}
 
@@ -662,7 +710,7 @@ func TestDeleteArticle_Cascade(t *testing.T) {
 	}
 
 	// Insert enrichment.
-	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -716,7 +764,7 @@ func TestSaveEnrichment_ArticleMissing(t *testing.T) {
 	ctx := context.Background()
 
 	// Never-existed article.
-	err := s.SaveEnrichment(ctx, "no-such-id", model.Enrichment{}, time.Now().UTC())
+	err := s.SaveEnrichment(ctx, "no-such-id", model.Enrichment{}, time.Now().UTC(), "")
 	if !isErr(err, ports.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for missing article, got %v", err)
 	}
@@ -729,7 +777,7 @@ func TestSaveEnrichment_ArticleMissing(t *testing.T) {
 	if err := s.DeleteArticle(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteArticle: %v", err)
 	}
-	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); !isErr(err, ports.ErrNotFound) {
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), ""); !isErr(err, ports.ErrNotFound) {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
 	}
 }
@@ -746,7 +794,7 @@ func TestRetryArticle(t *testing.T) {
 	}
 
 	// Enrich it first, then mark the enrichment stage failed.
-	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 	if err := s.SetStatus(ctx, a.ID, model.StatusEnrichFailed, "timeout"); err != nil {
@@ -893,7 +941,7 @@ func TestReEnrich_FullClearsEnrichmentAndCoverage(t *testing.T) {
 	enrichment := model.Enrichment{
 		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 0, Translation: "Hi"}},
 	}
-	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -942,7 +990,7 @@ func TestReEnrich_TopupPreservesEnrichment(t *testing.T) {
 	enrichment := model.Enrichment{
 		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 0, Translation: "Hi"}},
 	}
-	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, a.ID, enrichment, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -1080,7 +1128,7 @@ func TestListWork(t *testing.T) {
 
 	// Enrich one of them — it leaves the work set.
 	all, _ := s.ListArticleMeta(ctx, time.Time{})
-	if err := s.SaveEnrichment(ctx, all[0].ID, model.Enrichment{}, time.Now().UTC()); err != nil {
+	if err := s.SaveEnrichment(ctx, all[0].ID, model.Enrichment{}, time.Now().UTC(), ""); err != nil {
 		t.Fatalf("SaveEnrichment: %v", err)
 	}
 
@@ -1352,5 +1400,65 @@ func TestSessionLifecycle(t *testing.T) {
 	// Deleting a missing session is a no-op, not an error.
 	if err := s.DeleteSession(ctx, "missing"); err != nil {
 		t.Errorf("DeleteSession(missing) = %v, want nil", err)
+	}
+}
+
+// TestSetProgressStage verifies the progress label round-trips through both the
+// library metadata and the reader payload, that an unknown id is ErrNotFound,
+// and that the terminal transitions (SaveEnrichment, SetFailed) clear it so a
+// finished or failed article carries no stale stage.
+func TestSetProgressStage(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/stage")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	if err := s.SetProgressStage(ctx, a.ID, "Translating (2/5)"); err != nil {
+		t.Fatalf("SetProgressStage: %v", err)
+	}
+
+	// Surfaced on the library metadata projection.
+	metas, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta: %v", err)
+	}
+	if len(metas) != 1 || metas[0].ProgressStage != "Translating (2/5)" {
+		t.Fatalf("meta progress_stage: got %+v, want one row at %q", metas, "Translating (2/5)")
+	}
+
+	// Surfaced on the reader payload.
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.ProgressStage != "Translating (2/5)" {
+		t.Errorf("payload progress_stage: got %q, want %q", payload.ProgressStage, "Translating (2/5)")
+	}
+
+	// Unknown id is ErrNotFound.
+	if err := s.SetProgressStage(ctx, "missing", "x"); !errors.Is(err, ports.ErrNotFound) {
+		t.Errorf("SetProgressStage(missing) = %v, want ErrNotFound", err)
+	}
+
+	// SaveEnrichment (terminal success) clears the stage.
+	if err := s.SaveEnrichment(ctx, a.ID, model.Enrichment{}, time.Now().UTC(), ""); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+	if p, _ := s.GetArticlePayload(ctx, a.ID); p.ProgressStage != "" {
+		t.Errorf("progress_stage after SaveEnrichment: got %q, want empty", p.ProgressStage)
+	}
+
+	// A fresh stage followed by SetFailed (terminal failure) clears it too.
+	if err := s.SetProgressStage(ctx, a.ID, "Summarizing"); err != nil {
+		t.Fatalf("SetProgressStage (2): %v", err)
+	}
+	if err := s.SetFailed(ctx, a.ID, model.StatusEnrichFailed, "boom", ""); err != nil {
+		t.Fatalf("SetFailed: %v", err)
+	}
+	if p, _ := s.GetArticlePayload(ctx, a.ID); p.ProgressStage != "" {
+		t.Errorf("progress_stage after SetFailed: got %q, want empty", p.ProgressStage)
 	}
 }

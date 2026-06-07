@@ -694,13 +694,13 @@ func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string
 
 	content := chatResp.Choices[0].Message.Content
 
-	usage := ports.Usage{}
+	// Record the model the request was actually sent with so callers can stamp it
+	// onto the article, independent of whether the provider echoed a usage block.
+	usage := ports.Usage{Model: req.Model}
 	if chatResp.Usage != nil {
-		usage = ports.Usage{
-			PromptTokens:     chatResp.Usage.PromptTokens,
-			CompletionTokens: chatResp.Usage.CompletionTokens,
-			TotalTokens:      chatResp.Usage.TotalTokens,
-		}
+		usage.PromptTokens = chatResp.Usage.PromptTokens
+		usage.CompletionTokens = chatResp.Usage.CompletionTokens
+		usage.TotalTokens = chatResp.Usage.TotalTokens
 		slog.Info("llm usage",
 			"model", req.Model,
 			"prompt_tokens", usage.PromptTokens,

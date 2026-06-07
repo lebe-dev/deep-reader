@@ -29,6 +29,8 @@
 	let url = $state('');
 	let text = $state('');
 	let title = $state('');
+	// Optional link back to the original article, stored as metadata (text mode).
+	let sourceUrl = $state('');
 	let submitting = $state(false);
 	let validationError = $state('');
 
@@ -46,9 +48,18 @@
 		return '';
 	}
 
+	// validateTextMode returns the first problem with the text-mode fields: the
+	// pasted text is required, the source URL is optional but must be valid when
+	// present.
+	function validateTextMode(): string {
+		if (!text.trim()) return 'Text is required.';
+		if (sourceUrl.trim()) return validateUrl(sourceUrl);
+		return '';
+	}
+
 	function handleInput() {
 		if (validationError) {
-			validationError = mode === 'url' ? validateUrl(url) : text.trim() ? '' : 'Text is required.';
+			validationError = mode === 'url' ? validateUrl(url) : validateTextMode();
 		}
 	}
 
@@ -80,15 +91,13 @@
 			return;
 		}
 
+		validationError = validateTextMode();
+		if (validationError) return;
 		const trimmedText = text.trim();
-		if (!trimmedText) {
-			validationError = 'Text is required.';
-			return;
-		}
 
 		submitting = true;
 		try {
-			await enqueueAddArticleText(trimmedText, title.trim());
+			await enqueueAddArticleText(trimmedText, title.trim(), sourceUrl.trim());
 			toast('Text added — syncing in the background.');
 			resetFields();
 			open = false;
@@ -103,6 +112,7 @@
 		url = '';
 		text = '';
 		title = '';
+		sourceUrl = '';
 	}
 
 	function handleOpenChange(value: boolean) {
@@ -148,7 +158,7 @@
 </div>
 
 <Dialog.Root {open} onOpenChange={handleOpenChange}>
-	<Dialog.Content class="flex max-h-[90vh] max-w-md flex-col overflow-hidden">
+	<Dialog.Content class="max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>{mode === 'url' ? 'Add article' : 'Add text'}</Dialog.Title>
 			<Dialog.Description>
@@ -160,7 +170,7 @@
 			</Dialog.Description>
 		</Dialog.Header>
 
-		<form onsubmit={handleSubmit} class="mt-2 flex min-h-0 flex-1 flex-col space-y-3">
+		<form onsubmit={handleSubmit} class="flex flex-col gap-4">
 			{#if mode === 'url'}
 				<div class="space-y-1.5">
 					<Input
@@ -204,13 +214,20 @@
 					{/if}
 				{/if}
 			{:else}
-				<div class="flex min-h-0 flex-1 flex-col space-y-1.5 overflow-y-auto">
+				<div class="space-y-3">
 					<Input
 						type="text"
 						placeholder="Title (optional)"
 						bind:value={title}
 						disabled={submitting}
 						autofocus
+					/>
+					<Input
+						type="url"
+						placeholder="Original article URL (optional)"
+						bind:value={sourceUrl}
+						oninput={handleInput}
+						disabled={submitting}
 					/>
 					<Textarea
 						placeholder="Paste the article text here…"
@@ -219,7 +236,7 @@
 						disabled={submitting}
 						aria-invalid={!!validationError || undefined}
 						aria-describedby={validationError ? 'add-error' : undefined}
-						class="min-h-40 flex-1 resize-none"
+						class="max-h-[50vh] min-h-40 resize-none"
 					/>
 					{#if validationError}
 						<p id="add-error" class="text-destructive text-xs">{validationError}</p>

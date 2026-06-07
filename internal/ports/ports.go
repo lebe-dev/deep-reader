@@ -193,6 +193,14 @@ type Store interface {
 	// It always clears any captured raw LLM response (see SetFailed).
 	SetStatus(ctx context.Context, id, status, errMsg string) error
 
+	// SetProgressStage updates an article's human-readable progress label (the
+	// pipeline step it is currently in, e.g. "Translating (3/5)") and bumps
+	// UpdatedAt so the change rides the next delta sync. The enrichment worker
+	// calls it as it advances through stages so the UI can show progress during
+	// processing. Pass "" to clear it. Returns ErrNotFound if the article does
+	// not exist.
+	SetProgressStage(ctx context.Context, id, stage string) error
+
 	// SetFailed records a terminal stage failure: status (fetch_failed or
 	// enrich_failed), the error message, and rawLLMResponse — the verbatim model
 	// output captured when the enrichment response could not be decoded (empty
@@ -211,7 +219,10 @@ type Store interface {
 
 	// SaveEnrichment persists the enrichment blob, sets status=enriched, sets
 	// EnrichedAt=enrichedAt, and stamps UpdatedAt. Atomic with the status flip.
-	SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time) error
+	// llmModel records the model that produced the enrichment; when empty the
+	// stored llm_model is left untouched (so a resume/no-op save does not erase a
+	// previously recorded model).
+	SaveEnrichment(ctx context.Context, id string, e model.Enrichment, enrichedAt time.Time, llmModel string) error
 
 	// SaveSummary persists the article's summary text (the first step of the
 	// step-wise enrichment), stamping UpdatedAt without changing status. Returns
@@ -325,6 +336,10 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// Model is the effective model name the request was sent with. It lets the
+	// caller record which model produced a result without re-resolving the active
+	// profile. Empty on a failed call that never issued a request.
+	Model string `json:"model,omitempty"`
 }
 
 // Extractor is the article fetch+extract boundary. Concrete constructor:
@@ -373,7 +388,7 @@ type Ingestor interface {
 	// the text, persists the article in status=fetched, and notifies the worker
 	// to run enrichment. title is optional. On a dedup hit it returns the
 	// existing article. The returned article carries its current status.
-	AddText(ctx context.Context, title, text string) (*model.Article, error)
+	AddText(ctx context.Context, title, sourceURL, text string) (*model.Article, error)
 
 	// Retry resumes a failed article from the stage that failed (re-fetch or
 	// re-enrich) and notifies the worker. Returns ErrNotFound for an unknown id.

@@ -158,6 +158,15 @@ export interface ArticleMeta {
 	enrichment_coverage: number;
 	/** Short LLM-produced abstract; empty until the article has been summarized. */
 	summary?: string;
+	/** Model name that produced the enrichment (e.g. "gpt-4o-mini"). Empty until enriched. */
+	llm_model?: string;
+	/**
+	 * Human-readable label of the pipeline step the article is currently in
+	 * (e.g. "Fetching content", "Translating (3/5)"), set by the enrichment
+	 * worker. Empty for articles at rest (queued, enriched, or failed). Shown in
+	 * the UI during processing.
+	 */
+	progress_stage?: string;
 }
 
 /**
@@ -175,6 +184,10 @@ export interface ArticlePayload {
 	status: Status;
 	/** Fraction [0,1] of tokens covered by sentence translations. See ArticleMeta. */
 	enrichment_coverage: number;
+	/** Model name that produced the enrichment. See ArticleMeta.llm_model. */
+	llm_model?: string;
+	/** Current pipeline step during processing. See ArticleMeta.progress_stage. */
+	progress_stage?: string;
 }
 
 /** Convenience type: full server-side article (meta + payload + original). */

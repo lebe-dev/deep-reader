@@ -168,6 +168,10 @@ func (f *fakeStore) SetStatus(context.Context, string, string, string) error {
 	return nil
 }
 
+func (f *fakeStore) SetProgressStage(context.Context, string, string) error {
+	return nil
+}
+
 func (f *fakeStore) SetFailed(context.Context, string, string, string, string) error {
 	return nil
 }
@@ -179,7 +183,7 @@ func (f *fakeStore) GetArticleRaw(context.Context, string) (*model.ArticleRaw, e
 	return f.rawResult, nil
 }
 
-func (f *fakeStore) SaveEnrichment(context.Context, string, model.Enrichment, time.Time) error {
+func (f *fakeStore) SaveEnrichment(context.Context, string, model.Enrichment, time.Time, string) error {
 	return nil
 }
 func (f *fakeStore) SaveEnrichmentProgress(context.Context, string, model.Enrichment) error {
@@ -255,11 +259,11 @@ func (f *fakeStore) DeleteSession(_ context.Context, tokenHash string) error {
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
 	add          func(string) (*model.Article, error)
-	addText      func(string, string) (*model.Article, error)
+	addText      func(string, string, string) (*model.Article, error)
 	retry        func(string) error
 	reEnrich     func(string, string) error
 	lastAddURL   string
-	lastAddText  [2]string
+	lastAddText  [3]string
 	lastReEnrich [2]string
 }
 
@@ -271,10 +275,10 @@ func (f *fakeIngestor) Add(_ context.Context, rawURL string) (*model.Article, er
 	return &model.Article{ID: "art-1", Status: model.StatusQueued}, nil
 }
 
-func (f *fakeIngestor) AddText(_ context.Context, title, text string) (*model.Article, error) {
-	f.lastAddText = [2]string{title, text}
+func (f *fakeIngestor) AddText(_ context.Context, title, sourceURL, text string) (*model.Article, error) {
+	f.lastAddText = [3]string{title, sourceURL, text}
 	if f.addText != nil {
-		return f.addText(title, text)
+		return f.addText(title, sourceURL, text)
 	}
 	return &model.Article{ID: "art-1", Status: model.StatusFetched}, nil
 }
