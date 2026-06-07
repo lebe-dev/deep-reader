@@ -1321,8 +1321,8 @@ func TestSanitizeEnrichmentEchoedTranslation(t *testing.T) {
 	in := model.Enrichment{
 		DifficultWords: []model.DifficultWord{
 			{TokenIndex: 0, Lemma: "semaphore", Translation: "Semaphore", CEFRLevel: model.CEFRB2}, // echo, but in glossary
-			{TokenIndex: 1, Lemma: "mutex", Translation: "mutex", CEFRLevel: model.CEFRB2},          // echo, not in glossary
-			{TokenIndex: 2, Lemma: "useful", Translation: "полезный", CEFRLevel: model.CEFRB2},      // valid
+			{TokenIndex: 1, Lemma: "mutex", Translation: "mutex", CEFRLevel: model.CEFRB2},         // echo, not in glossary
+			{TokenIndex: 2, Lemma: "useful", Translation: "полезный", CEFRLevel: model.CEFRB2},     // valid
 		},
 		Glossary: []model.GlossaryItem{{Term: "semaphore", Definition: "примитив синхронизации"}},
 	}

@@ -243,7 +243,13 @@ describe('resolveClickContent', () => {
 		const glossaryMap = buildDifficultWordMap({
 			...emptyEnrichment,
 			difficult_words: [
-				{ token_index: 4, lemma: 'jump', translation: 'определение', cefr_level: 'B1', source: 'glossary' }
+				{
+					token_index: 4,
+					lemma: 'jump',
+					translation: 'определение',
+					cefr_level: 'B1',
+					source: 'glossary'
+				}
 			]
 		});
 		const content = resolveClickContent(4, tokens, text, glossaryMap, phraseMap);
