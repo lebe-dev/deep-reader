@@ -250,6 +250,12 @@ type Enrichment struct {
 	Glossary       []GlossaryItem  `json:"glossary"`
 }
 
+// TranslationSourceGlossary marks a DifficultWord whose translation was recovered
+// from the article glossary because the model echoed the source word instead of
+// translating it. An empty Source means the translation came straight from the
+// model.
+const TranslationSourceGlossary = "glossary"
+
 // DifficultWord is a single token that is above the user's CEFR level, with its
 // contextual translation. TokenIndex references Article.Tokens.
 type DifficultWord struct {
@@ -257,6 +263,9 @@ type DifficultWord struct {
 	Lemma       string `json:"lemma"`
 	Translation string `json:"translation"`
 	CEFRLevel   string `json:"cefr_level"`
+	// Source records where Translation came from. Empty for a model-supplied
+	// translation; TranslationSourceGlossary when recovered from the glossary.
+	Source string `json:"source,omitempty"`
 }
 
 // Phrase is a contiguous token range [StartIndex, EndIndex] (inclusive) that

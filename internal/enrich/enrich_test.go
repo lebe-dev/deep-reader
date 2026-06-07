@@ -1313,6 +1313,34 @@ func TestSanitizeEnrichmentDropsInvalidKeepsValid(t *testing.T) {
 	}
 }
 
+// TestSanitizeEnrichmentEchoedTranslation verifies that a word whose translation
+// merely echoes the source is dropped, unless the glossary explains the term — in
+// which case it is recovered with the glossary definition and marked as such.
+func TestSanitizeEnrichmentEchoedTranslation(t *testing.T) {
+	tokens := tokensFromWords("semaphore", "mutex", "useful")
+	in := model.Enrichment{
+		DifficultWords: []model.DifficultWord{
+			{TokenIndex: 0, Lemma: "semaphore", Translation: "Semaphore", CEFRLevel: model.CEFRB2}, // echo, but in glossary
+			{TokenIndex: 1, Lemma: "mutex", Translation: "mutex", CEFRLevel: model.CEFRB2},          // echo, not in glossary
+			{TokenIndex: 2, Lemma: "useful", Translation: "полезный", CEFRLevel: model.CEFRB2},      // valid
+		},
+		Glossary: []model.GlossaryItem{{Term: "semaphore", Definition: "примитив синхронизации"}},
+	}
+
+	got := enrich.SanitizeEnrichment(in, tokens)
+
+	if len(got.DifficultWords) != 2 {
+		t.Fatalf("want 2 words (glossary-recovered + valid), got %+v", got.DifficultWords)
+	}
+	rec := got.DifficultWords[0]
+	if rec.TokenIndex != 0 || rec.Translation != "примитив синхронизации" || rec.Source != model.TranslationSourceGlossary {
+		t.Errorf("glossary recovery wrong: %+v", rec)
+	}
+	if got.DifficultWords[1].TokenIndex != 2 || got.DifficultWords[1].Source != "" {
+		t.Errorf("valid word should pass through unmarked: %+v", got.DifficultWords[1])
+	}
+}
+
 // TestSanitizeEnrichmentDoesNotMutateInput verifies sanitize returns fresh
 // slices and leaves the caller's enrichment untouched.
 func TestSanitizeEnrichmentDoesNotMutateInput(t *testing.T) {

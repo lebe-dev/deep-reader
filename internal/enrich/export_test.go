@@ -2,6 +2,7 @@
 package enrich
 
 import (
+	"log/slog"
 	"time"
 
 	"deep-reader/internal/model"
@@ -45,7 +46,7 @@ func ExpandSpansToSentences(text string, tokens []model.Token, spans []model.Spa
 
 // SanitizeEnrichment exposes the unexported sanitizeEnrichment for unit tests.
 func SanitizeEnrichment(e model.Enrichment, tokens []model.Token) model.Enrichment {
-	return sanitizeEnrichment(e, tokens)
+	return sanitizeEnrichment(e, tokens, slog.Default())
 }
 
 // DetectBotWall exposes the unexported detectBotWall for unit tests.

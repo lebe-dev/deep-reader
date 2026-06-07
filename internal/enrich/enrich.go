@@ -303,7 +303,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		// Drop individually-invalid additions instead of failing the whole pass
 		// (mirrors the per-chunk path): a malformed entry costs only itself, and
 		// any still-uncovered span surfaces again on the next top-up.
-		clean := sanitizeEnrichment(*addition, tokens)
+		clean := sanitizeEnrichment(*addition, tokens, log)
 		if dropped := droppedCount(*addition, clean); dropped > 0 {
 			log.Warn("enrich: topup dropped invalid annotations", "dropped", dropped)
 		}
@@ -735,7 +735,7 @@ func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Artic
 		// Drop any individually-invalid annotation instead of failing the whole
 		// chunk: a single empty translation or drifted phrase costs only that one
 		// entry, and whatever stays uncovered is picked up by a later top-up pass.
-		clean := sanitizeEnrichment(*addition, a.Tokens)
+		clean := sanitizeEnrichment(*addition, a.Tokens, log)
 		if dropped := droppedCount(*addition, clean); dropped > 0 {
 			log.Warn("enrich: chunk dropped invalid annotations", "chunk", idx+1, "of", total, "dropped", dropped)
 		}
@@ -1012,7 +1012,7 @@ func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
 // The accept/reject predicates mirror validateEnrichment exactly; only the
 // action differs (skip the entry vs. return an error). Glossary items are not
 // validated, so they pass through unchanged. The input is never mutated.
-func sanitizeEnrichment(e model.Enrichment, tokens []model.Token) model.Enrichment {
+func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, log *slog.Logger) model.Enrichment {
 	tokenCount := len(tokens)
 
 	var words []model.DifficultWord
@@ -1022,6 +1022,20 @@ func sanitizeEnrichment(e model.Enrichment, tokens []model.Token) model.Enrichme
 		}
 		if strings.TrimSpace(dw.Translation) == "" {
 			continue
+		}
+		// The model sometimes echoes the source word back instead of translating
+		// it. Such a "translation" is useless: recover from the glossary if it
+		// explains this term, otherwise drop the entry rather than persist noise.
+		source := tokens[dw.TokenIndex].Text
+		if translationEchoesSource(source, dw.Translation) {
+			def := glossaryDefinitionFor(source, dw.Lemma, e.Glossary)
+			if def == "" {
+				log.Warn("enrich: dropped word translation identical to source", "word", source, "lemma", dw.Lemma)
+				continue
+			}
+			log.Warn("enrich: word translation identical to source, recovered from glossary", "word", source, "lemma", dw.Lemma)
+			dw.Translation = def
+			dw.Source = model.TranslationSourceGlossary
 		}
 		words = append(words, dw)
 	}
@@ -1238,6 +1252,33 @@ func normalizePhraseText(s string) string {
 		pendingSpace = true
 	}
 	return b.String()
+}
+
+// translationEchoesSource reports whether translation is just the source text
+// echoed back (case- and punctuation-insensitively) rather than an actual
+// translation. An empty normalized translation is not treated as an echo — that
+// case is handled by the empty-translation check.
+func translationEchoesSource(source, translation string) bool {
+	t := normalizePhraseText(translation)
+	return t != "" && t == normalizePhraseText(source)
+}
+
+// glossaryDefinitionFor returns the glossary definition for a word, matching a
+// glossary term (case- and punctuation-insensitively) against the word's surface
+// form or its lemma. Returns "" when no glossary entry matches.
+func glossaryDefinitionFor(word, lemma string, glossary []model.GlossaryItem) string {
+	wn := normalizePhraseText(word)
+	ln := normalizePhraseText(lemma)
+	for _, g := range glossary {
+		tn := normalizePhraseText(g.Term)
+		if tn == "" {
+			continue
+		}
+		if tn == wn || (ln != "" && tn == ln) {
+			return strings.TrimSpace(g.Definition)
+		}
+	}
+	return ""
 }
 
 // backoffDuration returns the capped exponential backoff for the given attempt
