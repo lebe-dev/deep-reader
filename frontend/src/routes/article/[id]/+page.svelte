@@ -69,6 +69,7 @@
 	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
 	import CircleIcon from '@lucide/svelte/icons/circle';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import BotIcon from '@lucide/svelte/icons/bot';
 
 	// ---------------------------------------------------------------------------
 	// Route param
@@ -580,7 +581,10 @@
 			{/if}
 			{#if llmModel}
 				<span aria-hidden="true">·</span>
-				<span class="font-mono text-xs" title="Model used for translation">{llmModel}</span>
+				<span class="inline-flex items-center gap-1" title="Process with LLM">
+					<BotIcon class="size-3.5" />
+					<span class="font-mono text-xs">{llmModel}</span>
+				</span>
 			{/if}
 			<DropdownMenu.Root>
 				<DropdownMenu.Trigger

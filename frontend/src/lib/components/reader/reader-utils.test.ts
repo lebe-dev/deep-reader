@@ -234,8 +234,20 @@ describe('resolveClickContent', () => {
 			original: 'jumps',
 			translation: 'прыгать',
 			lemma: 'jump',
-			cefrLevel: 'B1'
+			cefrLevel: 'B1',
+			fromGlossary: false
 		});
+	});
+
+	it('flags a word whose translation was recovered from the glossary', () => {
+		const glossaryMap = buildDifficultWordMap({
+			...emptyEnrichment,
+			difficult_words: [
+				{ token_index: 4, lemma: 'jump', translation: 'определение', cefr_level: 'B1', source: 'glossary' }
+			]
+		});
+		const content = resolveClickContent(4, tokens, text, glossaryMap, phraseMap);
+		expect(content).toMatchObject({ kind: 'word', fromGlossary: true });
 	});
 
 	it('returns null for a plain token with no enrichment', () => {

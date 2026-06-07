@@ -270,6 +270,8 @@ export interface WordPopoverContent {
 	translation: string;
 	lemma: string;
 	cefrLevel: string;
+	/** True when the translation was recovered from the glossary. */
+	fromGlossary: boolean;
 }
 
 export interface PhrasePopoverContent {
@@ -334,7 +336,8 @@ export function resolveClickContent(
 			original: token?.text ?? '',
 			translation: dw.translation,
 			lemma: dw.lemma,
-			cefrLevel: dw.cefr_level
+			cefrLevel: dw.cefr_level,
+			fromGlossary: dw.source === 'glossary'
 		};
 	}
 

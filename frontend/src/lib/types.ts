@@ -86,6 +86,8 @@ export interface DifficultWord {
 	lemma: string;
 	translation: string;
 	cefr_level: CefrLevel;
+	/** Origin of the translation; 'glossary' when recovered from the glossary. Absent for model translations. */
+	source?: string;
 }
 
 /** An idiom / phrasal verb / domain term spanning a token range. */

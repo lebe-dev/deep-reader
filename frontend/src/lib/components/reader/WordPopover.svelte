@@ -138,6 +138,13 @@
 					<p class="text-muted-foreground text-xs italic">{content.lemma}</p>
 				{/if}
 				<p class="leading-relaxed">{content.translation}</p>
+				{#if content.fromGlossary}
+					<span
+						class="self-start rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+					>
+						glossary
+					</span>
+				{/if}
 			</div>
 		{/if}
 	</div>
