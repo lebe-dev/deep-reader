@@ -1,8 +1,11 @@
 <!-- LLM settings card.
-     Manages: LLM model override and the per-stage system-prompt templates
+     Manages: chunk size and the per-stage system-prompt templates
      (normalization, summary, enrichment). All sync to the server via enqueueSettings
      (outbox → PATCH /api/settings). An empty value falls back to the server
-     default (.env LLM_MODEL / built-in prompt templates).
+     default (built-in prompt templates).
+
+     The model is NOT configured here — it comes from the active LLM provider
+     profile (see LlmProvidersSettings / Settings > "LLM providers").
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -59,16 +62,6 @@
 		}
 	}
 
-	function handleModelChange(raw: string) {
-		if (!settings) return;
-		const next = raw.trim();
-		// The backend rejects an empty llm_model; only patch when non-empty and
-		// actually changed. To revert to the server default the user clears the
-		// field — we simply don't send anything in that case.
-		if (next === '' || next === settings.llm_model) return;
-		patchField({ llm_model: next });
-	}
-
 	function handleChunkTokensChange(raw: string) {
 		if (!settings) return;
 		const trimmed = raw.trim();
@@ -92,7 +85,8 @@
 	<Card.Header>
 		<Card.Title>LLM</Card.Title>
 		<Card.Description>
-			Configure the model and the per-stage prompts used to annotate articles.
+			Configure the chunk size and the per-stage prompts used to annotate articles. The model comes
+			from the active provider profile above.
 		</Card.Description>
 	</Card.Header>
 
@@ -107,23 +101,6 @@
 		{:else if !settings}
 			<p class="text-muted-foreground text-sm">Loading settings…</p>
 		{:else}
-			<!-- LLM model override -->
-			<div class="grid gap-1.5">
-				<Label for="llm-model-input">LLM model</Label>
-				<Input
-					id="llm-model-input"
-					type="text"
-					placeholder={serverInfo?.llm_model || 'gpt-4o-mini'}
-					value={settings.llm_model}
-					onchange={(e) => handleModelChange(e.currentTarget.value)}
-				/>
-				<p class="text-muted-foreground text-xs">
-					Model name as expected by your provider (OpenAI, OpenRouter, Ollama…). Clear the field to
-					keep the server default
-					{#if serverInfo?.llm_model}(<code>{serverInfo.llm_model}</code>){/if}.
-				</p>
-			</div>
-
 			<!-- Chunk size (step-wise enrichment window) -->
 			<div class="grid gap-1.5">
 				<Label for="chunk-tokens-input">Chunk size (tokens)</Label>
