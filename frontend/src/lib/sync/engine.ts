@@ -266,6 +266,30 @@ export async function enqueueProgress(progress: Progress): Promise<void> {
 	if (isOnline()) sync().catch(console.warn);
 }
 
+/**
+ * Mark an article read/unread and reset the reading position to the start.
+ * Marking read clears the position so a re-opened article starts fresh; the
+ * library hides the progress bar for read articles regardless.
+ */
+export async function enqueueSetRead(articleId: string, isRead: boolean): Promise<void> {
+	await enqueueProgress({
+		article_id: articleId,
+		position: 0,
+		is_read: isRead,
+		updated_at: new Date().toISOString()
+	});
+}
+
+/** Reset reading progress for an article (position to start, clears read flag). */
+export async function enqueueResetProgress(articleId: string): Promise<void> {
+	await enqueueProgress({
+		article_id: articleId,
+		position: 0,
+		is_read: false,
+		updated_at: new Date().toISOString()
+	});
+}
+
 /** Enqueue a settings patch and optimistically merge into sync_state.settings. */
 export async function enqueueSettings(patch: SettingsPatch): Promise<void> {
 	// Optimistic merge.

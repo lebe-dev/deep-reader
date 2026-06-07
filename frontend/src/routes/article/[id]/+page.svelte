@@ -13,7 +13,12 @@
 	import { liveQuery } from 'dexie';
 	import { db, SYNC_STATE_ID } from '$lib/db';
 	import { getArticle, ApiError } from '$lib/api';
-	import { enqueueProgress, enqueueReEnrich } from '$lib/sync/engine';
+	import {
+		enqueueProgress,
+		enqueueReEnrich,
+		enqueueSetRead,
+		enqueueResetProgress
+	} from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
 	import type {
 		ArticleMeta,
@@ -61,6 +66,9 @@
 	import LanguagesIcon from '@lucide/svelte/icons/languages';
 	import ListPlusIcon from '@lucide/svelte/icons/list-plus';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
+	import CircleIcon from '@lucide/svelte/icons/circle';
+	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 
 	// ---------------------------------------------------------------------------
 	// Route param
@@ -295,6 +303,29 @@
 
 	function handleProgress(tokenIndex: number) {
 		debouncedPersistProgress(tokenIndex);
+	}
+
+	async function handleToggleRead() {
+		if (!articleId) return;
+		const next = !progress?.is_read;
+		try {
+			await enqueueSetRead(articleId, next);
+			progress = await db.progress.get(articleId);
+			toast(next ? 'Marked as read.' : 'Marked as unread.');
+		} catch {
+			toast.error('Failed to update read status.');
+		}
+	}
+
+	async function handleResetProgress() {
+		if (!articleId) return;
+		try {
+			await enqueueResetProgress(articleId);
+			progress = await db.progress.get(articleId);
+			toast('Reading progress reset.');
+		} catch {
+			toast.error('Failed to reset progress.');
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -554,8 +585,8 @@
 			<DropdownMenu.Root>
 				<DropdownMenu.Trigger
 					class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })}
-					title="Improve translation"
-					aria-label="Improve translation"
+					title="Article options"
+					aria-label="Article options"
 				>
 					<EllipsisIcon class="size-4" />
 				</DropdownMenu.Trigger>
@@ -570,6 +601,23 @@
 						<ListPlusIcon class="size-4" />
 						Fill in missing parts
 					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Label>Reading</DropdownMenu.Label>
+					<DropdownMenu.Item onSelect={handleToggleRead}>
+						{#if progress?.is_read}
+							<CircleIcon class="size-4" />
+							Mark as unread
+						{:else}
+							<CheckCheckIcon class="size-4" />
+							Mark as read
+						{/if}
+					</DropdownMenu.Item>
+					{#if (progress?.position ?? 0) > 0}
+						<DropdownMenu.Item onSelect={handleResetProgress}>
+							<RotateCcwIcon class="size-4" />
+							Reset reading progress
+						</DropdownMenu.Item>
+					{/if}
 				</DropdownMenu.Content>
 			</DropdownMenu.Root>
 			{#if progress?.is_read}
@@ -584,7 +632,7 @@
 			>
 			= difficult word ·
 			<span class="underline decoration-solid decoration-1 underline-offset-3">Solid underline</span
-			> = phrase · Tap a word to translate · Long-press for sentence
+			> = phrase · Tap a word to translate · Long-press or right-click for sentence
 		</p>
 	</div>
 

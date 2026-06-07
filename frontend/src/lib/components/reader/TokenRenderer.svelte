@@ -8,6 +8,8 @@
 	//   Long-press (touch, ≥500ms) → in-place sentence action menu (the only path
 	//                      to a sentence translation; plain clicks/selection do not
 	//                      open the sentence sheet).
+	//   Right-click (desktop) → the same sentence action menu, the pointer-based
+	//                      counterpart of the touch long-press.
 	//
 	// Reading position: IntersectionObserver tracks furthest-seen word token;
 	// calls onProgress(tokenIndex) when it advances.
@@ -278,6 +280,20 @@
 	}
 
 	// ---------------------------------------------------------------------------
+	// Right-click (desktop) — pointer counterpart of the touch long-press.
+	// ---------------------------------------------------------------------------
+
+	function handleContextMenu(event: MouseEvent, tokenIndex: number) {
+		// Suppress the native context menu and open our sentence action menu,
+		// anchored to the right-clicked token (mirrors long-press positioning).
+		event.preventDefault();
+		const anchor = event.currentTarget as HTMLElement;
+		clearHighlight();
+		onWordClick(null, null);
+		showSentenceMenuForToken(tokenIndex, anchor);
+	}
+
+	// ---------------------------------------------------------------------------
 	// Per-token CSS classes
 	// ---------------------------------------------------------------------------
 
@@ -307,6 +323,7 @@
 				data-index={segment.index}
 				class={tokenClass(segment.index)}
 				onclick={(e) => handleWordClick(e, segment.index)}
+				oncontextmenu={(e) => handleContextMenu(e, segment.index)}
 				ontouchstart={(e) => handleTouchStart(e, segment.index)}
 				ontouchend={(e) => handleTouchEnd(e, segment.index)}
 				ontouchmove={handleTouchMove}>{segment.text}</span

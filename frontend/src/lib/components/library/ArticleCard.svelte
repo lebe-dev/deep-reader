@@ -6,7 +6,7 @@
 	import type { ArticleMeta } from '$lib/types';
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
-	import { enqueueRetry, enqueuePin } from '$lib/sync/engine';
+	import { enqueueRetry, enqueuePin, enqueueSetRead, enqueueResetProgress } from '$lib/sync/engine';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import FileTextIcon from '@lucide/svelte/icons/file-text';
@@ -16,6 +16,9 @@
 	import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
+	import CircleIcon from '@lucide/svelte/icons/circle';
+	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 
 	interface Props {
 		article: ArticleMeta;
@@ -124,6 +127,25 @@
 		}
 	}
 
+	async function handleToggleRead() {
+		const next = !isRead;
+		try {
+			await enqueueSetRead(article.id, next);
+			toast(next ? 'Marked as read.' : 'Marked as unread.');
+		} catch {
+			toast.error('Failed to update read status.');
+		}
+	}
+
+	async function handleResetProgress() {
+		try {
+			await enqueueResetProgress(article.id);
+			toast('Reading progress reset.');
+		} catch {
+			toast.error('Failed to reset progress.');
+		}
+	}
+
 	// Show the reading-progress bar only for partially-read, not-yet-finished
 	// articles (an unread article the user has started). Read articles show none.
 	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
@@ -180,6 +202,23 @@
 						<PinIcon class="size-4" fill={article.pinned ? 'currentColor' : 'none'} />
 						{article.pinned ? 'Unpin' : 'Pin to top'}
 					</DropdownMenu.Item>
+					{#if article.status === 'enriched'}
+						<DropdownMenu.Item onclick={handleToggleRead} class="gap-2">
+							{#if isRead}
+								<CircleIcon class="size-4" />
+								Mark as unread
+							{:else}
+								<CheckCheckIcon class="size-4" />
+								Mark as read
+							{/if}
+						</DropdownMenu.Item>
+						{#if progressPercent > 0}
+							<DropdownMenu.Item onclick={handleResetProgress} class="gap-2">
+								<RotateCcwIcon class="size-4" />
+								Reset reading progress
+							</DropdownMenu.Item>
+						{/if}
+					{/if}
 					{#if article.summary}
 						<DropdownMenu.Item onclick={() => (summaryOpen = true)} class="gap-2">
 							<AlignLeftIcon class="size-4" />
@@ -197,8 +236,8 @@
 				</DropdownMenu.Content>
 			</DropdownMenu.Root>
 
-			<!-- Pin indicator pinned to the edge. Shown for pinned articles always,
-			     and on hover for unpinned ones (a desktop quick-pin shortcut). -->
+			<!-- Pin indicator pinned to the edge, shown only for pinned articles (a
+			     quick-unpin shortcut). Pinning is done via the actions menu. -->
 			{#if article.pinned}
 				<Button
 					size="icon-sm"
@@ -209,17 +248,6 @@
 					class="text-primary"
 				>
 					<PinIcon class="size-3.5" fill="currentColor" />
-				</Button>
-			{:else}
-				<Button
-					size="icon-sm"
-					variant="ghost"
-					onclick={handleTogglePin}
-					aria-label="Pin article"
-					title="Pin to top"
-					class="text-muted-foreground hidden opacity-0 transition-opacity group-hover:opacity-100 sm:inline-flex"
-				>
-					<PinIcon class="size-3.5" fill="none" />
 				</Button>
 			{/if}
 		</div>

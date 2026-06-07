@@ -1,7 +1,8 @@
 <script lang="ts">
 	// SentenceMenu — small in-place action menu shown on a long-press over a
-	// sentence (touch). Anchored just below the pressed token, mirroring
-	// WordPopover's positioning. Offers two actions:
+	// sentence (touch) or a right-click (desktop). Anchored just below the
+	// pressed/clicked token, mirroring WordPopover's positioning. Offers two
+	// actions:
 	//   Copy sentence  → copies the sentence text to the clipboard.
 	//   Translate      → opens the sentence sheet (only when a translation exists).
 	//
