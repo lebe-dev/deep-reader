@@ -14,6 +14,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Badge } from '$lib/components/ui/badge';
+	import { Switch } from '$lib/components/ui/switch';
 	import {
 		listLLMProviders,
 		createLLMProvider,
@@ -36,11 +37,18 @@
 	// Edit/create dialog
 	let formOpen = $state(false);
 	let editing = $state<LLMProviderView | undefined>(undefined);
-	let form = $state<{ name: string; base_url: string; model: string; api_key: string }>({
+	let form = $state<{
+		name: string;
+		base_url: string;
+		model: string;
+		api_key: string;
+		force_json_object: boolean;
+	}>({
 		name: '',
 		base_url: '',
 		model: '',
-		api_key: ''
+		api_key: '',
+		force_json_object: false
 	});
 	let saving = $state(false);
 
@@ -70,14 +78,20 @@
 
 	function openCreate() {
 		editing = undefined;
-		form = { name: '', base_url: '', model: '', api_key: '' };
+		form = { name: '', base_url: '', model: '', api_key: '', force_json_object: false };
 		formOpen = true;
 	}
 
 	function openEdit(p: LLMProviderView) {
 		editing = p;
 		// api_key starts blank: blank = keep the stored secret.
-		form = { name: p.name, base_url: p.base_url, model: p.model, api_key: '' };
+		form = {
+			name: p.name,
+			base_url: p.base_url,
+			model: p.model,
+			api_key: '',
+			force_json_object: p.force_json_object
+		};
 		formOpen = true;
 	}
 
@@ -94,7 +108,12 @@
 			return;
 		}
 
-		const input: LLMProviderInput = { name, base_url, model };
+		const input: LLMProviderInput = {
+			name,
+			base_url,
+			model,
+			force_json_object: form.force_json_object
+		};
 		const key = form.api_key.trim();
 		if (editing) {
 			// Blank key on edit = keep stored secret (omit the field).
@@ -204,6 +223,9 @@
 										{:else}
 											· <span class="italic">no key</span>
 										{/if}
+										{#if p.force_json_object}
+											· <code>json_object</code>
+										{/if}
 									</p>
 								</div>
 								<div class="flex shrink-0 flex-wrap items-center gap-1.5">
@@ -292,6 +314,17 @@
 						Leave blank to keep the stored key. The current key is never shown.
 					</p>
 				{/if}
+			</div>
+			<div class="flex items-start justify-between gap-3 rounded-lg border p-3">
+				<div class="grid gap-0.5">
+					<Label for="prov-force-json">Force <code>json_object</code></Label>
+					<p class="text-muted-foreground text-xs">
+						Skip <code>json_schema</code> and request <code>json_object</code> directly. Enable for providers
+						that reject structured outputs (e.g. an OpenRouter model whose data policy leaves no matching
+						endpoint).
+					</p>
+				</div>
+				<Switch id="prov-force-json" bind:checked={form.force_json_object} />
 			</div>
 		</div>
 

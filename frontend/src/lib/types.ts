@@ -262,6 +262,8 @@ export interface LLMProviderView {
 	base_url: string;
 	model: string;
 	is_active: boolean;
+	/** When set, every LLM call uses json_object directly, skipping json_schema. */
+	force_json_object: boolean;
 	has_key: boolean;
 	key_preview: string;
 	created_at: string;
@@ -276,6 +278,7 @@ export interface LLMProviderInput {
 	name: string;
 	base_url: string;
 	model: string;
+	force_json_object: boolean;
 	api_key?: string | null;
 }
 

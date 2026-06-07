@@ -35,7 +35,7 @@ func (s *Server) createLLMProvider(c fiber.Ctx) error {
 		return sendError(c, fiber.StatusBadRequest, err.Error())
 	}
 
-	p := model.LLMProvider{Name: in.Name, BaseURL: in.BaseURL, Model: in.Model}
+	p := model.LLMProvider{Name: in.Name, BaseURL: in.BaseURL, Model: in.Model, ForceJSONObject: in.ForceJSONObject}
 	if in.APIKey != nil {
 		p.APIKey = *in.APIKey
 	}

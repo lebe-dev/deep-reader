@@ -12,7 +12,7 @@ import (
 	"deep-reader/internal/ports"
 )
 
-const llmProviderColumns = "id, name, base_url, api_key, model, is_active, created_at, updated_at"
+const llmProviderColumns = "id, name, base_url, api_key, model, is_active, force_json_object, created_at, updated_at"
 
 // ListLLMProviders returns all configured profiles ordered by creation time.
 func (s *SQLite) ListLLMProviders(ctx context.Context) ([]model.LLMProvider, error) {
@@ -67,9 +67,9 @@ func (s *SQLite) CreateLLMProvider(ctx context.Context, p model.LLMProvider) (mo
 	}
 	p.IsActive = count == 0
 
-	const q = `INSERT INTO llm_providers (` + llmProviderColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	const q = `INSERT INTO llm_providers (` + llmProviderColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := s.write.ExecContext(ctx, q,
-		p.ID, p.Name, p.BaseURL, p.APIKey, p.Model, boolToInt(p.IsActive), fmtTime(p.CreatedAt), fmtTime(p.UpdatedAt),
+		p.ID, p.Name, p.BaseURL, p.APIKey, p.Model, boolToInt(p.IsActive), boolToInt(p.ForceJSONObject), fmtTime(p.CreatedAt), fmtTime(p.UpdatedAt),
 	); err != nil {
 		return model.LLMProvider{}, fmt.Errorf("store: CreateLLMProvider insert: %w", err)
 	}
@@ -95,14 +95,15 @@ func (s *SQLite) UpdateLLMProvider(ctx context.Context, id string, in model.LLMP
 	cur.Name = in.Name
 	cur.BaseURL = in.BaseURL
 	cur.Model = in.Model
+	cur.ForceJSONObject = in.ForceJSONObject
 	if in.APIKey != nil {
 		cur.APIKey = *in.APIKey
 	}
 	cur.UpdatedAt = now()
 
-	const updQ = `UPDATE llm_providers SET name = ?, base_url = ?, api_key = ?, model = ?, updated_at = ? WHERE id = ?`
+	const updQ = `UPDATE llm_providers SET name = ?, base_url = ?, api_key = ?, model = ?, force_json_object = ?, updated_at = ? WHERE id = ?`
 	if _, err := s.write.ExecContext(ctx, updQ,
-		cur.Name, cur.BaseURL, cur.APIKey, cur.Model, fmtTime(cur.UpdatedAt), id,
+		cur.Name, cur.BaseURL, cur.APIKey, cur.Model, boolToInt(cur.ForceJSONObject), fmtTime(cur.UpdatedAt), id,
 	); err != nil {
 		return model.LLMProvider{}, fmt.Errorf("store: UpdateLLMProvider write: %w", err)
 	}
@@ -211,12 +212,13 @@ type rowScanner interface {
 
 func scanLLMProvider(row rowScanner) (model.LLMProvider, error) {
 	var p model.LLMProvider
-	var active int
+	var active, forceJSONObject int
 	var createdAt, updatedAt string
-	if err := row.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.Model, &active, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.Model, &active, &forceJSONObject, &createdAt, &updatedAt); err != nil {
 		return model.LLMProvider{}, err
 	}
 	p.IsActive = active != 0
+	p.ForceJSONObject = forceJSONObject != 0
 	var err error
 	if p.CreatedAt, err = parseTime(createdAt); err != nil {
 		return model.LLMProvider{}, err

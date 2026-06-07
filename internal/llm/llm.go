@@ -66,6 +66,10 @@ type conn struct {
 	baseURL string
 	apiKey  string
 	model   string
+	// forceJSONObject, set from the active profile, makes JSON calls request the
+	// json_object response format directly, skipping json_schema and its one-shot
+	// fallback (see schemaResponseFormat / complete).
+	forceJSONObject bool
 }
 
 // resolveConn returns the connection for a single call together with a flag
@@ -86,7 +90,7 @@ func (c *Client) resolveConn(ctx context.Context) (conn, bool) {
 		if err != nil || p.BaseURL == "" {
 			return conn{}, false
 		}
-		return conn{baseURL: strings.TrimRight(p.BaseURL, "/"), apiKey: p.APIKey, model: p.Model}, true
+		return conn{baseURL: strings.TrimRight(p.BaseURL, "/"), apiKey: p.APIKey, model: p.Model, forceJSONObject: p.ForceJSONObject}, true
 	}
 	return conn{baseURL: c.baseURL, apiKey: c.apiKey, model: c.model}, false
 }
@@ -128,6 +132,25 @@ type jsonSchema struct {
 	Name   string          `json:"name"`
 	Schema json.RawMessage `json:"schema"`
 	Strict bool            `json:"strict"`
+}
+
+// schemaResponseFormat returns the response_format for a structured (JSON) call.
+// It prefers json_schema (strict structured outputs) unless forceJSONObject is
+// set on the active profile, in which case it asks for json_object directly —
+// skipping the json_schema attempt and its one-shot fallback for providers that
+// always reject the schema variant (see isSchemaUnsupported).
+func schemaResponseFormat(name, schema string, forceJSONObject bool) *responseFormat {
+	if forceJSONObject {
+		return &responseFormat{Type: "json_object"}
+	}
+	return &responseFormat{
+		Type: "json_schema",
+		JSONSchema: &jsonSchema{
+			Name:   name,
+			Schema: json.RawMessage(schema),
+			Strict: true,
+		},
+	}
 }
 
 type chatRequest struct {
@@ -499,20 +522,15 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: &responseFormat{
-			Type: "json_schema",
-			JSONSchema: &jsonSchema{
-				Name:   "summary",
-				Schema: json.RawMessage(summarySchema),
-				Strict: true,
-			},
-		},
-		Temperature: 0.2,
+		ResponseFormat: schemaResponseFormat("summary", summarySchema, cn.forceJSONObject),
+		Temperature:    0.2,
 	}
 
 	content, usage, err := c.postChat(ctx, cn, reqBody)
 	if err != nil {
-		if isSchemaUnsupported(err) {
+		// When the profile already forces json_object there is no json_schema to
+		// fall back from — surface the error directly.
+		if !cn.forceJSONObject && isSchemaUnsupported(err) {
 			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
 			content, usage, err = c.postChat(ctx, cn, reqBody)
 		}
@@ -571,15 +589,8 @@ func (c *Client) complete(ctx context.Context, cn conn, articleID, modelID, syst
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		ResponseFormat: &responseFormat{
-			Type: "json_schema",
-			JSONSchema: &jsonSchema{
-				Name:   "enrichment",
-				Schema: json.RawMessage(enrichmentSchema),
-				Strict: true,
-			},
-		},
-		Temperature: 0.2,
+		ResponseFormat: schemaResponseFormat("enrichment", enrichmentSchema, cn.forceJSONObject),
+		Temperature:    0.2,
 	}
 
 	slog.Debug("llm: enrich request",
@@ -593,8 +604,9 @@ func (c *Client) complete(ctx context.Context, cn conn, articleID, modelID, syst
 
 	enrichment, usage, err := c.do(ctx, cn, reqBody)
 	if err != nil {
-		// If the provider rejected json_schema, retry once with json_object.
-		if isSchemaUnsupported(err) {
+		// If the provider rejected json_schema, retry once with json_object. When
+		// the profile already forces json_object there is nothing to fall back from.
+		if !cn.forceJSONObject && isSchemaUnsupported(err) {
 			slog.Warn("llm: provider rejected json_schema, falling back to json_object",
 				"article_id", articleID,
 				"model", reqBody.Model,

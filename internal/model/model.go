@@ -376,43 +376,50 @@ type SettingsPatch struct {
 // persisted as-is but never serialized to the client — the API returns
 // LLMProviderView with a masked preview instead. Exactly one profile is active.
 type LLMProvider struct {
-	ID        string
-	Name      string
-	BaseURL   string
-	APIKey    string
-	Model     string
-	IsActive  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID       string
+	Name     string
+	BaseURL  string
+	APIKey   string
+	Model    string
+	IsActive bool
+	// ForceJSONObject makes every LLM call for this profile use the json_object
+	// response format directly, skipping json_schema and its one-shot fallback.
+	// Enable it for providers that always reject json_schema (e.g. an OpenRouter
+	// model whose data-policy/guardrail leaves no structured-outputs endpoint).
+	ForceJSONObject bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // LLMProviderView is the client-facing projection of an LLMProvider. It carries
 // a masked key preview and a HasKey flag instead of the raw secret, so the API
 // can list profiles without ever exposing the stored key.
 type LLMProviderView struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	BaseURL    string    `json:"base_url"`
-	Model      string    `json:"model"`
-	IsActive   bool      `json:"is_active"`
-	HasKey     bool      `json:"has_key"`
-	KeyPreview string    `json:"key_preview"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	BaseURL         string    `json:"base_url"`
+	Model           string    `json:"model"`
+	IsActive        bool      `json:"is_active"`
+	ForceJSONObject bool      `json:"force_json_object"`
+	HasKey          bool      `json:"has_key"`
+	KeyPreview      string    `json:"key_preview"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // View returns the masked, client-safe projection of the provider.
 func (p LLMProvider) View() LLMProviderView {
 	return LLMProviderView{
-		ID:         p.ID,
-		Name:       p.Name,
-		BaseURL:    p.BaseURL,
-		Model:      p.Model,
-		IsActive:   p.IsActive,
-		HasKey:     p.APIKey != "",
-		KeyPreview: MaskSecret(p.APIKey),
-		CreatedAt:  p.CreatedAt,
-		UpdatedAt:  p.UpdatedAt,
+		ID:              p.ID,
+		Name:            p.Name,
+		BaseURL:         p.BaseURL,
+		Model:           p.Model,
+		IsActive:        p.IsActive,
+		ForceJSONObject: p.ForceJSONObject,
+		HasKey:          p.APIKey != "",
+		KeyPreview:      MaskSecret(p.APIKey),
+		CreatedAt:       p.CreatedAt,
+		UpdatedAt:       p.UpdatedAt,
 	}
 }
 
@@ -421,10 +428,11 @@ func (p LLMProvider) View() LLMProviderView {
 // value replaces it (an empty string clears it). On create a nil APIKey means
 // no key (valid for keyless local providers such as Ollama).
 type LLMProviderInput struct {
-	Name    string  `json:"name"`
-	BaseURL string  `json:"base_url"`
-	Model   string  `json:"model"`
-	APIKey  *string `json:"api_key,omitempty"`
+	Name            string  `json:"name"`
+	BaseURL         string  `json:"base_url"`
+	Model           string  `json:"model"`
+	ForceJSONObject bool    `json:"force_json_object"`
+	APIKey          *string `json:"api_key,omitempty"`
 }
 
 // Validate checks the non-secret fields required for a usable connection. It is

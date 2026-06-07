@@ -141,6 +141,36 @@ func TestLLMProviders_UpdateKeepsKeyWhenNil(t *testing.T) {
 	}
 }
 
+func TestLLMProviders_ForceJSONObjectRoundTrip(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Defaults to false on create.
+	p, err := s.CreateLLMProvider(ctx, model.LLMProvider{Name: "A", BaseURL: "https://a", Model: "m"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if p.ForceJSONObject {
+		t.Fatalf("expected ForceJSONObject false by default, got true")
+	}
+
+	// Update toggles it on and it survives a re-read.
+	updated, err := s.UpdateLLMProvider(ctx, p.ID, model.LLMProviderInput{Name: "A", BaseURL: "https://a", Model: "m", ForceJSONObject: true})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !updated.ForceJSONObject {
+		t.Fatalf("expected ForceJSONObject true after update, got false")
+	}
+	got, err := s.GetActiveLLMProvider(ctx)
+	if err != nil {
+		t.Fatalf("GetActive: %v", err)
+	}
+	if !got.ForceJSONObject {
+		t.Fatalf("expected ForceJSONObject true after re-read, got false")
+	}
+}
+
 func TestLLMProviders_DeletePromotesActive(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

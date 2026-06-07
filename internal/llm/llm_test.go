@@ -734,6 +734,43 @@ func TestEnrich_FallbackOn404NoEndpoints(t *testing.T) {
 	}
 }
 
+// TestEnrich_ForceJSONObjectSkipsSchema asserts that when the active profile has
+// ForceJSONObject set, the client requests json_object directly on the first (and
+// only) call — never attempting json_schema. This is the sticky equivalent of the
+// automatic fallback, configured per profile so a provider that always rejects
+// json_schema is not probed and failed once on every call.
+func TestEnrich_ForceJSONObjectSkipsSchema(t *testing.T) {
+	callCount := 0
+	var seenType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body struct {
+			ResponseFormat struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		seenType = body.ResponseFormat.Type
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buildCannedResponse(t))
+	}))
+	defer srv.Close()
+
+	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, Model: "m", ForceJSONObject: true}}
+	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(resolver))
+	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 call (no json_schema probe), got %d", callCount)
+	}
+	if seenType != "json_object" {
+		t.Errorf("response_format.type = %q, want json_object", seenType)
+	}
+}
+
 // TestEnrich_UsageZeroWhenAbsent asserts that a response without a usage field
 // results in a zero-value ports.Usage (not an error).
 func TestEnrich_UsageZeroWhenAbsent(t *testing.T) {
