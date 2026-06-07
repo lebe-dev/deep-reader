@@ -81,25 +81,45 @@ describe('compareLibrary', () => {
 		const b = meta({ id: 'b' });
 		expect(compareLibrary(a, b, new Set())).toBe(0);
 	});
+
+	it('orders processing articles before pinned ones', () => {
+		const processing = meta({ id: 'a', status: 'enriching' });
+		const pinned = meta({ id: 'b', pinned: true });
+		expect(compareLibrary(processing, pinned, new Set())).toBeLessThan(0);
+		expect(compareLibrary(pinned, processing, new Set())).toBeGreaterThan(0);
+	});
+
+	it('treats all in-flight statuses as processing', () => {
+		const statuses = ['queued', 'fetching', 'fetched', 'enriching'] as const;
+		const enriched = meta({ id: 'z' });
+		for (const status of statuses) {
+			const a = meta({ id: 'a', status });
+			expect(compareLibrary(a, enriched, new Set())).toBeLessThan(0);
+		}
+	});
 });
 
 describe('sortLibrary', () => {
-	it('groups pinned first, then unread, preserving input order within groups', () => {
+	it('groups processing first, then pinned, then unread, then read', () => {
 		// Input is pre-sorted by created_at desc: newest first.
 		const input = [
 			meta({ id: 'newest-read' }),
 			meta({ id: 'newest-unread' }),
 			meta({ id: 'pinned-old', pinned: true }),
+			meta({ id: 'processing', status: 'enriching' }),
 			meta({ id: 'old-unread' })
 		];
 		const read = new Set(['newest-read']);
 
 		const ordered = sortLibrary(input, read).map((a) => a.id);
 
-		// Pinned first.
-		expect(ordered[0]).toBe('pinned-old');
-		// Then unread (in original order), then read last.
-		expect(ordered).toEqual(['pinned-old', 'newest-unread', 'old-unread', 'newest-read']);
+		expect(ordered).toEqual([
+			'processing',
+			'pinned-old',
+			'newest-unread',
+			'old-unread',
+			'newest-read'
+		]);
 	});
 
 	it('does not mutate the input array', () => {

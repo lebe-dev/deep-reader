@@ -158,8 +158,8 @@
 </div>
 
 <Dialog.Root {open} onOpenChange={handleOpenChange}>
-	<Dialog.Content class="max-w-md">
-		<Dialog.Header>
+	<Dialog.Content class="flex max-h-[90vh] max-w-md flex-col">
+		<Dialog.Header class="shrink-0">
 			<Dialog.Title>{mode === 'url' ? 'Add article' : 'Add text'}</Dialog.Title>
 			<Dialog.Description>
 				{#if mode === 'url'}
@@ -170,81 +170,85 @@
 			</Dialog.Description>
 		</Dialog.Header>
 
-		<form onsubmit={handleSubmit} class="flex flex-col gap-4">
-			{#if mode === 'url'}
-				<div class="space-y-1.5">
-					<Input
-						type="url"
-						placeholder="https://example.com/article"
-						bind:value={url}
-						oninput={handleInput}
-						disabled={submitting}
-						aria-invalid={!!validationError || undefined}
-						aria-describedby={validationError ? 'add-error' : undefined}
-						autofocus
-					/>
-					{#if validationError}
-						<p id="add-error" class="text-destructive text-xs">{validationError}</p>
-					{/if}
-				</div>
-
-				{#if budgetActive}
-					{#if budgetExhausted}
-						<div
-							class="bg-muted text-muted-foreground flex items-start gap-2 rounded-md p-2.5 text-xs"
-							role="status"
-						>
-							<TriangleAlertIcon class="text-amber-500 mt-0.5 size-3.5 shrink-0" />
-							<span>
-								markdown.new daily limit reached ({budget!.daily_limit} units). New articles will use
-								the built-in extractor until it resets (UTC midnight).
-							</span>
+		<form onsubmit={handleSubmit} class="flex min-h-0 flex-1 flex-col">
+			<div class="flex-1 overflow-y-auto px-1 py-1">
+				{#if mode === 'url'}
+					<div class="space-y-4">
+						<div class="space-y-1.5">
+							<Input
+								type="url"
+								placeholder="https://example.com/article"
+								bind:value={url}
+								oninput={handleInput}
+								disabled={submitting}
+								aria-invalid={!!validationError || undefined}
+								aria-describedby={validationError ? 'add-error' : undefined}
+								autofocus
+							/>
+							{#if validationError}
+								<p id="add-error" class="text-destructive text-xs">{validationError}</p>
+							{/if}
 						</div>
-					{:else}
-						<div class="text-muted-foreground flex items-center gap-1.5 text-xs">
-							<SparklesIcon class="size-3.5 shrink-0" />
-							<span>
-								~{articlesLeft}
-								{articlesLeft === 1 ? 'conversion' : 'conversions'} left today via markdown.new
-								<span class="text-muted-foreground/60"
-									>({budget!.units_remaining}/{budget!.daily_limit} units)</span
+
+						{#if budgetActive}
+							{#if budgetExhausted}
+								<div
+									class="bg-muted text-muted-foreground flex items-start gap-2 rounded-md p-2.5 text-xs"
+									role="status"
 								>
-							</span>
-						</div>
-					{/if}
+									<TriangleAlertIcon class="text-amber-500 mt-0.5 size-3.5 shrink-0" />
+									<span>
+										markdown.new daily limit reached ({budget!.daily_limit} units). New articles will
+										use the built-in extractor until it resets (UTC midnight).
+									</span>
+								</div>
+							{:else}
+								<div class="text-muted-foreground flex items-center gap-1.5 text-xs">
+									<SparklesIcon class="size-3.5 shrink-0" />
+									<span>
+										~{articlesLeft}
+										{articlesLeft === 1 ? 'conversion' : 'conversions'} left today via markdown.new
+										<span class="text-muted-foreground/60"
+											>({budget!.units_remaining}/{budget!.daily_limit} units)</span
+										>
+									</span>
+								</div>
+							{/if}
+						{/if}
+					</div>
+				{:else}
+					<div class="space-y-3">
+						<Input
+							type="text"
+							placeholder="Title (optional)"
+							bind:value={title}
+							disabled={submitting}
+							autofocus
+						/>
+						<Input
+							type="url"
+							placeholder="Original article URL (optional)"
+							bind:value={sourceUrl}
+							oninput={handleInput}
+							disabled={submitting}
+						/>
+						<Textarea
+							placeholder="Paste the article text here…"
+							bind:value={text}
+							oninput={handleInput}
+							disabled={submitting}
+							aria-invalid={!!validationError || undefined}
+							aria-describedby={validationError ? 'add-error' : undefined}
+							class="max-h-60 min-h-40 resize-none"
+						/>
+						{#if validationError}
+							<p id="add-error" class="text-destructive text-xs">{validationError}</p>
+						{/if}
+					</div>
 				{/if}
-			{:else}
-				<div class="space-y-3">
-					<Input
-						type="text"
-						placeholder="Title (optional)"
-						bind:value={title}
-						disabled={submitting}
-						autofocus
-					/>
-					<Input
-						type="url"
-						placeholder="Original article URL (optional)"
-						bind:value={sourceUrl}
-						oninput={handleInput}
-						disabled={submitting}
-					/>
-					<Textarea
-						placeholder="Paste the article text here…"
-						bind:value={text}
-						oninput={handleInput}
-						disabled={submitting}
-						aria-invalid={!!validationError || undefined}
-						aria-describedby={validationError ? 'add-error' : undefined}
-						class="max-h-[50vh] min-h-40 resize-none"
-					/>
-					{#if validationError}
-						<p id="add-error" class="text-destructive text-xs">{validationError}</p>
-					{/if}
-				</div>
-			{/if}
+			</div>
 
-			<Dialog.Footer class="flex shrink-0 justify-end gap-2">
+			<Dialog.Footer class="shrink-0 pt-4">
 				<Button
 					type="button"
 					variant="outline"

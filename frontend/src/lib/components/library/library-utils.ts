@@ -21,13 +21,20 @@ export function readingProgressPercent(position: number, tokenCount: number): nu
 	return Math.min(100, Math.max(0, Math.round((seen / tokenCount) * 100)));
 }
 
+function isProcessing(status: ArticleMeta['status']): boolean {
+	return status === 'queued' || status === 'fetching' || status === 'fetched' || status === 'enriching';
+}
+
 /**
- * Comparator ordering the library: pinned articles first, then unread before
- * read. Articles that compare equal keep their incoming relative order (the
- * caller pre-sorts by created_at descending), so newest stays first within each
- * group. `readSet` holds the ids of articles marked read.
+ * Comparator ordering the library: in-progress articles first, then pinned,
+ * then unread before read. Articles that compare equal keep their incoming
+ * relative order (the caller pre-sorts by created_at descending), so newest
+ * stays first within each group. `readSet` holds the ids of articles marked read.
  */
 export function compareLibrary(a: ArticleMeta, b: ArticleMeta, readSet: Set<string>): number {
+	const processingDiff = (isProcessing(b.status) ? 1 : 0) - (isProcessing(a.status) ? 1 : 0);
+	if (processingDiff !== 0) return processingDiff;
+
 	const pinnedDiff = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
 	if (pinnedDiff !== 0) return pinnedDiff;
 

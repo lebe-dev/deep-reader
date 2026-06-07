@@ -151,7 +151,7 @@
 	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
 </script>
 
-<div class="border-border bg-card group relative rounded-xl border px-4 py-3">
+<div class="bg-card group relative rounded-xl px-4 py-3 {isProcessing ? 'card-processing' : 'border-border border'}">
 	<div class="flex items-start justify-between gap-3">
 		<div class="min-w-0 flex-1">
 			{#if article.status === 'enriched'}
@@ -337,3 +337,36 @@
 		</Dialog.Content>
 	</Dialog.Root>
 {/if}
+
+<style>
+	.card-processing {
+		border: 1px solid transparent;
+		background:
+			linear-gradient(var(--card), var(--card)) padding-box,
+			linear-gradient(
+					90deg,
+					oklch(0.55 0.18 242) 0%,
+					oklch(0.65 0.2 280) 40%,
+					oklch(0.6 0.18 220) 60%,
+					oklch(0.55 0.18 242) 100%
+				)
+				border-box;
+		background-size:
+			100% 100%,
+			200% 100%;
+		animation: card-border-shimmer 3s linear infinite;
+	}
+
+	@keyframes card-border-shimmer {
+		from {
+			background-position:
+				0 0,
+				200% center;
+		}
+		to {
+			background-position:
+				0 0,
+				-200% center;
+		}
+	}
+</style>
