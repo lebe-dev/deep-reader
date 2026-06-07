@@ -36,6 +36,24 @@ the worker does not fix it, because the stale copy lives in the *HTTP* cache.
 The fix is to revalidate the HTML shell and the service worker on every request,
 while keeping the long cache only for fingerprinted assets.
 
+### A second, origin-side trap: 304 on every revalidation
+
+`no-cache` only helps if revalidation can actually return fresh bytes. The
+frontend is embedded via `go:embed`, which reports a **zero modtime**
+(year 0001) for every file. Fiber's static middleware turns that into a
+`Last-Modified: Mon, 01 Jan 0001 00:00:00 GMT` and then answers **any**
+`If-Modified-Since` with `304 Not Modified` — because every real date is newer
+than year 0001. So even with `no-cache` and a correctly-configured proxy, the
+browser revalidates, gets a 304, and keeps the **stale** `index.html` /
+`service-worker.js` across deploys. Same visible symptom: the update banner
+reappears after every reload and never sticks.
+
+`internal/api/static.go` fixes this at the origin by stripping
+`If-Modified-Since` / `If-None-Match` from requests for the no-cache shell, so
+those paths always return a full `200`. Content-hashed `/_app/immutable/*`
+assets are untouched and still revalidate to `304` (correct — their URL changes
+when their content does). Guarded by `TestStaticRevalidationServesFresh`.
+
 ## Caching rules
 
 | Path | `Cache-Control` | Why |

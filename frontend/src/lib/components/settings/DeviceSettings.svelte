@@ -106,13 +106,13 @@
 	<Card.Content class="space-y-5">
 		<!-- Account -->
 		<div class="flex items-center justify-between gap-3">
-			<div class="grid gap-0.5">
+			<div class="grid min-w-0 gap-0.5">
 				<span class="text-sm font-medium">Signed in</span>
-				<span class="text-muted-foreground text-xs">
+				<span class="text-muted-foreground truncate text-xs">
 					{authState.username ?? 'Your account'}
 				</span>
 			</div>
-			<Button variant="outline" size="sm" class="gap-2" onclick={handleLogout}>
+			<Button variant="outline" size="sm" class="shrink-0 gap-2" onclick={handleLogout}>
 				<LogOutIcon class="size-4" />
 				Sign out
 			</Button>

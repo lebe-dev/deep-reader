@@ -428,6 +428,72 @@ func TestEnrich_SettingsModelOverride(t *testing.T) {
 	}
 }
 
+// fakeResolver is a ports.LLMProviderResolver returning a fixed active profile,
+// used to exercise the provider-profile model-precedence path.
+type fakeResolver struct {
+	provider model.LLMProvider
+}
+
+func (f fakeResolver) GetActiveLLMProvider(context.Context) (model.LLMProvider, error) {
+	return f.provider, nil
+}
+
+// captureModelWithProvider runs Enrich against a fake server while an active
+// provider profile (with the given model) is resolved, returning the model name
+// the client put in the request body. The resolved profile's base URL is wired
+// to the fake server so the request still lands there.
+func captureModelWithProvider(t *testing.T, settings model.Settings, providerModel string) string {
+	t.Helper()
+	var capturedModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		capturedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buildCannedResponse(t))
+	}))
+	defer srv.Close()
+
+	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, Model: providerModel}}
+	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(resolver))
+	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, 1); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	return capturedModel
+}
+
+// TestEnrich_ActiveProviderModelWinsOverSettings asserts that when an active
+// provider profile supplies a model, it is used for the request even if the
+// legacy settings.llm_model carries a different (stale) value. This is the
+// regression guard for the bug where a stale settings.llm_model overrode the
+// active profile's model.
+func TestEnrich_ActiveProviderModelWinsOverSettings(t *testing.T) {
+	settings := testSettings()
+	settings.LLMModel = "deepseek/deepseek-v4-flash" // stale per-user value
+
+	got := captureModelWithProvider(t, settings, "deepseek/deepseek-v4-pro")
+	if got != "deepseek/deepseek-v4-pro" {
+		t.Errorf("model = %q, want active profile's deepseek/deepseek-v4-pro", got)
+	}
+}
+
+// TestEnrich_SettingsModelFillsBlankProfileModel asserts that when the active
+// profile leaves its model blank (e.g. an env-seeded "Default" profile), the
+// legacy settings.llm_model fills in.
+func TestEnrich_SettingsModelFillsBlankProfileModel(t *testing.T) {
+	settings := testSettings()
+	settings.LLMModel = "gpt-4o"
+
+	got := captureModelWithProvider(t, settings, "") // blank — profile defers to settings
+	if got != "gpt-4o" {
+		t.Errorf("model = %q, want settings fallback gpt-4o", got)
+	}
+}
+
 // TestEnrich_PromptContainsTokens asserts that the user message references the
 // article tokens and that the system prompt contains the CEFR level and target
 // language.

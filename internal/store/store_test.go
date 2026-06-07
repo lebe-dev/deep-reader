@@ -70,6 +70,39 @@ func TestGetSettings_Defaults(t *testing.T) {
 	if got.MarkdownWarnThreshold != model.DefaultMarkdownWarnThreshold {
 		t.Errorf("MarkdownWarnThreshold: got %d, want %d", got.MarkdownWarnThreshold, model.DefaultMarkdownWarnThreshold)
 	}
+	if got.FontSize != model.DefaultFontSize {
+		t.Errorf("FontSize: got %q, want %q", got.FontSize, model.DefaultFontSize)
+	}
+	if got.LineHeight != model.DefaultLineHeight {
+		t.Errorf("LineHeight: got %q, want %q", got.LineHeight, model.DefaultLineHeight)
+	}
+}
+
+func TestUpdateSettings_Appearance(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	fontSize := model.FontSizeXL
+	lineHeight := model.LineHeightRelaxed
+	got, err := s.UpdateSettings(ctx, model.SettingsPatch{FontSize: &fontSize, LineHeight: &lineHeight})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.FontSize != fontSize {
+		t.Errorf("FontSize after update: got %q, want %q", got.FontSize, fontSize)
+	}
+	if got.LineHeight != lineHeight {
+		t.Errorf("LineHeight after update: got %q, want %q", got.LineHeight, lineHeight)
+	}
+
+	// Confirm persistence via GetSettings.
+	got2, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after update: %v", err)
+	}
+	if got2.FontSize != fontSize || got2.LineHeight != lineHeight {
+		t.Errorf("appearance after reload: got %q/%q, want %q/%q", got2.FontSize, got2.LineHeight, fontSize, lineHeight)
+	}
 }
 
 func TestUpdateSettings(t *testing.T) {

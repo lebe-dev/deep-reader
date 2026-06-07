@@ -5,7 +5,7 @@
 	import { ModeWatcher, toggleMode, mode } from 'mode-watcher';
 	import { page } from '$app/state';
 	import { navigating } from '$app/stores';
-	import { goto } from '$app/navigation';
+	import { goto, afterNavigate } from '$app/navigation';
 	import { Toaster } from '$lib/components/ui/sonner';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
@@ -15,6 +15,7 @@
 	import SunIcon from '@lucide/svelte/icons/sun';
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import { cn } from '$lib/utils';
+	import { readerFullscreen } from '$lib/reader-fullscreen.svelte';
 	import { initSync } from '$lib/sync/store.svelte';
 	import { bootstrapPWA } from '$lib/pwa/bootstrap';
 	import { authState, refreshAuth } from '$lib/auth/store.svelte';
@@ -31,6 +32,17 @@
 	onMount(() => {
 		bootstrapPWA();
 		refreshAuth();
+	});
+
+	// Always land at the top when navigating between pages. The reader window
+	// scroll (set via scrollIntoView for position restore) otherwise leaks into
+	// Library / Settings, since SvelteKit's automatic scroll reset is unreliable
+	// in SPA mode. The reader restores its own position later, in TokenRenderer's
+	// onMount, so this never fights the reading-position restore. Anchor links
+	// (URLs with a hash) keep their native scroll-into-view behaviour.
+	afterNavigate((nav) => {
+		if (nav.to?.url.hash) return;
+		window.scrollTo(0, 0);
 	});
 
 	// Auth guard: route between /setup, /login and the app based on auth state,
@@ -93,57 +105,64 @@
 	<div class="bg-background min-h-svh"></div>
 {:else if showChrome}
 	<div class="bg-background text-foreground flex min-h-svh flex-col">
-		<UpdateBanner />
-		<MarkdownBudgetBanner />
-		<header
-			class="bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40 w-full border-b backdrop-blur"
-		>
-			<div class="mx-auto flex h-14 w-full max-w-3xl items-center gap-2 px-4">
-				<a href="/" class="mr-2 flex items-center gap-2 font-semibold">
-					<BookOpenIcon class="size-5" />
-					<span class="hidden sm:inline">Deep Reader</span>
-					<span class="sm:hidden">DR</span>
-				</a>
+		{#if !readerFullscreen.active}
+			<UpdateBanner />
+			<MarkdownBudgetBanner />
+			<header
+				class="bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40 w-full border-b pt-[env(safe-area-inset-top)] backdrop-blur"
+			>
+				<div class="mx-auto flex h-14 w-full max-w-3xl items-center gap-2 px-4">
+					<a href="/" class="mr-2 flex items-center gap-2 font-semibold">
+						<BookOpenIcon class="size-5" />
+						<span class="hidden sm:inline">Deep Reader</span>
+						<span class="sm:hidden">DR</span>
+					</a>
 
-				<Separator orientation="vertical" class="mx-1 h-6" />
+					<Separator orientation="vertical" class="mx-1 h-6" />
 
-				<nav class="flex items-center gap-1">
-					{#each navItems as item (item.href)}
-						{@const Icon = item.icon}
+					<nav class="flex items-center gap-1">
+						{#each navItems as item (item.href)}
+							{@const Icon = item.icon}
+							<Button
+								href={item.href}
+								variant="ghost"
+								size="sm"
+								class={cn(
+									'gap-2',
+									isActive(item.href) ? 'text-foreground bg-accent' : 'text-muted-foreground'
+								)}
+							>
+								<Icon class="size-4" />
+								<span>{item.label}</span>
+							</Button>
+						{/each}
+					</nav>
+
+					<div class="ml-auto flex items-center gap-1">
 						<Button
-							href={item.href}
 							variant="ghost"
-							size="sm"
-							class={cn(
-								'gap-2',
-								isActive(item.href) ? 'text-foreground bg-accent' : 'text-muted-foreground'
-							)}
+							size="icon"
+							onclick={toggleMode}
+							aria-label="Toggle light / dark mode"
+							title="Toggle theme"
 						>
-							<Icon class="size-4" />
-							<span>{item.label}</span>
+							{#if mode.current === 'dark'}
+								<MoonIcon class="size-4" />
+							{:else}
+								<SunIcon class="size-4" />
+							{/if}
 						</Button>
-					{/each}
-				</nav>
-
-				<div class="ml-auto flex items-center gap-1">
-					<Button
-						variant="ghost"
-						size="icon"
-						onclick={toggleMode}
-						aria-label="Toggle light / dark mode"
-						title="Toggle theme"
-					>
-						{#if mode.current === 'dark'}
-							<MoonIcon class="size-4" />
-						{:else}
-							<SunIcon class="size-4" />
-						{/if}
-					</Button>
+					</div>
 				</div>
-			</div>
-		</header>
+			</header>
+		{/if}
 
-		<main class="mx-auto w-full max-w-3xl flex-1 px-4 py-6">
+		<main
+			class={cn(
+				'mx-auto w-full max-w-3xl flex-1 px-4',
+				readerFullscreen.active ? 'pt-[calc(env(safe-area-inset-top)+1rem)] pb-6' : 'py-6'
+			)}
+		>
 			{@render children?.()}
 		</main>
 	</div>

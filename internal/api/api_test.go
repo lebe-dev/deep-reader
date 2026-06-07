@@ -59,6 +59,9 @@ type fakeStore struct {
 	lastPinID      string
 	lastPinned     bool
 
+	// llm providers
+	providers []model.LLMProvider
+
 	// auth
 	initialized   bool
 	sessions      map[string]bool
@@ -73,6 +76,70 @@ func (f *fakeStore) UpdateSettings(_ context.Context, p model.SettingsPatch) (mo
 		return f.updateSettings(p)
 	}
 	return f.settings, nil
+}
+
+func (f *fakeStore) ListLLMProviders(context.Context) ([]model.LLMProvider, error) {
+	return f.providers, nil
+}
+
+func (f *fakeStore) GetActiveLLMProvider(context.Context) (model.LLMProvider, error) {
+	for _, p := range f.providers {
+		if p.IsActive {
+			return p, nil
+		}
+	}
+	return model.LLMProvider{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) CreateLLMProvider(_ context.Context, p model.LLMProvider) (model.LLMProvider, error) {
+	if p.ID == "" {
+		p.ID = "prov-" + p.Name
+	}
+	p.IsActive = len(f.providers) == 0
+	f.providers = append(f.providers, p)
+	return p, nil
+}
+
+func (f *fakeStore) UpdateLLMProvider(_ context.Context, id string, in model.LLMProviderInput) (model.LLMProvider, error) {
+	for i := range f.providers {
+		if f.providers[i].ID != id {
+			continue
+		}
+		f.providers[i].Name = in.Name
+		f.providers[i].BaseURL = in.BaseURL
+		f.providers[i].Model = in.Model
+		if in.APIKey != nil {
+			f.providers[i].APIKey = *in.APIKey
+		}
+		return f.providers[i], nil
+	}
+	return model.LLMProvider{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) DeleteLLMProvider(_ context.Context, id string) error {
+	for i := range f.providers {
+		if f.providers[i].ID == id {
+			f.providers = append(f.providers[:i], f.providers[i+1:]...)
+			return nil
+		}
+	}
+	return ports.ErrNotFound
+}
+
+func (f *fakeStore) SetActiveLLMProvider(_ context.Context, id string) error {
+	found := false
+	for i := range f.providers {
+		if f.providers[i].ID == id {
+			found = true
+		}
+	}
+	if !found {
+		return ports.ErrNotFound
+	}
+	for i := range f.providers {
+		f.providers[i].IsActive = f.providers[i].ID == id
+	}
+	return nil
 }
 
 func (f *fakeStore) CreateArticle(context.Context, *model.Article) error { return nil }
@@ -944,6 +1011,47 @@ func TestPatchSettings(t *testing.T) {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}
 	})
+
+	t.Run("appearance valid", func(t *testing.T) {
+		var applied model.SettingsPatch
+		st := &fakeStore{
+			updateSettings: func(p model.SettingsPatch) (model.Settings, error) {
+				applied = p
+				return model.Settings{FontSize: *p.FontSize, LineHeight: *p.LineHeight}, nil
+			},
+		}
+		s := newTestServer(t, st, &fakeIngestor{})
+		fontSize := model.FontSizeL
+		lineHeight := model.LineHeightCompact
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{FontSize: &fontSize, LineHeight: &lineHeight}, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if applied.FontSize == nil || *applied.FontSize != model.FontSizeL {
+			t.Errorf("font_size not forwarded: %+v", applied)
+		}
+		if applied.LineHeight == nil || *applied.LineHeight != model.LineHeightCompact {
+			t.Errorf("line_height not forwarded: %+v", applied)
+		}
+	})
+
+	t.Run("invalid font_size", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		bad := "huge"
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{FontSize: &bad}, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid line_height", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		bad := "double"
+		resp := doReq(t, s, http.MethodPatch, "/api/settings", model.SettingsPatch{LineHeight: &bad}, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
 }
 
 func TestDeleteArticle(t *testing.T) {
@@ -1164,5 +1272,44 @@ func TestStaticCacheControl(t *testing.T) {
 		if got := resp.Header.Get("Cache-Control"); got != tc.want {
 			t.Errorf("%s: Cache-Control = %q, want %q", tc.path, got, tc.want)
 		}
+	}
+}
+
+// TestStaticRevalidationServesFresh guards against the embedded FS exposing a
+// zero modtime (go:embed has no real timestamps): Fiber's static middleware
+// would then answer ANY conditional GET with 304 Not Modified, because every
+// If-Modified-Since is >= the year-0001 modtime. For the no-cache shell, the
+// service worker and the manifest that means the browser keeps serving a stale
+// copy across deploys forever — the PWA update banner reappears after every
+// reload and never sticks. These paths must always return a full 200, while
+// content-hashed /_app/immutable/ assets are still free to 304.
+func TestStaticRevalidationServesFresh(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+
+	doConditional := func(path string) *http.Response {
+		req, err := http.NewRequest(http.MethodGet, path, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		// A date the browser would send after caching a no-cache response.
+		req.Header.Set("If-Modified-Since", "Wed, 01 Jan 2025 00:00:00 GMT")
+		resp, err := s.App().Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		return resp
+	}
+
+	// no-cache files must never be short-circuited to 304 by the zero modtime.
+	for _, path := range []string{"/", "/service-worker.js", "/manifest.webmanifest"} {
+		if resp := doConditional(path); resp.StatusCode != http.StatusOK {
+			t.Errorf("%s: conditional GET status = %d, want 200 (stale-shell 304 bug)", path, resp.StatusCode)
+		}
+	}
+
+	// Content-hashed assets may still revalidate to 304 — their URL changes when
+	// the content does, so a 304 here is correct and saves bandwidth.
+	if resp := doConditional("/_app/immutable/chunk.abc.js"); resp.StatusCode != http.StatusNotModified {
+		t.Errorf("immutable asset: conditional GET status = %d, want 304", resp.StatusCode)
 	}
 }

@@ -42,6 +42,12 @@ export type ReEnrichMode = 'full' | 'topup';
 /** CEFR proficiency levels (spec §8 `settings.cefr_level`). */
 export type CefrLevel = 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
 
+/** Reader text-size preset (spec §8 `settings.font_size`). */
+export type FontSize = 's' | 'm' | 'l' | 'xl';
+
+/** Reader line-spacing preset (spec §8 `settings.line_height`). */
+export type LineHeight = 'compact' | 'normal' | 'relaxed';
+
 /** Kind of a marked-up multi-token phrase (spec §8 `enrichments.phrases.type`). */
 export type PhraseType = 'idiom' | 'phrasal_verb' | 'term';
 
@@ -215,6 +221,10 @@ export interface Settings {
 	bot_wall_signatures: string;
 	/** Step-wise enrichment window size (tokens per chunk). 0 = use the server default. */
 	chunk_tokens: number;
+	/** Reader text-size preset. Controls only the article-reader presentation. */
+	font_size: FontSize;
+	/** Reader line-spacing preset. Controls only the article-reader presentation. */
+	line_height: LineHeight;
 	updated_at: string;
 }
 
@@ -232,8 +242,42 @@ export type SettingsPatch = Partial<
 		| 'normalize_prompt'
 		| 'bot_wall_signatures'
 		| 'chunk_tokens'
+		| 'font_size'
+		| 'line_height'
 	>
 >;
+
+// ---------------------------------------------------------------------------
+// LLM provider profiles (Settings > LLM, backend-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * A user-managed LLM connection profile. The secret API key is never returned:
+ * the server sends `key_preview` (masked) and `has_key` instead. The active
+ * profile supplies the connection for every LLM call.
+ */
+export interface LLMProviderView {
+	id: string;
+	name: string;
+	base_url: string;
+	model: string;
+	is_active: boolean;
+	has_key: boolean;
+	key_preview: string;
+	created_at: string;
+	updated_at: string;
+}
+
+/**
+ * Create/update payload for a provider. On update, omit `api_key` (or send null)
+ * to keep the stored secret unchanged; send a string to replace it.
+ */
+export interface LLMProviderInput {
+	name: string;
+	base_url: string;
+	model: string;
+	api_key?: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // API response shapes (spec §9)

@@ -96,7 +96,18 @@ func NewSQLite(ctx context.Context, cfg *config.Config) (*SQLite, error) {
 	}
 	slog.Info("store: database opened", "path", cfg.DatabasePath, "schema_version", version)
 
-	return &SQLite{db: db, write: wdb}, nil
+	s := &SQLite{db: db, write: wdb}
+
+	// Seed the active LLM provider from the LLM_* env vars on first boot, so
+	// env-configured deployments keep working once the UI becomes the source of
+	// truth. No-op once any profile exists.
+	if err := s.seedLLMProvider(ctx, cfg); err != nil {
+		_ = db.Close()
+		_ = wdb.Close()
+		return nil, err
+	}
+
+	return s, nil
 }
 
 // Close releases all database connections.
@@ -143,7 +154,7 @@ func parseTime(s string) (time.Time, error) {
 // GetSettings returns the singleton settings row. The row is guaranteed to
 // exist because the migration seeds it; if somehow absent, a default is returned.
 func (s *SQLite) GetSettings(ctx context.Context) (model.Settings, error) {
-	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, updated_at
+	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, updated_at
                FROM settings WHERE id = 1`
 	row := s.db.QueryRowContext(ctx, q)
 	return scanSettings(row)
@@ -156,7 +167,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	defer s.wmu.Unlock()
 
 	// Read current values first.
-	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, updated_at
+	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, updated_at
                   FROM settings WHERE id = 1`
 	row := s.write.QueryRowContext(ctx, selQ)
 	cur, err := scanSettings(row)
@@ -195,13 +206,19 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	if patch.ChunkTokens != nil {
 		cur.ChunkTokens = *patch.ChunkTokens
 	}
+	if patch.FontSize != nil {
+		cur.FontSize = *patch.FontSize
+	}
+	if patch.LineHeight != nil {
+		cur.LineHeight = *patch.LineHeight
+	}
 	cur.UpdatedAt = now()
 
 	const updQ = `UPDATE settings SET cefr_level=?, target_language=?, llm_model=?,
-                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, updated_at=? WHERE id = 1`
+                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, font_size=?, line_height=?, updated_at=? WHERE id = 1`
 	if _, err := s.write.ExecContext(ctx, updQ,
 		cur.CEFRLevel, cur.TargetLanguage, cur.LLMModel,
-		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, fmtTime(cur.UpdatedAt),
+		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, cur.FontSize, cur.LineHeight, fmtTime(cur.UpdatedAt),
 	); err != nil {
 		return model.Settings{}, fmt.Errorf("store: UpdateSettings write: %w", err)
 	}
@@ -220,7 +237,7 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 	var s model.Settings
 	var updatedAtStr string
 	if err := row.Scan(&s.CEFRLevel, &s.TargetLanguage, &s.LLMModel,
-		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &updatedAtStr); err != nil {
+		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &s.FontSize, &s.LineHeight, &updatedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return defaults if somehow the singleton row is missing.
 			return model.Settings{
@@ -228,6 +245,8 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 				TargetLanguage:           model.DefaultTargetLanguage,
 				MinDifficultyToHighlight: model.CEFRB1,
 				MarkdownWarnThreshold:    model.DefaultMarkdownWarnThreshold,
+				FontSize:                 model.DefaultFontSize,
+				LineHeight:               model.DefaultLineHeight,
 			}, nil
 		}
 		return model.Settings{}, fmt.Errorf("store: scanSettings: %w", err)

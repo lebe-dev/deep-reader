@@ -143,19 +143,8 @@
 			{#if article.status !== 'enriched'}
 				<Badge variant={statusVariant} class="rounded-md">{statusLabel}</Badge>
 			{/if}
-			<Button
-				size="icon-sm"
-				variant="ghost"
-				onclick={handleTogglePin}
-				aria-label={article.pinned ? 'Unpin article' : 'Pin article'}
-				title={article.pinned ? 'Unpin' : 'Pin to top'}
-				class="transition-opacity
-					{article.pinned
-					? 'text-primary opacity-100'
-					: 'text-muted-foreground opacity-0 group-hover:opacity-100'}"
-			>
-				<PinIcon class="size-3.5" fill={article.pinned ? 'currentColor' : 'none'} />
-			</Button>
+			<!-- Actions menu: always visible (touch devices have no hover, so a
+			     hover-revealed trigger would be unreachable). -->
 			<DropdownMenu.Root>
 				<DropdownMenu.Trigger>
 					{#snippet child({ props })}
@@ -164,7 +153,7 @@
 							size="icon-sm"
 							variant="ghost"
 							onclick={(e: MouseEvent) => e.stopPropagation()}
-							class="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+							class="text-muted-foreground"
 							aria-label="Article actions"
 						>
 							<EllipsisVerticalIcon class="size-4" />
@@ -172,13 +161,17 @@
 					{/snippet}
 				</DropdownMenu.Trigger>
 				<DropdownMenu.Content align="end">
+					<DropdownMenu.Item onclick={handleTogglePin} class="gap-2">
+						<PinIcon class="size-4" fill={article.pinned ? 'currentColor' : 'none'} />
+						{article.pinned ? 'Unpin' : 'Pin to top'}
+					</DropdownMenu.Item>
 					{#if article.summary}
 						<DropdownMenu.Item onclick={() => (summaryOpen = true)} class="gap-2">
 							<AlignLeftIcon class="size-4" />
 							Summary
 						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
 					{/if}
+					<DropdownMenu.Separator />
 					<DropdownMenu.Item
 						onclick={() => (deleteOpen = true)}
 						class="text-destructive focus:text-destructive gap-2"
@@ -188,6 +181,32 @@
 					</DropdownMenu.Item>
 				</DropdownMenu.Content>
 			</DropdownMenu.Root>
+
+			<!-- Pin indicator pinned to the edge. Shown for pinned articles always,
+			     and on hover for unpinned ones (a desktop quick-pin shortcut). -->
+			{#if article.pinned}
+				<Button
+					size="icon-sm"
+					variant="ghost"
+					onclick={handleTogglePin}
+					aria-label="Unpin article"
+					title="Unpin"
+					class="text-primary"
+				>
+					<PinIcon class="size-3.5" fill="currentColor" />
+				</Button>
+			{:else}
+				<Button
+					size="icon-sm"
+					variant="ghost"
+					onclick={handleTogglePin}
+					aria-label="Pin article"
+					title="Pin to top"
+					class="text-muted-foreground hidden opacity-0 transition-opacity group-hover:opacity-100 sm:inline-flex"
+				>
+					<PinIcon class="size-3.5" fill="none" />
+				</Button>
+			{/if}
 		</div>
 	</div>
 

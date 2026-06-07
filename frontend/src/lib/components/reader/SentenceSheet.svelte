@@ -1,6 +1,7 @@
 <script lang="ts">
 	// SentenceSheet — bottom Sheet for sentence translation.
-	// Triggered by long-press, shift-click, or text selection.
+	// Triggered by shift-click, text selection, or the "Translate" action in the
+	// long-press sentence menu (SentenceMenu).
 
 	import * as Sheet from '$lib/components/ui/sheet';
 	import type { SentenceSheetContent } from './reader-utils';
@@ -21,13 +22,15 @@
 		if (!v) onclose();
 	}}
 >
-	<Sheet.Content side="bottom" class="max-h-[60vh] px-0 pb-safe">
-		<Sheet.Header class="px-6 pb-2">
+	<Sheet.Content side="bottom" class="max-h-[80dvh] gap-0 rounded-t-2xl px-0">
+		<Sheet.Header class="shrink-0 px-6 pb-2">
 			<Sheet.Title class="text-base">Sentence translation</Sheet.Title>
 		</Sheet.Header>
 
 		{#if content}
-			<div class="flex flex-col gap-4 overflow-y-auto px-6 pb-6">
+			<div
+				class="flex min-h-0 flex-col gap-4 overflow-y-auto px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+			>
 				<blockquote
 					class="border-muted text-muted-foreground border-l-2 pl-4 text-sm leading-relaxed italic"
 				>

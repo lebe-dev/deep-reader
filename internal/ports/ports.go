@@ -135,6 +135,34 @@ type Store interface {
 	// UpdatedAt, and returns the resulting settings.
 	UpdateSettings(ctx context.Context, patch model.SettingsPatch) (model.Settings, error)
 
+	// ListLLMProviders returns all configured LLM connection profiles ordered by
+	// creation time. The returned profiles include their secret API keys; callers
+	// that hand them to the client MUST mask via LLMProvider.View.
+	ListLLMProviders(ctx context.Context) ([]model.LLMProvider, error)
+
+	// GetActiveLLMProvider returns the sole active profile, or ErrNotFound when no
+	// profile is configured (e.g. a fresh deployment with no LLM_* env seed).
+	GetActiveLLMProvider(ctx context.Context) (model.LLMProvider, error)
+
+	// CreateLLMProvider inserts a new profile and returns it. When it is the first
+	// profile in the table the store marks it active so the deployment always has
+	// an active connection.
+	CreateLLMProvider(ctx context.Context, p model.LLMProvider) (model.LLMProvider, error)
+
+	// UpdateLLMProvider applies the input to the profile id and returns the result.
+	// A nil input.APIKey leaves the stored key unchanged (write-only secret).
+	// Returns ErrNotFound for an unknown id.
+	UpdateLLMProvider(ctx context.Context, id string, in model.LLMProviderInput) (model.LLMProvider, error)
+
+	// DeleteLLMProvider removes the profile id. If it was the active one the store
+	// promotes the most-recently-created remaining profile to active. Returns
+	// ErrNotFound for an unknown id.
+	DeleteLLMProvider(ctx context.Context, id string) error
+
+	// SetActiveLLMProvider makes profile id the sole active profile. Returns
+	// ErrNotFound for an unknown id.
+	SetActiveLLMProvider(ctx context.Context, id string) error
+
 	// CreateArticle inserts a new article (typically status=pending). The
 	// caller populates ID, URLHash, tokens, timestamps, etc. Returns
 	// ErrDuplicate if URLHash already exists.
@@ -279,6 +307,16 @@ type LLMClient interface {
 	// a bad pass never destroys the article. Like Enrich, it performs exactly one
 	// attempt.
 	Normalize(ctx context.Context, title, text string, settings model.Settings) (string, Usage, error)
+}
+
+// LLMProviderResolver supplies the active LLM connection at call time. The store
+// satisfies it; llm.Client uses it to resolve the base URL, key, and model per
+// request — so a profile edited in the UI takes effect on the next call without
+// a restart — instead of binding the connection at construction. A resolver that
+// returns ErrNotFound (no profile configured) signals the client to fall back to
+// its env-derived defaults.
+type LLMProviderResolver interface {
+	GetActiveLLMProvider(ctx context.Context) (model.LLMProvider, error)
 }
 
 // Usage is the provider token-accounting for a single LLM call, logged for cost

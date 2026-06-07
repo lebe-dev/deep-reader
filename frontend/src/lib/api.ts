@@ -18,7 +18,9 @@ import type {
 	ProgressUpdate,
 	ReEnrichMode,
 	Settings,
-	SettingsPatch
+	SettingsPatch,
+	LLMProviderView,
+	LLMProviderInput
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -272,4 +274,51 @@ export function pinArticle(id: string, pinned: boolean, signal?: AbortSignal): P
 /** `PATCH /api/settings` — update user settings (partial). */
 export function patchSettings(partial: SettingsPatch, signal?: AbortSignal): Promise<Settings> {
 	return request<Settings>('/api/settings', { method: 'PATCH', body: partial, signal });
+}
+
+// ---------------------------------------------------------------------------
+// LLM provider profiles (backend-only; never goes through the offline outbox).
+// ---------------------------------------------------------------------------
+
+/** `GET /api/llm-providers` — list connection profiles (API keys masked). */
+export async function listLLMProviders(signal?: AbortSignal): Promise<LLMProviderView[]> {
+	const res = await request<{ providers: LLMProviderView[] }>('/api/llm-providers', { signal });
+	return res?.providers ?? [];
+}
+
+/** `POST /api/llm-providers` — create a profile. The first one becomes active. */
+export function createLLMProvider(
+	input: LLMProviderInput,
+	signal?: AbortSignal
+): Promise<LLMProviderView> {
+	return request<LLMProviderView>('/api/llm-providers', { method: 'POST', body: input, signal });
+}
+
+/** `PATCH /api/llm-providers/:id` — update a profile (omit api_key to keep it). */
+export function updateLLMProvider(
+	id: string,
+	input: LLMProviderInput,
+	signal?: AbortSignal
+): Promise<LLMProviderView> {
+	return request<LLMProviderView>(`/api/llm-providers/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: input,
+		signal
+	});
+}
+
+/** `DELETE /api/llm-providers/:id` — remove a profile. */
+export function deleteLLMProvider(id: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/llm-providers/${encodeURIComponent(id)}`, {
+		method: 'DELETE',
+		signal
+	});
+}
+
+/** `POST /api/llm-providers/:id/activate` — make a profile the active connection. */
+export function activateLLMProvider(id: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/llm-providers/${encodeURIComponent(id)}/activate`, {
+		method: 'POST',
+		signal
+	});
 }

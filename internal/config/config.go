@@ -51,14 +51,15 @@ type Config struct {
 	// LoginMaxAttempts. Env: LOGIN_LOCKOUT_DURATION (15m).
 	LoginLockoutDuration time.Duration
 
-	// LLMAPIBaseURL is the OpenAI-compatible API base URL. Env:
-	// LLM_API_BASE_URL.
+	// LLMAPIBaseURL, LLMAPIKey and LLMModel are the LLM connection. They are now
+	// managed per-profile in the UI (Settings > LLM) and stored in the DB; these
+	// env vars are an optional first-boot seed used only to create the initial
+	// provider when the table is empty. Env: LLM_API_BASE_URL, LLM_API_KEY,
+	// LLM_MODEL (all optional).
 	LLMAPIBaseURL string
-	// LLMAPIKey is the provider API key. Never exposed to the client. Env:
-	// LLM_API_KEY (required).
+	// LLMAPIKey is the seed provider API key. Never exposed to the client.
 	LLMAPIKey string
-	// LLMModel is the default model name. May be overridden per-user via
-	// Settings. Env: LLM_MODEL.
+	// LLMModel is the seed default model name.
 	LLMModel string
 	// LLMMaxConcurrent is the enrichment worker-pool size. Env:
 	// LLM_MAX_CONCURRENT (2).
@@ -253,9 +254,9 @@ func Load() (*Config, error) {
 func (c *Config) validate() error {
 	var errs []error
 
-	if c.LLMAPIKey == "" {
-		errs = append(errs, errors.New("LLM_API_KEY is required"))
-	}
+	// The LLM connection (base URL, API key, model) is configured per-profile in
+	// the UI (Settings > LLM) and stored in the DB; the LLM_* connection env vars
+	// are an optional first-boot seed only, so none are required here.
 	if c.DatabasePath == "" {
 		errs = append(errs, errors.New("DATABASE_PATH must not be empty"))
 	}

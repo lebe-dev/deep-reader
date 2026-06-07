@@ -20,6 +20,11 @@
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
 //	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
 //	PATCH  /api/settings                    partial settings update
+//	GET    /api/llm-providers               list LLM connection profiles (keys masked)
+//	POST   /api/llm-providers               create a profile (first one becomes active)
+//	PATCH  /api/llm-providers/:id           update a profile (api_key write-only)
+//	DELETE /api/llm-providers/:id           remove a profile
+//	POST   /api/llm-providers/:id/activate  make a profile the active connection
 //	GET    /api/stats                        library counters
 //	GET    /*                               embedded PWA (no auth, SPA fallback)
 //
@@ -166,6 +171,12 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Put("/articles/:id/pin", s.setPinned)
 
 	api.Patch("/settings", s.patchSettings)
+
+	api.Get("/llm-providers", s.listLLMProviders)
+	api.Post("/llm-providers", s.createLLMProvider)
+	api.Patch("/llm-providers/:id", s.updateLLMProvider)
+	api.Delete("/llm-providers/:id", s.deleteLLMProvider)
+	api.Post("/llm-providers/:id/activate", s.activateLLMProvider)
 
 	// Embedded PWA at the origin root, no auth, SPA fallback. Registered last so
 	// it only handles paths not claimed by /healthz or /api.

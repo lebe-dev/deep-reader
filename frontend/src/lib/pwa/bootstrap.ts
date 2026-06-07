@@ -52,8 +52,10 @@ async function registerServiceWorker(): Promise<void> {
 
 		// A new version may already be waiting (e.g. the user reopened the app after
 		// it was downloaded last time) — `updatefound` won't fire for it, so surface
-		// it explicitly. The controller check ensures we don't prompt on first install.
-		if (registration.waiting && navigator.serviceWorker.controller) {
+		// it explicitly. A worker only enters "waiting" while an active worker still
+		// controls clients, so its mere presence already means this is an update, not
+		// a first install — no extra guard needed.
+		if (registration.waiting) {
 			signalUpdateAvailable(registration.waiting);
 		}
 
@@ -62,7 +64,12 @@ async function registerServiceWorker(): Promise<void> {
 			if (!installing) return;
 
 			installing.addEventListener('statechange', () => {
-				if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+				// `registration.active` distinguishes an update (an older worker is
+				// already active) from a first install (no active worker yet at the
+				// "installed" step). We deliberately avoid `navigator.serviceWorker.
+				// controller` here: on iOS/WebKit it is often null mid-session even
+				// when the page is controlled, which would suppress the banner.
+				if (installing.state === 'installed' && registration.active) {
 					signalUpdateAvailable(installing);
 				}
 			});
@@ -91,33 +98,53 @@ export async function checkForUpdate(): Promise<boolean> {
 	const registration = await navigator.serviceWorker.getRegistration();
 	if (!registration) return false;
 
-	if (registration.waiting && navigator.serviceWorker.controller) {
+	// Already downloaded by an earlier check (hourly poll / previous visit). A
+	// worker only waits while an active one still controls clients, so this is
+	// always a genuine update.
+	if (registration.waiting) {
 		signalUpdateAvailable(registration.waiting);
 		return true;
 	}
 
+	// Re-fetch the SW script. `update()` resolves once the browser has finished
+	// the check; we then inspect the registration directly instead of waiting for
+	// the `updatefound` event, which is unreliable on iOS/WebKit (it may not fire,
+	// or may fire before a listener is attached).
+	try {
+		await registration.update();
+	} catch {
+		return false;
+	}
+
+	return surfaceDownloadedWorker(registration);
+}
+
+/**
+ * After an `update()` check, surface a freshly downloaded worker: signal the
+ * banner and return true once one is waiting, false if none appears. A worker
+ * may still be installing, so we wait for it to reach the "installed" state.
+ */
+async function surfaceDownloadedWorker(registration: ServiceWorkerRegistration): Promise<boolean> {
+	if (registration.waiting) {
+		signalUpdateAvailable(registration.waiting);
+		return true;
+	}
+
+	// `registration.active` guards against treating a first install as an update.
+	const installing = registration.installing;
+	if (!installing || !registration.active) return false;
+
 	return new Promise((resolve) => {
-		let settled = false;
-		const settle = (found: boolean) => {
-			if (settled) return;
-			settled = true;
-			resolve(found);
-		};
-
-		const timeout = setTimeout(() => settle(false), 10_000);
-
-		registration.addEventListener(
-			'updatefound',
-			() => {
+		const timeout = setTimeout(() => resolve(false), 10_000);
+		installing.addEventListener('statechange', () => {
+			if (installing.state === 'installed') {
 				clearTimeout(timeout);
-				settle(true);
-			},
-			{ once: true }
-		);
-
-		registration.update().catch(() => {
-			clearTimeout(timeout);
-			settle(false);
+				signalUpdateAvailable(installing);
+				resolve(true);
+			} else if (installing.state === 'redundant') {
+				clearTimeout(timeout);
+				resolve(false);
+			}
 		});
 	});
 }

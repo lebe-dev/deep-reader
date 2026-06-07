@@ -138,4 +138,23 @@
 		overflow-y: scroll;
 		scrollbar-gutter: stable;
 	}
+	button,
+	[role='button'],
+	[role='tab'],
+	[role='menuitem'],
+	[role='option'] {
+		user-select: none;
+	}
+	input,
+	textarea,
+	[contenteditable] {
+		user-select: text;
+	}
+}
+
+@utility no-scrollbar {
+	scrollbar-width: none;
+	&::-webkit-scrollbar {
+		display: none;
+	}
 }

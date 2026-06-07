@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
 	buildDifficultWordMap,
 	buildPhraseMap,
+	buildRenderSegments,
 	sliceText,
 	findCoveringSentence,
 	findCoveringSentenceForRange,
@@ -10,6 +11,37 @@ import {
 	debounce
 } from './reader-utils';
 import type { Enrichment, GlossaryItem, Sentence, Token } from '$lib/types';
+
+// Word tokenizer mirroring the backend contract closely enough for the segment
+// builder: word = run of letters/digits, every other character is a split
+// boundary. Byte offsets are UTF-8 (Go semantics) so spans map correctly.
+function wordTokens(text: string): Token[] {
+	const enc = new TextEncoder();
+	const tokens: Token[] = [];
+	let index = 0;
+	let byte = 0;
+	let startByte = -1;
+	let buf = '';
+	const isWord = (ch: string) => /[\p{L}\p{N}]/u.test(ch);
+	const flush = () => {
+		if (startByte >= 0) {
+			tokens.push({ index: index++, text: buf, start: startByte, end: byte });
+			startByte = -1;
+			buf = '';
+		}
+	};
+	for (const ch of text) {
+		if (isWord(ch)) {
+			if (startByte < 0) startByte = byte;
+			buf += ch;
+		} else {
+			flush();
+		}
+		byte += enc.encode(ch).length;
+	}
+	flush();
+	return tokens;
+}
 
 // Build tokens for a string by splitting on spaces, with correct UTF-8 byte
 // offsets so sliceText can be exercised the way the real reader uses it.
@@ -226,5 +258,82 @@ describe('debounce', () => {
 		expect(spy).toHaveBeenCalledWith('b');
 
 		vi.useRealTimers();
+	});
+});
+
+describe('buildRenderSegments', () => {
+	it('renders prose with no markdown as words and gaps', () => {
+		const text = 'Hello brave world';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		expect(segs.map((s) => s.kind)).toEqual(['word', 'gap', 'word', 'gap', 'word']);
+		const words = segs.filter((s) => s.kind === 'word');
+		expect(words.map((w) => (w.kind === 'word' ? w.text : ''))).toEqual([
+			'Hello',
+			'brave',
+			'world'
+		]);
+	});
+
+	it('turns a markdown image into a single image segment', () => {
+		const text = 'See ![Cat photo](https://ex.com/cat.png) here.';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		const image = segs.find((s) => s.kind === 'image');
+		expect(image).toEqual({ kind: 'image', alt: 'Cat photo', url: 'https://ex.com/cat.png' });
+		// Alt/url fragments must not leak as word tokens.
+		const wordText = segs.flatMap((s) => (s.kind === 'word' ? [s.text] : []));
+		expect(wordText).toContain('See');
+		expect(wordText).toContain('here');
+		expect(wordText).not.toContain('Cat');
+		expect(wordText).not.toContain('png');
+	});
+
+	it('turns a markdown link into a single link segment', () => {
+		const text = 'Read [the blog](https://ex.com/post) now.';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		const link = segs.find((s) => s.kind === 'link');
+		expect(link).toEqual({ kind: 'link', text: 'the blog', url: 'https://ex.com/post' });
+		const wordText = segs.flatMap((s) => (s.kind === 'word' ? [s.text] : []));
+		expect(wordText).not.toContain('blog');
+	});
+
+	it('maps byte offsets correctly when multibyte text precedes a span', () => {
+		const text = '«crazy» ![x](https://ex.com/a.png)';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		const image = segs.find((s) => s.kind === 'image');
+		expect(image).toEqual({ kind: 'image', alt: 'x', url: 'https://ex.com/a.png' });
+		const wordText = segs.flatMap((s) => (s.kind === 'word' ? [s.text] : []));
+		expect(wordText).toContain('crazy');
+	});
+
+	it('leaves non-http(s) image refs as raw prose', () => {
+		const text = '![x](javascript:alert(1))';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		expect(segs.some((s) => s.kind === 'image')).toBe(false);
+		const wordText = segs.flatMap((s) => (s.kind === 'word' ? [s.text] : []));
+		expect(wordText).toContain('javascript');
+	});
+
+	it('supports an empty image alt', () => {
+		const text = '![](https://ex.com/a.png)';
+		const segs = buildRenderSegments(wordTokens(text), text);
+		expect(segs.find((s) => s.kind === 'image')).toEqual({
+			kind: 'image',
+			alt: '',
+			url: 'https://ex.com/a.png'
+		});
+	});
+
+	it('preserves the original token index of words after a span', () => {
+		const text = 'a ![x](https://e.com/p.png) b';
+		const tokens = wordTokens(text);
+		const lastToken = tokens[tokens.length - 1];
+		expect(lastToken.text).toBe('b');
+		const segs = buildRenderSegments(tokens, text);
+		const bSeg = segs.find((s) => s.kind === 'word' && s.text === 'b');
+		expect(bSeg?.kind === 'word' && bSeg.index).toBe(lastToken.index);
+	});
+
+	it('returns an empty array for no tokens', () => {
+		expect(buildRenderSegments([], '')).toEqual([]);
 	});
 });

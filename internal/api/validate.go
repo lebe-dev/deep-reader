@@ -52,5 +52,11 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 		(*patch.ChunkTokens < model.MinChunkTokens || *patch.ChunkTokens > model.MaxChunkTokens) {
 		return "chunk_tokens must be 0 (default) or between 50 and 2000", false
 	}
+	if patch.FontSize != nil && !slices.Contains(model.FontSizes, *patch.FontSize) {
+		return "font_size must be one of s, m, l, xl", false
+	}
+	if patch.LineHeight != nil && !slices.Contains(model.LineHeights, *patch.LineHeight) {
+		return "line_height must be one of compact, normal, relaxed", false
+	}
 	return "", true
 }

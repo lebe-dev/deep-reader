@@ -97,7 +97,7 @@ func run() error {
 		}
 	}()
 
-	llmClient := llm.New(cfg)
+	llmClient := llm.New(cfg, llm.WithProviderResolver(st))
 
 	// Extraction: readability is always available; when markdown.new is enabled
 	// it becomes the primary source with readability as the budgeted fallback.

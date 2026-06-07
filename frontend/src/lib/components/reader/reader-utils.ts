@@ -63,6 +63,145 @@ export function sliceText(
 }
 
 // ---------------------------------------------------------------------------
+// Render segments (word / gap / markdown image / markdown link)
+// ---------------------------------------------------------------------------
+//
+// The backend tokenizer emits ONLY word tokens (byte offsets into the UTF-8
+// encoding of originalText). The reader reconstructs the gaps (whitespace,
+// punctuation) between consecutive tokens from originalText itself.
+//
+// On top of that, raw markdown image (`![alt](url)`) and link (`[text](url)`)
+// syntax that survives ingestion is detected here and turned into dedicated
+// segments so the reader can render an <img> / <a> instead of leaking the
+// markdown source as prose. Tokens that fall inside a detected span are
+// dropped from the output (they only existed as fragments of the URL/alt).
+
+/** A single renderable unit produced by {@link buildRenderSegments}. */
+export type RenderSegment =
+	| { kind: 'word'; text: string; index: number }
+	| { kind: 'gap'; text: string }
+	| { kind: 'image'; alt: string; url: string }
+	| { kind: 'link'; text: string; url: string };
+
+/** A markdown image/link occurrence located in the source text (string indices). */
+interface MarkdownSpan {
+	start: number;
+	end: number;
+	kind: 'image' | 'link';
+	/** alt (image) or link text. */
+	text: string;
+	url: string;
+}
+
+// `(!?)[text](url "optional title")` — text has no `]`/newline, url no space/`)`.
+const MARKDOWN_SPAN_RE = /(!?)\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+[^)]*)?\)/g;
+
+/** Only http(s) URLs are rendered, to avoid javascript:/data: injection. */
+function isHttpUrl(url: string): boolean {
+	return /^https?:\/\//i.test(url);
+}
+
+/** UTF-8 byte length of a Unicode code point. */
+function utf8Len(cp: number): number {
+	if (cp < 0x80) return 1;
+	if (cp < 0x800) return 2;
+	if (cp < 0x10000) return 3;
+	return 4;
+}
+
+/**
+ * Map every UTF-8 byte offset to the JS (UTF-16) string index of the character
+ * it belongs to. Token offsets are byte offsets (Go semantics); the reader
+ * works in string space, so this bridges the two without re-encoding per slice.
+ * The returned array has length byteCount + 1 (the final entry maps the
+ * exclusive end offset to text.length).
+ */
+function buildByteToStrMap(text: string): number[] {
+	const map: number[] = [];
+	let byte = 0;
+	for (let s = 0; s < text.length; ) {
+		const cp = text.codePointAt(s) as number;
+		const utf16 = cp > 0xffff ? 2 : 1;
+		const bytes = utf8Len(cp);
+		for (let k = 0; k < bytes; k++) map[byte + k] = s;
+		byte += bytes;
+		s += utf16;
+	}
+	map[byte] = text.length;
+	return map;
+}
+
+/** Locate markdown image/link spans (with safe http(s) URLs) in source order. */
+function findMarkdownSpans(text: string): MarkdownSpan[] {
+	const spans: MarkdownSpan[] = [];
+	for (const m of text.matchAll(MARKDOWN_SPAN_RE)) {
+		const url = m[3];
+		if (!isHttpUrl(url)) continue; // leave unsafe/relative refs as raw prose
+		spans.push({
+			start: m.index,
+			end: m.index + m[0].length,
+			kind: m[1] === '!' ? 'image' : 'link',
+			text: m[2],
+			url
+		});
+	}
+	return spans;
+}
+
+/**
+ * Build the ordered render segments for an article: word tokens, the
+ * reconstructed gaps between them, and any markdown image/link spans.
+ *
+ * Tokens whose start falls inside a markdown span are omitted (they are URL/alt
+ * fragments). Span boundaries always sit on punctuation (`!`, `[`, `)`), which
+ * are token split points, so no word token ever straddles a boundary.
+ */
+export function buildRenderSegments(tokens: Token[], originalText: string): RenderSegment[] {
+	if (tokens.length === 0) return [];
+
+	const text = originalText;
+	const byteToStr = buildByteToStrMap(text);
+	const strIdx = (byte: number): number => byteToStr[byte] ?? text.length;
+	const spans = findMarkdownSpans(text);
+
+	const segs: RenderSegment[] = [];
+	let ti = 0; // token pointer
+	let cursor = 0; // string index of the next unconsumed character
+
+	// Emit word + gap segments for tokens up to (but not including) `hi`.
+	const emitWordsUntil = (hi: number) => {
+		while (ti < tokens.length) {
+			const t = tokens[ti];
+			const ts = strIdx(t.start);
+			if (ts >= hi) break;
+			if (ts > cursor) segs.push({ kind: 'gap', text: text.slice(cursor, ts) });
+			segs.push({ kind: 'word', text: t.text, index: t.index });
+			cursor = strIdx(t.end);
+			ti++;
+		}
+		if (cursor < hi) {
+			segs.push({ kind: 'gap', text: text.slice(cursor, hi) });
+			cursor = hi;
+		}
+	};
+
+	for (const span of spans) {
+		if (span.start < cursor) continue; // defensive: skip overlapping match
+		emitWordsUntil(span.start);
+		segs.push(
+			span.kind === 'image'
+				? { kind: 'image', alt: span.text, url: span.url }
+				: { kind: 'link', text: span.text, url: span.url }
+		);
+		while (ti < tokens.length && strIdx(tokens[ti].start) < span.end) ti++;
+		cursor = span.end;
+	}
+	emitWordsUntil(text.length);
+
+	return segs;
+}
+
+// ---------------------------------------------------------------------------
 // Sentence lookup
 // ---------------------------------------------------------------------------
 
@@ -146,6 +285,17 @@ export interface PhrasePopoverContent {
 export interface SentenceSheetContent {
 	kind: 'sentence';
 	original: string;
+	translation: string;
+}
+
+/**
+ * In-place action menu shown on a long-press over a sentence. Offers copying
+ * the sentence and (when a translation exists in the enrichment) opening it.
+ */
+export interface SentenceMenuContent {
+	kind: 'sentence-menu';
+	original: string;
+	/** Empty string when the enrichment has no translation for this sentence. */
 	translation: string;
 }
 

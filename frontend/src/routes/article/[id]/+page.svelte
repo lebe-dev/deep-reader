@@ -10,29 +10,54 @@
 	import { page } from '$app/state';
 	import { browser } from '$app/environment';
 	import { onDestroy } from 'svelte';
-	import { db } from '$lib/db';
+	import { liveQuery } from 'dexie';
+	import { db, SYNC_STATE_ID } from '$lib/db';
 	import { getArticle } from '$lib/api';
 	import { enqueueProgress, enqueueReEnrich } from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
-	import type { ArticleMeta, ArticlePayload, Progress, ReEnrichMode } from '$lib/types';
+	import type {
+		ArticleMeta,
+		ArticlePayload,
+		Progress,
+		ReEnrichMode,
+		FontSize,
+		LineHeight
+	} from '$lib/types';
 	import TokenRenderer from '$lib/components/reader/TokenRenderer.svelte';
 	import WordPopover from '$lib/components/reader/WordPopover.svelte';
 	import SentenceSheet from '$lib/components/reader/SentenceSheet.svelte';
-	import type { PopoverContent, SentenceSheetContent } from '$lib/components/reader/reader-utils';
+	import SentenceMenu from '$lib/components/reader/SentenceMenu.svelte';
+	import type {
+		PopoverContent,
+		SentenceMenuContent,
+		SentenceSheetContent
+	} from '$lib/components/reader/reader-utils';
 	import { debounce } from '$lib/components/reader/reader-utils';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
+	import {
+		readerFullscreen,
+		enterReaderFullscreen,
+		exitReaderFullscreen
+	} from '$lib/reader-fullscreen.svelte';
+	import {
+		fontSizeRem,
+		lineHeightMultiplier,
+		DEFAULT_FONT_SIZE,
+		DEFAULT_LINE_HEIGHT
+	} from '$lib/reader-typography';
 	import CoverageBadge from '$lib/components/CoverageBadge.svelte';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { toast } from 'svelte-sonner';
-	import BookOpenCheckIcon from '@lucide/svelte/icons/book-open-check';
-	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
 	import AlertCircleIcon from '@lucide/svelte/icons/circle-alert';
 	import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
+	import Maximize2Icon from '@lucide/svelte/icons/maximize-2';
+	import Minimize2Icon from '@lucide/svelte/icons/minimize-2';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import LanguagesIcon from '@lucide/svelte/icons/languages';
 	import ListPlusIcon from '@lucide/svelte/icons/list-plus';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
@@ -67,10 +92,25 @@
 	// authoritative source on this page (meta may be absent on a cold network load).
 	const coverage = $derived(payload?.enrichment_coverage ?? null);
 
+	// Reader typography, driven by the synced Appearance settings. Applied to the
+	// reader via CSS custom properties so font size / line spacing react live.
+	let fontSize = $state<FontSize>(DEFAULT_FONT_SIZE);
+	let lineHeight = $state<LineHeight>(DEFAULT_LINE_HEIGHT);
+	const readerStyle = $derived(
+		`--reader-font-size: ${fontSizeRem(fontSize)};` +
+			` --reader-line-height: ${lineHeightMultiplier(lineHeight)};` +
+			` font-family: ${getReaderFontCss(readerFont.value)}`
+	);
+
+	// Summary disclosure — collapsed by default; the user expands on demand.
+	let summaryOpen = $state(false);
+
 	// Popover / sheet state.
 	let wordContent: PopoverContent | null = $state(null);
 	let wordAnchor: HTMLElement | null = $state(null);
 	let sentenceContent: SentenceSheetContent | null = $state(null);
+	let sentenceMenu: SentenceMenuContent | null = $state(null);
+	let sentenceMenuAnchor: HTMLElement | null = $state(null);
 
 	// ---------------------------------------------------------------------------
 	// Load article
@@ -220,22 +260,15 @@
 	}
 
 	// ---------------------------------------------------------------------------
-	// Mark as read toggle
+	// Fullscreen toggle
 	// ---------------------------------------------------------------------------
 
-	// ---------------------------------------------------------------------------
-
-	function toggleRead() {
-		if (!articleId) return;
-		const now = new Date().toISOString();
-		const updated: Progress = {
-			article_id: articleId,
-			position: progress?.position ?? 0,
-			is_read: !progress?.is_read,
-			updated_at: now
-		};
-		progress = updated;
-		enqueueProgress(updated).catch(console.warn);
+	function toggleFullscreen() {
+		if (readerFullscreen.active) {
+			exitReaderFullscreen();
+		} else {
+			enterReaderFullscreen();
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -243,8 +276,11 @@
 	// ---------------------------------------------------------------------------
 
 	function handleWordClick(content: PopoverContent | null, anchor: HTMLElement | null) {
-		// Close sentence sheet when opening word popover.
-		if (content !== null) sentenceContent = null;
+		// Close the sentence sheet / menu when opening a word popover.
+		if (content !== null) {
+			sentenceContent = null;
+			closeSentenceMenu();
+		}
 		wordContent = content;
 		wordAnchor = anchor;
 	}
@@ -254,8 +290,39 @@
 		if (content !== null) {
 			wordContent = null;
 			wordAnchor = null;
+			closeSentenceMenu();
 		}
 		sentenceContent = content;
+	}
+
+	function handleSentenceMenu(content: SentenceMenuContent | null, anchor: HTMLElement | null) {
+		// Opening the menu supersedes any open word popover / sentence sheet.
+		if (content !== null) {
+			wordContent = null;
+			wordAnchor = null;
+			sentenceContent = null;
+		}
+		sentenceMenu = content;
+		sentenceMenuAnchor = anchor;
+	}
+
+	async function handleSentenceCopy(text: string) {
+		closeSentenceMenu();
+		try {
+			await navigator.clipboard.writeText(text);
+			toast('Sentence copied to clipboard.');
+		} catch {
+			toast.error('Could not copy the sentence.');
+		}
+	}
+
+	function handleSentenceTranslate(content: SentenceMenuContent) {
+		closeSentenceMenu();
+		handleSentenceSelect({
+			kind: 'sentence',
+			original: content.original,
+			translation: content.translation
+		});
 	}
 
 	function closeWordPopover() {
@@ -265,6 +332,11 @@
 
 	function closeSentenceSheet() {
 		sentenceContent = null;
+	}
+
+	function closeSentenceMenu() {
+		sentenceMenu = null;
+		sentenceMenuAnchor = null;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -283,7 +355,24 @@
 		loadArticle(id).catch(console.error);
 	});
 
+	// Track the synced reader typography so size/spacing changes apply live.
+	$effect(() => {
+		if (!browser) return;
+		const sub = liveQuery(() => db.sync_state.get(SYNC_STATE_ID)).subscribe({
+			next(state) {
+				if (state?.settings?.font_size) fontSize = state.settings.font_size;
+				if (state?.settings?.line_height) lineHeight = state.settings.line_height;
+			},
+			error(err) {
+				console.error('[reader] sync_state liveQuery error', err);
+			}
+		});
+		return () => sub.unsubscribe();
+	});
+
 	onDestroy(stopPolling);
+	// Immersive mode is reader-only; leave it when navigating away.
+	onDestroy(exitReaderFullscreen);
 </script>
 
 <svelte:head>
@@ -295,6 +384,15 @@
 
 <!-- Sentence sheet -->
 <SentenceSheet content={sentenceContent} onclose={closeSentenceSheet} />
+
+<!-- Sentence long-press action menu -->
+<SentenceMenu
+	content={sentenceMenu}
+	anchorEl={sentenceMenuAnchor}
+	oncopy={handleSentenceCopy}
+	ontranslate={handleSentenceTranslate}
+	onclose={closeSentenceMenu}
+/>
 
 {#if loadState === 'loading'}
 	<!-- Skeleton loader -->
@@ -351,7 +449,7 @@
 	<div class="relative mb-6 flex flex-col gap-3">
 		<div class="flex items-start justify-between gap-3">
 			<h1
-				class="text-xl font-semibold leading-snug sm:text-2xl"
+				class="text-2xl font-semibold leading-snug sm:text-3xl"
 				style="font-family: {getReaderFontCss(readerFont.value)}"
 			>
 				{meta?.title ?? 'Article'}
@@ -359,14 +457,15 @@
 			<Button
 				variant="ghost"
 				size="icon"
-				onclick={toggleRead}
-				aria-label={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
-				title={progress?.is_read ? 'Mark as unread' : 'Mark as read'}
+				class="shrink-0"
+				onclick={toggleFullscreen}
+				aria-label={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
+				title={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
 			>
-				{#if progress?.is_read}
-					<BookOpenCheckIcon class="text-primary size-5" />
+				{#if readerFullscreen.active}
+					<Minimize2Icon class="text-muted-foreground size-5" />
 				{:else}
-					<BookOpenIcon class="text-muted-foreground size-5" />
+					<Maximize2Icon class="text-muted-foreground size-5" />
 				{/if}
 			</Button>
 		</div>
@@ -423,24 +522,30 @@
 			>
 			= difficult word ·
 			<span class="underline decoration-solid decoration-1 underline-offset-3">Solid underline</span
-			> = phrase · Tap to translate · Shift-click or long-press for sentence
+			> = phrase · Tap a word to translate · Long-press for sentence
 		</p>
 	</div>
 
-	<!-- Summary (if any) -->
+	<!-- Summary (if any) — collapsed by default, toggled by the header. -->
 	{#if payload.summary}
-		<div class="bg-muted/40 mb-6 rounded-lg border p-4">
-			<h2
-				class="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase opacity-60"
+		<div class="bg-muted/40 mb-6 rounded-lg border">
+			<button
+				type="button"
+				onclick={() => (summaryOpen = !summaryOpen)}
+				aria-expanded={summaryOpen}
+				class="text-muted-foreground flex w-full items-center justify-between gap-2 p-4 text-xs font-semibold tracking-wide uppercase opacity-60 transition-opacity hover:opacity-100"
 			>
 				Summary
-			</h2>
-			<p class="text-sm leading-relaxed">{payload.summary}</p>
+				<ChevronDownIcon class="size-4 transition-transform {summaryOpen ? 'rotate-180' : ''}" />
+			</button>
+			{#if summaryOpen}
+				<p class="px-4 pb-4 text-sm leading-relaxed">{payload.summary}</p>
+			{/if}
 		</div>
 	{/if}
 
 	<!-- Token renderer -->
-	<div style="font-family: {getReaderFontCss(readerFont.value)}">
+	<div style={readerStyle}>
 		<TokenRenderer
 			tokens={payload.tokens}
 			originalText={payload.original_text}
@@ -448,7 +553,7 @@
 			initialPosition={progress?.position ?? 0}
 			onProgress={handleProgress}
 			onWordClick={handleWordClick}
-			onSentenceSelect={handleSentenceSelect}
+			onSentenceMenu={handleSentenceMenu}
 		/>
 	</div>
 
@@ -464,16 +569,6 @@
 					</div>
 				{/each}
 			</dl>
-		</div>
-	{/if}
-
-	<!-- End-of-article mark-read CTA -->
-	{#if !progress?.is_read}
-		<div class="mt-10 flex justify-center pb-6">
-			<Button variant="outline" onclick={toggleRead} class="gap-2">
-				<BookOpenCheckIcon class="size-4" />
-				Mark as read
-			</Button>
 		</div>
 	{/if}
 {/if}

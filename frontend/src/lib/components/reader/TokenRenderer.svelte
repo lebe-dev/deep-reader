@@ -5,9 +5,9 @@
 	//
 	// Interactions:
 	//   Click word        → phrase (if in phrase range) or difficult-word popover.
-	//   Shift-click word  → sentence sheet.
-	//   Long-press (touch, ≥500ms) → sentence sheet.
-	//   Text selection    → sentence sheet for covering sentence.
+	//   Long-press (touch, ≥500ms) → in-place sentence action menu (the only path
+	//                      to a sentence translation; plain clicks/selection do not
+	//                      open the sentence sheet).
 	//
 	// Reading position: IntersectionObserver tracks furthest-seen word token;
 	// calls onProgress(tokenIndex) when it advances.
@@ -17,13 +17,14 @@
 	import {
 		buildDifficultWordMap,
 		buildPhraseMap,
+		buildRenderSegments,
 		findCoveringSentence,
-		findCoveringSentenceForRange,
 		resolveClickContent,
 		sliceText,
 		type PopoverContent,
-		type SentenceSheetContent
+		type SentenceMenuContent
 	} from './reader-utils';
+	import ImageLightbox from './ImageLightbox.svelte';
 	import { cn } from '$lib/utils';
 
 	interface Props {
@@ -36,8 +37,8 @@
 		onProgress: (tokenIndex: number) => void;
 		/** Called when word/phrase popover content changes. */
 		onWordClick: (content: PopoverContent | null, anchor: HTMLElement | null) => void;
-		/** Called when sentence sheet content changes. */
-		onSentenceSelect: (content: SentenceSheetContent | null) => void;
+		/** Called on long-press to open the in-place sentence action menu. */
+		onSentenceMenu: (content: SentenceMenuContent | null, anchor: HTMLElement | null) => void;
 	}
 
 	let {
@@ -47,7 +48,7 @@
 		initialPosition = 0,
 		onProgress,
 		onWordClick,
-		onSentenceSelect
+		onSentenceMenu
 	}: Props = $props();
 
 	// ---------------------------------------------------------------------------
@@ -86,44 +87,10 @@
 	// Render segments
 	// ---------------------------------------------------------------------------
 	//
-	// The backend tokenizer emits ONLY word tokens (no whitespace/punctuation),
-	// with exact byte offsets into originalText. To render readable prose we must
-	// reconstruct the gaps (spaces, punctuation, newlines) that sit between
-	// consecutive word tokens from originalText itself.
-	//
-	// Token offsets are UTF-8 byte offsets (Go semantics), so we slice the encoded
-	// byte array rather than the JS (UTF-16) string — otherwise every offset after
-	// a non-ASCII character (’ — …) would be wrong.
+	// Word tokens, the reconstructed gaps between them, and any markdown
+	// image/link spans surviving in originalText. See buildRenderSegments.
 
-	interface Segment {
-		word: boolean;
-		text: string;
-		/** token index for word segments; -1 for gap segments. */
-		index: number;
-	}
-
-	const segments = $derived.by<Segment[]>(() => {
-		if (tokens.length === 0) return [];
-		const bytes = new TextEncoder().encode(originalText);
-		const decoder = new TextDecoder();
-		const segs: Segment[] = [];
-		let cursor = 0;
-		for (const token of tokens) {
-			if (token.start > cursor) {
-				segs.push({
-					word: false,
-					text: decoder.decode(bytes.subarray(cursor, token.start)),
-					index: -1
-				});
-			}
-			segs.push({ word: true, text: token.text, index: token.index });
-			cursor = token.end;
-		}
-		if (cursor < bytes.length) {
-			segs.push({ word: false, text: decoder.decode(bytes.subarray(cursor)), index: -1 });
-		}
-		return segs;
-	});
+	const segments = $derived(buildRenderSegments(tokens, originalText));
 
 	// ---------------------------------------------------------------------------
 	// Highlight state
@@ -131,6 +98,9 @@
 
 	let highlightedPhraseRange: { start: number; end: number } | null = $state(null);
 	let highlightedWordIndex: number | null = $state(null);
+
+	// Zoomed image shown in the full-screen lightbox (null = closed).
+	let lightboxImage: { url: string; alt: string } | null = $state(null);
 
 	function clearHighlight() {
 		highlightedPhraseRange = null;
@@ -141,7 +111,6 @@
 	// DOM refs and intersection observer
 	// ---------------------------------------------------------------------------
 
-	let containerEl: HTMLDivElement | undefined = $state();
 	/** token index → span element (populated by the `track` action). */
 	const tokenEls = new Map<number, HTMLElement>();
 
@@ -211,6 +180,10 @@
 	// ---------------------------------------------------------------------------
 
 	let longPressTimer: ReturnType<typeof setTimeout> | undefined;
+	// True between a fired long-press and the trailing synthetic click the browser
+	// emits on finger-up; used to swallow that click so it can't open the sentence
+	// sheet on top of the just-opened action menu.
+	let longPressFired = false;
 	const LONG_PRESS_MS = 500;
 
 	function clearLongPress() {
@@ -224,28 +197,17 @@
 	// Sentence helpers
 	// ---------------------------------------------------------------------------
 
-	function showSentenceForToken(tokenIndex: number) {
+	function showSentenceMenuForToken(tokenIndex: number, anchor: HTMLElement) {
 		const sentence = findCoveringSentence(tokenIndex, enrichment.sentences);
 		if (!sentence) return;
-		onSentenceSelect({
-			kind: 'sentence',
-			original: sliceText(tokens, sentence.start_index, sentence.end_index, originalText),
-			translation: sentence.translation
-		});
-	}
-
-	function showSentenceForRange(startIdx: number, endIdx: number) {
-		const sentence = findCoveringSentenceForRange(startIdx, endIdx, enrichment.sentences);
-		if (sentence) {
-			onSentenceSelect({
-				kind: 'sentence',
+		onSentenceMenu(
+			{
+				kind: 'sentence-menu',
 				original: sliceText(tokens, sentence.start_index, sentence.end_index, originalText),
 				translation: sentence.translation
-			});
-			return;
-		}
-		// Fallback: just start index.
-		showSentenceForToken(startIdx);
+			},
+			anchor
+		);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -253,15 +215,14 @@
 	// ---------------------------------------------------------------------------
 
 	function handleWordClick(event: MouseEvent | TouchEvent, tokenIndex: number) {
-		const target = event.currentTarget as HTMLElement;
-
-		if (event instanceof MouseEvent && event.shiftKey) {
-			event.preventDefault();
-			clearHighlight();
-			onWordClick(null, null);
-			showSentenceForToken(tokenIndex);
+		// Swallow the synthetic click that trails a long-press so it doesn't open
+		// the sentence sheet over the action menu.
+		if (longPressFired) {
+			longPressFired = false;
 			return;
 		}
+
+		const target = event.currentTarget as HTMLElement;
 
 		const result = resolveClickContent(
 			tokenIndex,
@@ -271,10 +232,11 @@
 			phraseMap
 		);
 
+		// Plain words (no difficult-word / phrase enrichment) are inert on click —
+		// sentence translation is reachable only via the long-press action menu.
 		if (!result) {
 			clearHighlight();
 			onWordClick(null, null);
-			showSentenceForToken(tokenIndex);
 			return;
 		}
 
@@ -289,14 +251,18 @@
 		onWordClick(result, target);
 	}
 
-	// Touch: short tap = click, long press = sentence.
-	function handleTouchStart(_event: TouchEvent, tokenIndex: number) {
+	// Touch: short tap = click, long press = sentence action menu.
+	function handleTouchStart(event: TouchEvent, tokenIndex: number) {
 		clearLongPress();
+		longPressFired = false;
+		// Capture the anchor now; currentTarget is null once the timer fires.
+		const anchor = event.currentTarget as HTMLElement;
 		longPressTimer = setTimeout(() => {
 			longPressTimer = undefined;
+			longPressFired = true;
 			clearHighlight();
 			onWordClick(null, null);
-			showSentenceForToken(tokenIndex);
+			showSentenceMenuForToken(tokenIndex, anchor);
 		}, LONG_PRESS_MS);
 	}
 
@@ -309,25 +275,6 @@
 
 	function handleTouchMove() {
 		clearLongPress();
-	}
-
-	// Text selection → sentence sheet.
-	function handleContainerMouseUp(_event: MouseEvent) {
-		const selection = window.getSelection();
-		if (!selection || selection.isCollapsed) return;
-		if (selection.toString().trim().length < 3) return;
-
-		const anchorEl = selection.anchorNode?.parentElement?.closest<HTMLElement>('[data-index]');
-		const focusEl = selection.focusNode?.parentElement?.closest<HTMLElement>('[data-index]');
-		if (!anchorEl || !focusEl) return;
-
-		const a = Number(anchorEl.dataset.index);
-		const b = Number(focusEl.dataset.index);
-		if (isNaN(a) || isNaN(b)) return;
-
-		clearHighlight();
-		onWordClick(null, null);
-		showSentenceForRange(Math.min(a, b), Math.max(a, b));
 	}
 
 	// ---------------------------------------------------------------------------
@@ -351,14 +298,9 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-	bind:this={containerEl}
-	class="reader-content"
-	onmouseup={handleContainerMouseUp}
-	role="document"
->
+<div class="reader-content" role="document">
 	{#each segments as segment, i (i)}
-		{#if segment.word}
+		{#if segment.kind === 'word'}
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<span
 				use:track={segment.index}
@@ -369,16 +311,33 @@
 				ontouchend={(e) => handleTouchEnd(e, segment.index)}
 				ontouchmove={handleTouchMove}>{segment.text}</span
 			>
+		{:else if segment.kind === 'image'}
+			<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+			<img
+				class="reader-image"
+				src={segment.url}
+				alt={segment.alt}
+				loading="lazy"
+				onclick={() => (lightboxImage = { url: segment.url, alt: segment.alt })}
+			/>
+		{:else if segment.kind === 'link'}
+			<a class="reader-link" href={segment.url} target="_blank" rel="noopener noreferrer"
+				>{segment.text}</a
+			>
 		{:else}
 			{segment.text}
 		{/if}
 	{/each}
 </div>
 
+<ImageLightbox image={lightboxImage} onclose={() => (lightboxImage = null)} />
+
 <style>
 	.reader-content {
-		font-size: 1.0625rem;
-		line-height: 1.8;
+		/* Driven by the synced Appearance settings via custom properties set on an
+		   ancestor; the fallbacks reproduce the previous hard-coded defaults. */
+		font-size: var(--reader-font-size, 1.0625rem);
+		line-height: var(--reader-line-height, 1.8);
 		font-family: var(--font-sans, sans-serif);
 		overflow-wrap: break-word;
 		word-break: break-word;
@@ -386,17 +345,29 @@
 		white-space: pre-wrap;
 	}
 
-	@media (max-width: 640px) {
-		.reader-content {
-			font-size: 1rem;
-			line-height: 1.75;
-		}
-	}
-
 	/* Prevent iOS callout / selection on word tokens. */
 	:global(.token) {
 		-webkit-touch-callout: none;
 		-webkit-user-select: none;
 		user-select: none;
+	}
+
+	/* Markdown images rendered inline in the token stream. */
+	.reader-image {
+		display: block;
+		max-width: 100%;
+		height: auto;
+		margin: 1.25rem auto;
+		border-radius: 0.5rem;
+		cursor: zoom-in;
+	}
+
+	/* Markdown links rendered inline in the token stream. */
+	.reader-link {
+		color: var(--color-primary, #3b82f6);
+		text-decoration: underline;
+		text-decoration-thickness: 1px;
+		text-underline-offset: 2px;
+		cursor: pointer;
 	}
 </style>

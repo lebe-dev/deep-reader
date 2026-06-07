@@ -103,6 +103,24 @@ func (f *fakeStore) GetSettings(_ context.Context) (model.Settings, error) {
 func (f *fakeStore) UpdateSettings(_ context.Context, _ model.SettingsPatch) (model.Settings, error) {
 	return model.Settings{}, nil
 }
+func (f *fakeStore) ListLLMProviders(_ context.Context) ([]model.LLMProvider, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetActiveLLMProvider(_ context.Context) (model.LLMProvider, error) {
+	return model.LLMProvider{}, ports.ErrNotFound
+}
+func (f *fakeStore) CreateLLMProvider(_ context.Context, p model.LLMProvider) (model.LLMProvider, error) {
+	return p, nil
+}
+func (f *fakeStore) UpdateLLMProvider(_ context.Context, _ string, _ model.LLMProviderInput) (model.LLMProvider, error) {
+	return model.LLMProvider{}, nil
+}
+func (f *fakeStore) DeleteLLMProvider(_ context.Context, _ string) error {
+	return nil
+}
+func (f *fakeStore) SetActiveLLMProvider(_ context.Context, _ string) error {
+	return nil
+}
 func (f *fakeStore) ListArticleMeta(_ context.Context, _ time.Time) ([]model.ArticleMeta, error) {
 	return nil, nil
 }

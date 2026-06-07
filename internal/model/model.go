@@ -8,6 +8,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -127,6 +128,37 @@ const (
 	MinChunkTokens = 50
 	MaxChunkTokens = 2000
 )
+
+// Reader font-size presets for Settings.FontSize. These map (client-side) to
+// concrete rem values; the backend only stores/validates the enum.
+const (
+	FontSizeS  = "s"
+	FontSizeM  = "m"
+	FontSizeL  = "l"
+	FontSizeXL = "xl"
+)
+
+// FontSizes is the set of valid Settings.FontSize values. DefaultFontSize
+// reproduces the previously hard-coded reader size and must match migration 00016.
+var FontSizes = []string{FontSizeS, FontSizeM, FontSizeL, FontSizeXL}
+
+// DefaultFontSize is the seeded value for Settings.FontSize.
+const DefaultFontSize = FontSizeM
+
+// Reader line-height presets for Settings.LineHeight. These map (client-side)
+// to concrete unitless multipliers; the backend only stores/validates the enum.
+const (
+	LineHeightCompact = "compact"
+	LineHeightNormal  = "normal"
+	LineHeightRelaxed = "relaxed"
+)
+
+// LineHeights is the set of valid Settings.LineHeight values. DefaultLineHeight
+// reproduces the previously hard-coded reader spacing and must match migration 00016.
+var LineHeights = []string{LineHeightCompact, LineHeightNormal, LineHeightRelaxed}
+
+// DefaultLineHeight is the seeded value for Settings.LineHeight.
+const DefaultLineHeight = LineHeightNormal
 
 // DefaultBotWallSignatures is the built-in set of lowercased substrings that
 // flag a bot-verification / captcha interstitial (Cloudflare, Vercel Security
@@ -310,8 +342,14 @@ type Settings struct {
 	// (config.LLMChunkTokens); a non-zero value must be within
 	// [MinChunkTokens, MaxChunkTokens]. Smaller chunks keep each completion
 	// shorter (less truncation risk) at the cost of more requests per article.
-	ChunkTokens int       `json:"chunk_tokens"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ChunkTokens int `json:"chunk_tokens"`
+	// FontSize is the reader text-size preset (FontSize* constants). It controls
+	// only presentation in the article reader and syncs across devices.
+	FontSize string `json:"font_size"`
+	// LineHeight is the reader line-spacing preset (LineHeight* constants). It
+	// controls only presentation in the article reader and syncs across devices.
+	LineHeight string    `json:"line_height"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -328,6 +366,98 @@ type SettingsPatch struct {
 	NormalizePrompt          *string `json:"normalize_prompt,omitempty"`
 	BotWallSignatures        *string `json:"bot_wall_signatures,omitempty"`
 	ChunkTokens              *int    `json:"chunk_tokens,omitempty"`
+	FontSize                 *string `json:"font_size,omitempty"`
+	LineHeight               *string `json:"line_height,omitempty"`
+}
+
+// LLMProvider is a user-managed LLM connection profile (Settings > LLM,
+// backend-only). The active profile (IsActive) supplies the base URL, API key,
+// and model for every LLM call at request time. APIKey is the secret: it is
+// persisted as-is but never serialized to the client — the API returns
+// LLMProviderView with a masked preview instead. Exactly one profile is active.
+type LLMProvider struct {
+	ID        string
+	Name      string
+	BaseURL   string
+	APIKey    string
+	Model     string
+	IsActive  bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// LLMProviderView is the client-facing projection of an LLMProvider. It carries
+// a masked key preview and a HasKey flag instead of the raw secret, so the API
+// can list profiles without ever exposing the stored key.
+type LLMProviderView struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	BaseURL    string    `json:"base_url"`
+	Model      string    `json:"model"`
+	IsActive   bool      `json:"is_active"`
+	HasKey     bool      `json:"has_key"`
+	KeyPreview string    `json:"key_preview"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// View returns the masked, client-safe projection of the provider.
+func (p LLMProvider) View() LLMProviderView {
+	return LLMProviderView{
+		ID:         p.ID,
+		Name:       p.Name,
+		BaseURL:    p.BaseURL,
+		Model:      p.Model,
+		IsActive:   p.IsActive,
+		HasKey:     p.APIKey != "",
+		KeyPreview: MaskSecret(p.APIKey),
+		CreatedAt:  p.CreatedAt,
+		UpdatedAt:  p.UpdatedAt,
+	}
+}
+
+// LLMProviderInput is the create/update payload for a provider. On update a nil
+// APIKey leaves the stored key unchanged (the secret is write-only); a non-nil
+// value replaces it (an empty string clears it). On create a nil APIKey means
+// no key (valid for keyless local providers such as Ollama).
+type LLMProviderInput struct {
+	Name    string  `json:"name"`
+	BaseURL string  `json:"base_url"`
+	Model   string  `json:"model"`
+	APIKey  *string `json:"api_key,omitempty"`
+}
+
+// Validate checks the non-secret fields required for a usable connection. It is
+// called for both create and update; the API maps a non-nil result to 400.
+func (in LLMProviderInput) Validate() error {
+	if strings.TrimSpace(in.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	base := strings.TrimSpace(in.BaseURL)
+	if base == "" {
+		return fmt.Errorf("base_url is required")
+	}
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		return fmt.Errorf("base_url must start with http:// or https://")
+	}
+	if strings.TrimSpace(in.Model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	return nil
+}
+
+// MaskSecret returns a display-safe preview of a secret: bullets followed by the
+// last 4 characters, or "" when empty. Secrets of 4 characters or fewer are
+// fully masked so no meaningful prefix leaks.
+func MaskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	const visible = 4
+	if len(s) <= visible {
+		return strings.Repeat("•", len(s))
+	}
+	return "••••" + s[len(s)-visible:]
 }
 
 // Progress is the reading progress for a single article. It is synced with LWW

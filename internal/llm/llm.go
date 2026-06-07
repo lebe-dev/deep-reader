@@ -21,25 +21,85 @@ import (
 	"deep-reader/internal/ports"
 )
 
-// Client is the LLM client. Construct it with New(cfg).
+// Client is the LLM client. Construct it with New(cfg, opts...).
+//
+// The connection (base URL, API key, model) is resolved per call: when a
+// provider resolver is configured (WithProviderResolver) the active profile
+// wins, so a profile edited in the UI takes effect on the next call without a
+// restart. The cfg-derived fields below are the fallback used when no resolver
+// is set or no profile is configured.
 type Client struct {
+	resolver   ports.LLMProviderResolver
 	baseURL    string
 	apiKey     string
 	model      string
 	httpClient *http.Client
 }
 
+// Option customises Client construction.
+type Option func(*Client)
+
+// WithProviderResolver wires the active-profile resolver (the store). Without it
+// the client uses only its cfg-derived connection.
+func WithProviderResolver(r ports.LLMProviderResolver) Option {
+	return func(c *Client) { c.resolver = r }
+}
+
 // New creates a new Client from cfg. It satisfies ports.LLMClient.
-func New(cfg *config.Config) *Client {
-	baseURL := strings.TrimRight(cfg.LLMAPIBaseURL, "/")
-	return &Client{
-		baseURL: baseURL,
+func New(cfg *config.Config, opts ...Option) *Client {
+	c := &Client{
+		baseURL: strings.TrimRight(cfg.LLMAPIBaseURL, "/"),
 		apiKey:  cfg.LLMAPIKey,
 		model:   cfg.LLMModel,
 		httpClient: &http.Client{
 			Timeout: cfg.LLMRequestTimeout,
 		},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+// conn is the resolved connection for a single call.
+type conn struct {
+	baseURL string
+	apiKey  string
+	model   string
+}
+
+// resolveConn returns the active provider's connection together with a flag
+// reporting whether it came from a profile (vs. the cfg-derived fallback used
+// when no resolver is set or no profile is configured). The flag decides model
+// precedence in effectiveModel: a profile's model is authoritative, whereas the
+// env fallback keeps the legacy "settings.llm_model overrides the deploy
+// default" behaviour.
+func (c *Client) resolveConn(ctx context.Context) (conn, bool) {
+	if c.resolver != nil {
+		if p, err := c.resolver.GetActiveLLMProvider(ctx); err == nil && p.BaseURL != "" {
+			return conn{baseURL: strings.TrimRight(p.BaseURL, "/"), apiKey: p.APIKey, model: p.Model}, true
+		}
+	}
+	return conn{baseURL: c.baseURL, apiKey: c.apiKey, model: c.model}, false
+}
+
+// effectiveModel picks the model name for a request given the resolved
+// connection and the per-user settings override.
+//
+// When the connection comes from an active provider profile, that profile is
+// the single source of truth for the connection — so its model wins and the
+// legacy per-user settings.llm_model only fills in when the profile leaves the
+// model blank (e.g. an env-seeded "Default" profile). Without a profile (env /
+// cfg fallback) the historical precedence holds: settings.llm_model overrides
+// the deployment default so a model can be changed without a redeploy.
+func effectiveModel(cn conn, fromProfile bool, settingsModel string) string {
+	if fromProfile {
+		if cn.model != "" {
+			return cn.model
+		}
+		return settingsModel
+	}
+	return modelName(cn.model, settingsModel)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,8 +423,9 @@ func (e *DecodeError) RawResponse() string { return e.Raw }
 // and returns the parsed model.Enrichment together with provider usage.
 // It honours ctx for cancellation and timeout.
 func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int) (*model.Enrichment, ports.Usage, error) {
+	cn, fromProfile := c.resolveConn(ctx)
 	systemPrompt, userPrompt := buildPrompt(a, settings, enrichmentVersion)
-	return c.complete(ctx, a.ID, modelName(c.model, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
+	return c.complete(ctx, cn, a.ID, effectiveModel(cn, fromProfile, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
 }
 
 // EnrichSpans builds an incremental ("top up") prompt restricted to the supplied
@@ -372,8 +433,9 @@ func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Se
 // (only the annotations for those ranges). The enrich pool merges it into the
 // existing enrichment.
 func (c *Client) EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+	cn, fromProfile := c.resolveConn(ctx)
 	systemPrompt, userPrompt := buildSpanPrompt(a, settings, enrichmentVersion, spans)
-	return c.complete(ctx, a.ID, modelName(c.model, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
+	return c.complete(ctx, cn, a.ID, effectiveModel(cn, fromProfile, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
 }
 
 // summarySchema is the JSON Schema for the summary step: a single short
@@ -421,9 +483,10 @@ func buildSummaryPrompt(a *model.Article, settings model.Settings) (system, user
 // language. It performs exactly one HTTP request; retry/backoff is the caller's
 // responsibility (enrich.Pool).
 func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model.Settings) (string, ports.Usage, error) {
+	cn, fromProfile := c.resolveConn(ctx)
 	systemPrompt, userPrompt := buildSummaryPrompt(a, settings)
 	reqBody := chatRequest{
-		Model: modelName(c.model, settings.LLMModel),
+		Model: effectiveModel(cn, fromProfile, settings.LLMModel),
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -439,11 +502,11 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 		Temperature: 0.2,
 	}
 
-	content, usage, err := c.postChat(ctx, reqBody)
+	content, usage, err := c.postChat(ctx, cn, reqBody)
 	if err != nil {
 		if isSchemaUnsupported(err) {
 			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
-			content, usage, err = c.postChat(ctx, reqBody)
+			content, usage, err = c.postChat(ctx, cn, reqBody)
 		}
 		if err != nil {
 			return "", usage, err
@@ -468,10 +531,11 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 // destroy the article. It performs exactly one HTTP request; retry/backoff is
 // the caller's responsibility (enrich.Pool).
 func (c *Client) Normalize(ctx context.Context, title, text string, settings model.Settings) (string, ports.Usage, error) {
+	cn, fromProfile := c.resolveConn(ctx)
 	systemPrompt := normalize.RenderSystemPrompt(settings)
 	userPrompt := "Article title: " + title + "\n\nArticle text:\n" + text
 	reqBody := chatRequest{
-		Model: modelName(c.model, settings.LLMModel),
+		Model: effectiveModel(cn, fromProfile, settings.LLMModel),
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -479,7 +543,7 @@ func (c *Client) Normalize(ctx context.Context, title, text string, settings mod
 		Temperature: 0,
 	}
 
-	content, usage, err := c.postChat(ctx, reqBody)
+	content, usage, err := c.postChat(ctx, cn, reqBody)
 	if err != nil {
 		return "", usage, err
 	}
@@ -492,7 +556,7 @@ func (c *Client) Normalize(ctx context.Context, title, text string, settings mod
 // enrichment JSON. It prefers the json_schema response format and falls back to
 // json_object once for providers that do not support the schema variant (e.g.
 // older Ollama). tokenCount is logged for observability only.
-func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt, userPrompt string, tokenCount int) (*model.Enrichment, ports.Usage, error) {
+func (c *Client) complete(ctx context.Context, cn conn, articleID, modelID, systemPrompt, userPrompt string, tokenCount int) (*model.Enrichment, ports.Usage, error) {
 	reqBody := chatRequest{
 		Model: modelID,
 		Messages: []chatMessage{
@@ -519,7 +583,7 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 		"response_format", reqBody.ResponseFormat.Type,
 	)
 
-	enrichment, usage, err := c.do(ctx, reqBody)
+	enrichment, usage, err := c.do(ctx, cn, reqBody)
 	if err != nil {
 		// If the provider rejected json_schema, retry once with json_object.
 		if isSchemaUnsupported(err) {
@@ -529,7 +593,7 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 				"err", err,
 			)
 			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
-			enrichment, usage, err = c.do(ctx, reqBody)
+			enrichment, usage, err = c.do(ctx, cn, reqBody)
 		}
 	}
 	return enrichment, usage, err
@@ -537,8 +601,8 @@ func (c *Client) complete(ctx context.Context, articleID, modelID, systemPrompt,
 
 // do sends the chat request and decodes the enrichment JSON from the first
 // choice's message content.
-func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, ports.Usage, error) {
-	content, usage, err := c.postChat(ctx, req)
+func (c *Client) do(ctx context.Context, cn conn, req chatRequest) (*model.Enrichment, ports.Usage, error) {
+	content, usage, err := c.postChat(ctx, cn, req)
 	if err != nil {
 		return nil, usage, err
 	}
@@ -555,19 +619,19 @@ func (c *Client) do(ctx context.Context, req chatRequest) (*model.Enrichment, po
 // postChat sends the chat request, validates the HTTP status, and returns the
 // first choice's raw message content together with provider usage. Decoding the
 // content into a concrete shape is the caller's responsibility.
-func (c *Client) postChat(ctx context.Context, req chatRequest) (string, ports.Usage, error) {
+func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string, ports.Usage, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", ports.Usage{}, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
-	url := c.baseURL + "/chat/completions"
+	url := cn.baseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", ports.Usage{}, fmt.Errorf("llm: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+cn.apiKey)
 
 	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)

@@ -5,8 +5,10 @@
 # TLS is required for Service Workers and PWA install to work on all browsers.
 #
 # Quick start:
-#   cp .env.example .env   # then fill in AUTH_TOKEN and LLM_API_KEY
+#   cp .env.example .env   # adjust ports/limits if needed
 #   docker compose up -d
+#   # then open the app, complete /setup, and add an LLM provider under
+#   # Settings > LLM (base URL, API key, model).
 
 services:
   deep-reader:
