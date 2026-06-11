@@ -1,6 +1,7 @@
 package llm_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1027,5 +1028,536 @@ func TestEnrich_EmptyCompletionIsRetryable(t *testing.T) {
 	}
 	if !decErr.Retryable() {
 		t.Error("empty-completion DecodeError should be retryable")
+	}
+}
+
+// TestEnrich_OversizedBodyIsTransient asserts that a 2xx response whose body
+// exceeds the in-memory cap is rejected as a transient DecodeError (so the pool
+// re-sends) rather than read unbounded into memory. A misbehaving/hostile
+// user-configurable endpoint must not be able to OOM the process.
+func TestEnrich_OversizedBodyIsTransient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Stream well past the 16 MiB cap. The bytes are valid JSON-ish filler;
+		// the point is the size, not the content — the cap fires before decode.
+		chunk := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB
+		for i := 0; i < 20; i++ {                 // 20 MiB total
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError for an oversized body, got %T: %v", err, err)
+	}
+	if !decErr.Retryable() {
+		t.Error("oversized-body DecodeError should be transient/retryable")
+	}
+	if !strings.Contains(decErr.Error(), "exceeds") {
+		t.Errorf("error should mention the size limit, got %q", decErr.Error())
+	}
+}
+
+// TestEnrich_FallbackBothLegsFailJoinsErrors asserts that when the json_schema
+// attempt is rejected AND the json_object retry also fails, the returned error
+// carries BOTH legs (so the persisted reason and the Sentry exception reflect
+// the original schema rejection and the retry failure), and that the duck-typed
+// accessors still resolve through the joined error.
+func TestEnrich_FallbackBothLegsFailJoinsErrors(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body struct {
+			ResponseFormat struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+
+		if body.ResponseFormat.Type == "json_schema" {
+			// First leg: provider rejects json_schema.
+			http.Error(w, `{"error":"json_schema is unsupported by this provider"}`, http.StatusBadRequest)
+			return
+		}
+		// Second leg (json_object): a different, terminal server error.
+		http.Error(w, `the json_object retry blew up`, http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	if err == nil {
+		t.Fatal("expected an error when both legs fail, got nil")
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls (json_schema then json_object), got %d", callCount)
+	}
+
+	// The combined message must reflect BOTH legs.
+	msg := err.Error()
+	if !strings.Contains(msg, "503") {
+		t.Errorf("error message missing the json_object (503) leg: %q", msg)
+	}
+	if !strings.Contains(msg, "400") {
+		t.Errorf("error message missing the original json_schema (400) leg: %q", msg)
+	}
+
+	// errors.As must still resolve an APIError through the join, and it must be
+	// the json_object leg (the one that decided the outcome) — a 503, retryable.
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected an *llm.APIError reachable via errors.As, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("errors.As resolved the wrong leg: StatusCode = %d, want 503 (json_object leg)", apiErr.StatusCode)
+	}
+	if !apiErr.Retryable() {
+		t.Error("the resolved 503 leg should be retryable")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Normalize (fetch-stage content normalization) — HTTP boundary tests.
+// ---------------------------------------------------------------------------
+
+// normalizeServer returns a fake completion server for the Normalize pass. It
+// captures the decoded request body and replies with cannedCleaned as the choice
+// content (Normalize uses the raw completion directly, no JSON wrapper).
+func normalizeServer(t *testing.T, captured *struct {
+	Model       string
+	Auth        string
+	Path        string
+	Method      string
+	System      string
+	User        string
+	Temperature float64
+	HasSchema   bool
+}, cannedCleaned string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.Auth = r.Header.Get("Authorization")
+		captured.Path = r.URL.Path
+		captured.Method = r.Method
+		var body struct {
+			Model          string  `json:"model"`
+			Temperature    float64 `json:"temperature"`
+			ResponseFormat *struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		captured.Model = body.Model
+		captured.Temperature = body.Temperature
+		captured.HasSchema = body.ResponseFormat != nil
+		for _, m := range body.Messages {
+			switch m.Role {
+			case "system":
+				captured.System = m.Content
+			case "user":
+				captured.User = m.Content
+			}
+		}
+		resp := chatResponseJSON(cannedCleaned)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(resp))
+	}))
+}
+
+// chatResponseJSON wraps content in a minimal OpenAI-compatible completion body.
+func chatResponseJSON(content string) string {
+	b, _ := json.Marshal(struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}{
+		Choices: []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}{{Message: struct {
+			Content string `json:"content"`
+		}{Content: content}}},
+	})
+	return string(b)
+}
+
+// TestNormalize_RequestShape asserts Normalize POSTs to /chat/completions with
+// the Bearer auth header, the configured model, a system+user message pair,
+// Temperature 0 (deterministic), and NO json_schema response_format (the
+// normalization completion is plain text, not structured JSON).
+func TestNormalize_RequestShape(t *testing.T) {
+	var cap struct {
+		Model       string
+		Auth        string
+		Path        string
+		Method      string
+		System      string
+		User        string
+		Temperature float64
+		HasSchema   bool
+	}
+	// Echo back text long enough to pass the fail-open keep-ratio guard.
+	srv := normalizeServer(t, &cap, "The quick brown fox jumps over the lazy dog repeatedly today")
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	const text = "The quick brown fox jumps over the lazy dog repeatedly today"
+	_, _, err := client.Normalize(context.Background(), "My Title", text, testSettings())
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+
+	if cap.Path != "/chat/completions" {
+		t.Errorf("path = %q, want /chat/completions", cap.Path)
+	}
+	if cap.Method != http.MethodPost {
+		t.Errorf("method = %q, want POST", cap.Method)
+	}
+	if cap.Auth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want %q", cap.Auth, "Bearer test-key")
+	}
+	if cap.Model != "test-model" {
+		t.Errorf("model = %q, want test-model", cap.Model)
+	}
+	if cap.Temperature != 0 {
+		t.Errorf("temperature = %v, want 0 (deterministic normalization)", cap.Temperature)
+	}
+	if cap.HasSchema {
+		t.Error("Normalize must not send a response_format (plain-text completion, no JSON schema)")
+	}
+	// The user prompt must carry the title and the article body.
+	if !strings.Contains(cap.User, "My Title") || !strings.Contains(cap.User, text) {
+		t.Errorf("user prompt missing title/text: %q", cap.User)
+	}
+	// The system prompt must be the rendered normalization prompt.
+	if !strings.Contains(cap.System, "content-cleaning assistant") {
+		t.Errorf("system prompt is not the normalization prompt: %q", cap.System)
+	}
+}
+
+// TestNormalize_HappyPathReturnsCleaned asserts that a cleaned body that retains
+// enough of the original is accepted and returned (trimmed).
+func TestNormalize_HappyPathReturnsCleaned(t *testing.T) {
+	var cap struct {
+		Model       string
+		Auth        string
+		Path        string
+		Method      string
+		System      string
+		User        string
+		Temperature float64
+		HasSchema   bool
+	}
+	const cleaned = "The quick brown fox jumps over the lazy dog"
+	srv := normalizeServer(t, &cap, "  "+cleaned+"  ") // padded to verify trimming
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	got, _, err := client.Normalize(context.Background(), "T", "The quick brown fox jumps over the lazy dog and more", testSettings())
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got != cleaned {
+		t.Errorf("cleaned = %q, want %q (trimmed accepted body)", got, cleaned)
+	}
+}
+
+// TestNormalize_FailOpenOnEmpty asserts the fail-open guard: when the model
+// returns an empty body, Normalize keeps the ORIGINAL text rather than
+// destroying the article. No error is returned (the pass degrades gracefully).
+func TestNormalize_FailOpenOnEmpty(t *testing.T) {
+	var cap struct {
+		Model       string
+		Auth        string
+		Path        string
+		Method      string
+		System      string
+		User        string
+		Temperature float64
+		HasSchema   bool
+	}
+	srv := normalizeServer(t, &cap, "   ") // whitespace-only "cleaned" output
+	defer srv.Close()
+
+	const original = "The quick brown fox jumps over the lazy dog"
+	client := llm.New(testConfig(srv.URL))
+	got, _, err := client.Normalize(context.Background(), "T", original, testSettings())
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got != original {
+		t.Errorf("empty model output should fail open to the original; got %q", got)
+	}
+}
+
+// TestNormalize_FailOpenOnOverDelete asserts that when the model over-deletes
+// (returns far less than the original word count), the original is kept.
+func TestNormalize_FailOpenOnOverDelete(t *testing.T) {
+	var cap struct {
+		Model       string
+		Auth        string
+		Path        string
+		Method      string
+		System      string
+		User        string
+		Temperature float64
+		HasSchema   bool
+	}
+	// Original has 10 words; cleaned has 2 — below the MinKeepRatio guard.
+	srv := normalizeServer(t, &cap, "fox dog")
+	defer srv.Close()
+
+	const original = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+	client := llm.New(testConfig(srv.URL))
+	got, _, err := client.Normalize(context.Background(), "T", original, testSettings())
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got != original {
+		t.Errorf("over-deletion should fail open to the original; got %q", got)
+	}
+}
+
+// TestNormalize_Non2xxReturnsAPIError asserts that a non-2xx provider response
+// surfaces as a retryable *llm.APIError on the fetch-stage normalization pass.
+func TestNormalize_Non2xxReturnsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Normalize(context.Background(), "T", "some article body text here", testSettings())
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *llm.APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if !apiErr.Retryable() {
+		t.Error("500 APIError should be retryable")
+	}
+}
+
+// TestNormalize_NoFallbackForPlainText asserts that Normalize does NOT attempt a
+// json_schema->json_object fallback: it is a plain-text pass with no
+// response_format, so a 400 surfaces directly as an APIError on a single call
+// (the schema-fallback machinery in complete() must not leak into Normalize).
+func TestNormalize_NoFallbackForPlainText(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		http.Error(w, `{"error":"json_schema is unsupported"}`, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Normalize(context.Background(), "T", "some article body text here", testSettings())
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *llm.APIError, got %T: %v", err, err)
+	}
+	if callCount != 1 {
+		t.Errorf("Normalize must issue exactly 1 request (no schema fallback), got %d", callCount)
+	}
+}
+
+// TestNormalize_UsesActiveProviderConnection asserts the fetch-stage pass honours
+// the active provider profile (base URL, key, model) when a resolver is wired —
+// the same connection-resolution path Enrich uses.
+func TestNormalize_UsesActiveProviderConnection(t *testing.T) {
+	var cap struct {
+		Model       string
+		Auth        string
+		Path        string
+		Method      string
+		System      string
+		User        string
+		Temperature float64
+		HasSchema   bool
+	}
+	srv := normalizeServer(t, &cap, "The quick brown fox jumps over the lazy dog plainly")
+	defer srv.Close()
+
+	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, APIKey: "profile-key", Model: "profile-model"}}
+	client := llm.New(testConfig("http://unused.invalid"), llm.WithProviderResolver(resolver))
+	if _, _, err := client.Normalize(context.Background(), "T", "The quick brown fox jumps over the lazy dog plainly", testSettings()); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if cap.Auth != "Bearer profile-key" {
+		t.Errorf("Authorization = %q, want Bearer profile-key (from active profile)", cap.Auth)
+	}
+	if cap.Model != "profile-model" {
+		t.Errorf("model = %q, want profile-model (from active profile)", cap.Model)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Summarize — fallback and decode-error paths (mirroring the Enrich tests).
+// ---------------------------------------------------------------------------
+
+// TestSummarize_FallbackToJSONObject asserts that when the provider rejects the
+// json_schema response_format with a 400, Summarize retries once with
+// json_object and succeeds — mirroring the Enrich fallback.
+func TestSummarize_FallbackToJSONObject(t *testing.T) {
+	callCount := 0
+	var seenTypes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body struct {
+			ResponseFormat struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		seenTypes = append(seenTypes, body.ResponseFormat.Type)
+
+		if body.ResponseFormat.Type == "json_schema" {
+			http.Error(w, `{"error":"json_schema is unsupported by this provider"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chatResponseJSON(`{"summary":"краткое содержание"}`)))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	summary, _, err := client.Summarize(context.Background(), testArticle(), testSettings())
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls (json_schema then json_object), got %d", callCount)
+	}
+	if seenTypes[0] != "json_schema" || seenTypes[1] != "json_object" {
+		t.Errorf("response_format sequence = %v, want [json_schema json_object]", seenTypes)
+	}
+	if summary != "краткое содержание" {
+		t.Errorf("summary = %q, want краткое содержание", summary)
+	}
+}
+
+// TestSummarize_FallbackOnlyOnSchemaError asserts that a non-schema error (e.g.
+// a 401) is NOT retried: Summarize surfaces it directly on a single call.
+func TestSummarize_FallbackOnlyOnSchemaError(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Summarize(context.Background(), testArticle(), testSettings())
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *llm.APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+	if callCount != 1 {
+		t.Errorf("a 401 is not a schema error and must not be retried; got %d calls", callCount)
+	}
+}
+
+// TestSummarize_ForceJSONObjectSkipsSchema asserts that when the active profile
+// sets ForceJSONObject, Summarize requests json_object directly on the single
+// call — never probing json_schema first.
+func TestSummarize_ForceJSONObjectSkipsSchema(t *testing.T) {
+	callCount := 0
+	var seenType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var body struct {
+			ResponseFormat struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		seenType = body.ResponseFormat.Type
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chatResponseJSON(`{"summary":"ok"}`)))
+	}))
+	defer srv.Close()
+
+	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, Model: "m", ForceJSONObject: true}}
+	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(resolver))
+	if _, _, err := client.Summarize(context.Background(), testArticle(), testSettings()); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 call (no json_schema probe), got %d", callCount)
+	}
+	if seenType != "json_object" {
+		t.Errorf("response_format.type = %q, want json_object", seenType)
+	}
+}
+
+// TestSummarize_EmptyContentIsTransientDecodeError asserts that an empty
+// completion content yields a retryable *llm.DecodeError (the provider returned
+// nothing parseable — a re-send may succeed).
+func TestSummarize_EmptyContentIsTransientDecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chatResponseJSON("   "))) // whitespace-only content
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Summarize(context.Background(), testArticle(), testSettings())
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if !decErr.Retryable() {
+		t.Error("empty summary content should be a transient (retryable) DecodeError")
+	}
+}
+
+// TestSummarize_MalformedContentIsNonTransient asserts that a present-but-
+// malformed summary JSON is a non-retryable DecodeError whose RawResponse() is
+// the verbatim undecodable content.
+func TestSummarize_MalformedContentIsNonTransient(t *testing.T) {
+	const bad = `{"summary": ` // truncated JSON, non-empty
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(chatResponseJSON(bad)))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Summarize(context.Background(), testArticle(), testSettings())
+	var decErr *llm.DecodeError
+	if !errors.As(err, &decErr) {
+		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
+	}
+	if decErr.Retryable() {
+		t.Error("present-but-malformed summary content should not be retryable")
+	}
+	if decErr.RawResponse() != bad {
+		t.Errorf("RawResponse() = %q, want %q", decErr.RawResponse(), bad)
 	}
 }

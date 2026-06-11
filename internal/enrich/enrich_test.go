@@ -1150,124 +1150,11 @@ func TestNotifyIsNonBlocking(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests for validation helpers (not testing the pool).
-// ---------------------------------------------------------------------------
-
-// TestValidateEnrichmentOOBDifficultWord ensures an OOB DifficultWord returns error.
-func TestValidateEnrichmentOOBDifficultWord(t *testing.T) {
-	e := &model.Enrichment{
-		DifficultWords: []model.DifficultWord{
-			{TokenIndex: 10, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
-		},
-	}
-	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
-		t.Error("expected validation error for OOB token_index")
-	}
-}
-
-// TestValidateEnrichmentNegativeIndex ensures a negative index returns error.
-func TestValidateEnrichmentNegativeIndex(t *testing.T) {
-	e := &model.Enrichment{
-		DifficultWords: []model.DifficultWord{
-			{TokenIndex: -1, Lemma: "x", Translation: "x", CEFRLevel: model.CEFRB1},
-		},
-	}
-	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
-		t.Error("expected validation error for negative token_index")
-	}
-}
-
-// TestValidateEnrichmentValidPasses ensures a fully valid enrichment is accepted.
-func TestValidateEnrichmentValidPasses(t *testing.T) {
-	e := goodEnrichment(5)
-	if err := validateEnrichmentExported(e, wordTokens(5)); err != nil {
-		t.Errorf("expected no validation error, got: %v", err)
-	}
-}
-
-// TestValidateEnrichmentEmptyWordTranslation ensures a difficult word with an
-// empty translation is rejected, so a lazy/truncated LLM response is retried
-// rather than silently saved (the bug behind the all-empty-translations report).
-func TestValidateEnrichmentEmptyWordTranslation(t *testing.T) {
-	e := &model.Enrichment{
-		DifficultWords: []model.DifficultWord{
-			{TokenIndex: 0, Lemma: "x", Translation: "", CEFRLevel: model.CEFRA2},
-		},
-	}
-	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
-		t.Error("expected validation error for empty difficult_word translation")
-	}
-}
-
-// TestValidateEnrichmentEmptySentenceTranslation ensures a blank sentence
-// translation is rejected.
-func TestValidateEnrichmentEmptySentenceTranslation(t *testing.T) {
-	e := &model.Enrichment{
-		Sentences: []model.Sentence{
-			{StartIndex: 0, EndIndex: 1, Translation: "   "},
-		},
-	}
-	if err := validateEnrichmentExported(e, wordTokens(5)); err == nil {
-		t.Error("expected validation error for blank sentence translation")
-	}
-}
-
-// TestValidateEnrichmentNil ensures nil enrichment is rejected.
-func TestValidateEnrichmentNil(t *testing.T) {
-	if err := validateEnrichmentExported(nil, wordTokens(5)); err == nil {
-		t.Error("expected error for nil enrichment")
-	}
-}
-
-// TestValidateEnrichmentPhraseTextMismatch ensures a phrase whose echoed text
-// does not match its token range is rejected.
-func TestValidateEnrichmentPhraseTextMismatch(t *testing.T) {
-	tokens := tokensFromWords("semaphore", "is", "a", "variable")
-	e := &model.Enrichment{
-		Phrases: []model.Phrase{
-			// Range spans all four tokens, but Text claims only "semaphore".
-			{StartIndex: 0, EndIndex: 3, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},
-		},
-	}
-	if err := validateEnrichmentExported(e, tokens); err == nil {
-		t.Error("expected validation error when phrase text does not match its token range")
-	}
-}
-
-// TestValidateEnrichmentEmptyPhraseText ensures a blank phrase text is rejected.
-func TestValidateEnrichmentEmptyPhraseText(t *testing.T) {
-	tokens := tokensFromWords("counting", "semaphores")
-	e := &model.Enrichment{
-		Phrases: []model.Phrase{
-			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "  ", Translation: "семафор"},
-		},
-	}
-	if err := validateEnrichmentExported(e, tokens); err == nil {
-		t.Error("expected validation error for empty phrase text")
-	}
-}
-
-// TestValidateEnrichmentPhraseTextMatchPasses ensures matching is tolerant of
-// case, whitespace, and surrounding punctuation: only the lowercased word
-// sequence must agree with the token range.
-func TestValidateEnrichmentPhraseTextMatchPasses(t *testing.T) {
-	tokens := tokensFromWords("counting", "semaphores")
-	e := &model.Enrichment{
-		Phrases: []model.Phrase{
-			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "Counting  semaphores!", Translation: "счётный семафор"},
-		},
-	}
-	if err := validateEnrichmentExported(e, tokens); err != nil {
-		t.Errorf("expected normalised phrase text to match token range, got: %v", err)
-	}
-}
-
-// validateEnrichmentExported is the exported shim used by unit tests.
-// The real function lives in enrich package; we expose it via export_test.go.
-var validateEnrichmentExported = enrich.ValidateEnrichment
-
-// ---------------------------------------------------------------------------
 // Unit tests for sanitizeEnrichment (drop invalid entries, keep valid ones).
+// sanitizeEnrichment is the single accept/reject authority for LLM-produced
+// annotations (validateEnrichment was deleted as dead code); these tests cover
+// every reject predicate it used to enforce — OOB / negative index, start>end,
+// empty translation, empty phrase text, and phrase-text/range drift.
 // ---------------------------------------------------------------------------
 
 // TestSanitizeEnrichmentDropsInvalidKeepsValid verifies that every invalid
@@ -1287,6 +1174,7 @@ func TestSanitizeEnrichmentDropsInvalidKeepsValid(t *testing.T) {
 			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "semaphore", Translation: "семафор"},                   // text mismatch
 			{StartIndex: 3, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "x", Translation: "x"},                                 // start>end
 			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "counting semaphores", Translation: " "},               // empty translation
+			{StartIndex: 0, EndIndex: 1, Type: model.PhraseTypeTerm, Text: "  ", Translation: "счётный семафор"},                  // empty text
 		},
 		Sentences: []model.Sentence{
 			{StartIndex: 0, EndIndex: 3, Translation: "Семафоры полезны"}, // valid
@@ -1597,6 +1485,69 @@ func TestFetchFailedMarksFetchFailed(t *testing.T) {
 	}
 	if st.errMsg("article-badfetch") == "" {
 		t.Error("expected error message to be stored")
+	}
+}
+
+// TestFetchContextCanceledNotMarkedFailed verifies graceful-shutdown handling in
+// the fetch stage: when Extract returns context.Canceled (the worker's context
+// was cancelled mid-call), the article must NOT be persisted as fetch_failed and
+// SetFailed must never fire — otherwise a clean shutdown would manufacture false
+// failures and Sentry noise. The article stays in its in-flight/queued state and
+// is re-selected on the next boot.
+func TestFetchContextCanceledNotMarkedFailed(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-fetchcancel", "https://example.com/a"))
+	ex := &fakeExtractor{err: context.Canceled}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+
+	// Wait until the worker has run the extract at least once, then assert it
+	// never recorded a failed status.
+	runPool(t, pool, 2*time.Second, func() bool {
+		return ex.callCount() >= 1
+	})
+
+	if n := st.failedCount("article-fetchcancel"); n != 0 {
+		t.Errorf("context.Canceled must not mark fetch_failed, got %d SetFailed calls", n)
+	}
+	if got := st.status("article-fetchcancel"); got == model.StatusFetchFailed {
+		t.Errorf("article must not be in fetch_failed after cancellation, got %q", got)
+	}
+	if llm.calls() != 0 {
+		t.Errorf("LLM must not run after a cancelled fetch, got %d calls", llm.calls())
+	}
+}
+
+// TestTopUpContextCanceledNotMarkedFailed verifies graceful-shutdown handling in
+// the incremental (top-up) enrich stage: when EnrichSpans returns
+// context.Canceled, the article must NOT be persisted as enrich_failed and
+// SetFailed must never fire, so a clean shutdown leaves it topup-queued/enriching
+// for the next boot rather than synthesising a failure.
+func TestTopUpContextCanceledNotMarkedFailed(t *testing.T) {
+	const id = "article-topupcancel"
+	article := makeArticle(id, 6)
+	article.Status = model.StatusTopupQueued
+	st := newFakeStore(article)
+	// Existing enrichment covers only [0,2]; tokens [3,5] are an uncovered gap, so
+	// a top-up will issue an EnrichSpans call.
+	st.enrichments[id] = model.Enrichment{
+		DifficultWords: []model.DifficultWord{word(0)},
+		Sentences:      []model.Sentence{sentence(0, 2)},
+	}
+	llm := &fakeLLM{
+		failN:   100, // always fail
+		failErr: context.Canceled,
+	}
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
+
+	runPool(t, pool, 2*time.Second, func() bool {
+		return llm.spanCallCount() >= 1
+	})
+
+	if n := st.failedCount(id); n != 0 {
+		t.Errorf("context.Canceled must not mark enrich_failed, got %d SetFailed calls", n)
+	}
+	if got := st.status(id); got == model.StatusEnrichFailed {
+		t.Errorf("article must not be in enrich_failed after cancellation, got %q", got)
 	}
 }
 

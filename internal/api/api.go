@@ -59,6 +59,10 @@ type Server struct {
 	log        *slog.Logger
 	loginGuard *loginGuard
 	app        *fiber.App
+
+	// ingestMax overrides the POST /api/articles per-minute limit. Zero means
+	// use the default; tests set a small value to trip the 429 deterministically.
+	ingestMax int
 }
 
 // Option customises Server construction. It exists primarily so tests can
@@ -135,9 +139,12 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 		ProxyHeader:      fiber.HeaderXForwardedFor,
 	})
 
-	// Global middleware: recover first so panics in anything below become 500s,
-	// then structured request logging, then dev-only CORS.
-	app.Use(newRecover())
+	// Global middleware: assign a correlation id first so every downstream log
+	// line (including a recovered panic and the request line) can carry it; then
+	// recover so panics in anything below become 500s; then structured request
+	// logging; then dev-only CORS.
+	app.Use(newRequestID())
+	app.Use(newRecover(s.log))
 	app.Use(newRequestLogger(s.log))
 	if c := newCORS(s.devMode()); c != nil {
 		app.Use(c)
@@ -163,7 +170,11 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 
 	api.Get("/articles/:id", s.getArticle)
 	api.Get("/articles/:id/raw", s.getArticleRaw)
-	api.Post("/articles", s.addArticle, s.ingestRateLimiter())
+	// The rate limiter must precede the terminal handler: Fiber runs route
+	// handlers left-to-right and addArticle never calls c.Next(), so a limiter
+	// registered after it would never execute. Putting it first throttles the
+	// endpoint as intended.
+	api.Post("/articles", s.ingestRateLimiter(), s.addArticle)
 	api.Delete("/articles/:id", s.deleteArticle)
 	api.Post("/articles/:id/retry", s.retryArticle)
 	api.Post("/articles/:id/reenrich", s.reEnrichArticle)
@@ -203,11 +214,21 @@ func (s *Server) trustProxyConfig() fiber.TrustProxyConfig {
 	return fiber.TrustProxyConfig{Loopback: true, Private: true, LinkLocal: true}
 }
 
-// ingestRateLimiter limits POST /api/articles to a modest rate. The user is
+// defaultIngestMax is the per-minute cap on POST /api/articles. The user is
 // single, so this only guards against a runaway script, not abuse.
+const defaultIngestMax = 20
+
+// ingestRateLimiter limits POST /api/articles to a modest rate. It must be
+// registered AHEAD of the terminal addArticle handler: Fiber runs route
+// handlers left-to-right and addArticle never calls c.Next(), so a limiter
+// registered after it would never run.
 func (s *Server) ingestRateLimiter() fiber.Handler {
+	max := defaultIngestMax
+	if s.ingestMax > 0 {
+		max = s.ingestMax
+	}
 	return limiter.New(limiter.Config{
-		Max:        20,
+		Max:        max,
 		Expiration: time.Minute,
 		LimitReached: func(c fiber.Ctx) error {
 			return sendError(c, fiber.StatusTooManyRequests, "rate limit exceeded; slow down")
@@ -231,7 +252,13 @@ func (s *Server) errorHandler(c fiber.Ctx, err error) error {
 		}
 	}
 	if status >= 500 {
-		s.log.Error("unhandled error", slog.String("path", c.Path()), slog.Any("error", err))
+		requestID := requestIDOf(c)
+		s.log.Error("unhandled error",
+			slog.String("method", c.Method()),
+			slog.String("path", c.Path()),
+			slog.String("request_id", requestID),
+			slog.Any("error", err),
+		)
 		// Report to Sentry, tagging the request for triage. This is a no-op when
 		// Sentry is not configured (the global hub has no client). It captures
 		// both explicit 500s and handler panics, which the recover middleware
@@ -239,6 +266,9 @@ func (s *Server) errorHandler(c fiber.Ctx, err error) error {
 		sentry.WithScope(func(scope *sentry.Scope) {
 			scope.SetTag("path", c.Path())
 			scope.SetTag("method", c.Method())
+			if requestID != "" {
+				scope.SetTag("request_id", requestID)
+			}
 			sentry.CaptureException(err)
 		})
 	}

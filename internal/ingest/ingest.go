@@ -272,11 +272,15 @@ func hostOf(normalized string) string {
 }
 
 // NormalizeURL returns the canonical form of rawURL used for deduplication:
+//   - a missing scheme (e.g. "//example.com/foo") defaults to https
 //   - scheme and host are lowercased
 //   - utm_* query parameters are stripped
 //   - the fragment (#…) is removed
 //
-// An error is returned if rawURL cannot be parsed or has no host.
+// An error is returned if rawURL cannot be parsed, has no host, or uses a
+// scheme the fetch pipeline cannot handle (only http and https are accepted).
+// Rejecting non-fetchable schemes here prevents creating a stuck record that
+// can never complete the fetch stage.
 func NormalizeURL(rawURL string) (string, error) {
 	if rawURL == "" {
 		return "", fmt.Errorf("empty URL")
@@ -293,6 +297,17 @@ func NormalizeURL(rawURL string) (string, error) {
 	// Lowercase scheme and host.
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
+
+	// A scheme-less URL ("//host/path") parses with a host but no scheme and
+	// would never be fetchable; default it to https instead of stranding the
+	// record. Any other non-HTTP(S) scheme cannot be fetched by the pipeline,
+	// so reject it at ingest time.
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("unsupported URL scheme %q: only http and https are accepted", u.Scheme)
+	}
 
 	// Strip fragment.
 	u.Fragment = ""

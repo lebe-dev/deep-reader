@@ -145,13 +145,36 @@ func TestWarnIsForwarded(t *testing.T) {
 	hub, transport := newHub(t)
 	log := newLogger(hub)
 
-	log.Warn("http 4xx", "status", 404)
+	log.Warn("http 4xx", "status", 400)
 
 	if n := len(transport.captured()); n != 1 {
 		t.Fatalf("want 1 forwarded event, got %d", n)
 	}
 	if transport.captured()[0].Level != sentry.LevelWarning {
 		t.Errorf("level = %q, want warning", transport.captured()[0].Level)
+	}
+}
+
+// TestNon400FourxxIsNotForwarded checks that 4xx statuses other than 400
+// (e.g. 401 unauthorized, 404 not found, 429 rate limited) are expected
+// client conditions and are not sent to Sentry, while plain Warn records
+// without a status (or with a 5xx/non-4xx status) still are.
+func TestNon400FourxxIsNotForwarded(t *testing.T) {
+	hub, transport := newHub(t)
+	log := newLogger(hub)
+
+	log.Warn("http 4xx", "status", 401)
+	log.Warn("http 4xx", "status", 404)
+	log.Warn("http 4xx", "status", 429)
+
+	if n := len(transport.captured()); n != 0 {
+		t.Fatalf("want 0 forwarded events, got %d", n)
+	}
+
+	log.Warn("no status attr")
+
+	if n := len(transport.captured()); n != 1 {
+		t.Fatalf("want 1 forwarded event for status-less warn, got %d", n)
 	}
 }
 

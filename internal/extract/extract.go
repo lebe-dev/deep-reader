@@ -5,13 +5,20 @@
 //
 // Before making any HTTP request (including redirect targets), the resolved IP
 // is checked against:
+//   - the unspecified address (0.0.0.0, ::) — on Linux/macOS this connects to loopback
 //   - loopback (127.0.0.0/8, ::1)
 //   - RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
+//   - CGNAT shared address space (100.64.0.0/10)
 //   - link-local (169.254.0.0/16, fe80::/10)
 //   - ULA IPv6 (fc00::/7)
 //   - the AWS/GCP metadata endpoint 169.254.169.254
 //
-// Any match returns ErrBlockedHost before a connection is opened.
+// Crucially, the check is enforced at connect time against the concrete remote
+// IP the socket is about to dial (via net.Dialer.Control), not only against a
+// pre-flight DNS resolution. This closes the DNS-rebinding TOCTOU window where
+// a hostname resolves to a public IP during the guard check but to a
+// private/loopback IP when the dialer independently re-resolves it. Any match
+// returns ErrBlockedHost before the connection is established.
 package extract
 
 import (
@@ -25,6 +32,7 @@ import (
 	"net/http"
 	nurl "net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	readability "github.com/go-shiori/go-readability"
@@ -82,11 +90,18 @@ func newWithOptions(cfg *config.Config, allowedAddr string) *Extractor {
 		return checkHost(host)
 	}
 
-	// Custom dialer: reject private/reserved IPs at the TCP dial stage so that
-	// even requests that bypass CheckRedirect (direct IPs in URLs) are caught.
+	// Custom dialer with a Control hook that re-validates the concrete remote IP
+	// at connect time. The Go resolver hands Control the exact ip:port the kernel
+	// is about to connect to, so checking it here — rather than relying on a
+	// separate pre-flight DNS lookup — closes the DNS-rebinding TOCTOU: even if a
+	// hostname resolved to a public IP during the guard pass, a rebind to a
+	// private/loopback IP is caught before the socket connects.
 	dialer := &net.Dialer{
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
+		Control: func(_ /* network */ string, address string, _ syscall.RawConn) error {
+			return checkConnectAddr(address, allowedAddr)
+		},
 	}
 
 	transport := &http.Transport{
@@ -95,7 +110,9 @@ func newWithOptions(cfg *config.Config, allowedAddr string) *Extractor {
 			if err != nil {
 				return nil, fmt.Errorf("extract: invalid addr %q: %w", addr, err)
 			}
-			// allowedAddr exempts a specific host:port (test server) from SSRF checks.
+			// Fast-fail pre-check on the hostname for a clearer error before the
+			// dial. The authoritative SSRF guard is dialer.Control, which validates
+			// the concrete remote IP at connect time (DNS-rebinding TOCTOU defense).
 			if allowedAddr == "" || net.JoinHostPort(host, port) != allowedAddr {
 				if err := guard(host); err != nil {
 					return nil, err
@@ -293,13 +310,52 @@ func checkHost(hostname string) error {
 	return nil
 }
 
+// cgnat is the RFC 6598 shared address space 100.64.0.0/10 (carrier-grade NAT).
+// It is routable but private-ish and frequently fronts internal infrastructure,
+// so it is treated as blocked.
+var cgnat = &net.IPNet{
+	IP:   net.IPv4(100, 64, 0, 0),
+	Mask: net.CIDRMask(10, 32),
+}
+
+// checkConnectAddr is the connect-time SSRF guard installed as net.Dialer.Control.
+// address is the concrete ip:port the kernel is about to connect to, so this is
+// the authoritative check that closes the DNS-rebinding TOCTOU. allowedAddr, when
+// non-empty, exempts a single resolved ip:port (the test server).
+func checkConnectAddr(address, allowedAddr string) error {
+	if allowedAddr != "" && address == allowedAddr {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("extract: invalid connect addr %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("%w: unresolvable connect address %q", ErrBlockedHost, host)
+	}
+	if err := checkIP(ip); err != nil {
+		slog.Warn("extract: SSRF guard blocked connect-time IP", "ip", ip.String(), "err", err)
+		return err
+	}
+	return nil
+}
+
 // checkIP returns ErrBlockedHost if ip is in any private/reserved range.
 func checkIP(ip net.IP) error {
+	// The unspecified address (0.0.0.0 / ::) is not "public": on Linux and macOS
+	// a connect to 0.0.0.0 lands on 127.0.0.1, reaching loopback-bound services.
+	if ip.IsUnspecified() {
+		return fmt.Errorf("%w: unspecified address %s", ErrBlockedHost, ip)
+	}
 	if ip.IsLoopback() {
 		return fmt.Errorf("%w: loopback address %s", ErrBlockedHost, ip)
 	}
 	if ip.IsPrivate() {
 		return fmt.Errorf("%w: private address %s", ErrBlockedHost, ip)
+	}
+	if ip4 := ip.To4(); ip4 != nil && cgnat.Contains(ip4) {
+		return fmt.Errorf("%w: CGNAT shared address %s", ErrBlockedHost, ip)
 	}
 	if ip.IsLinkLocalUnicast() {
 		return fmt.Errorf("%w: link-local address %s", ErrBlockedHost, ip)

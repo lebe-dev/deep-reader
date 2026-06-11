@@ -19,7 +19,79 @@ import {
 	reEnrichArticle as apiReEnrichArticle,
 	retryArticle as apiRetryArticle
 } from '$lib/api';
-import type { Progress, ProgressUpdate, ReEnrichMode, SettingsPatch } from '$lib/types';
+import { addSyncBreadcrumb, captureError } from '$lib/sentry';
+import type {
+	ArticlePayload,
+	ConfigResponse,
+	Progress,
+	ProgressUpdate,
+	ReEnrichMode,
+	SettingsPatch
+} from '$lib/types';
+
+// ---------------------------------------------------------------------------
+// Wire contract: the delta-sync cursor is the server's `server_time` (RFC3339).
+// ---------------------------------------------------------------------------
+//
+// The backend GET /api/config emits `server_time` (its authoritative clock) and
+// accepts `?since=<RFC3339>` to narrow the article/progress lists to records
+// updated at or after that instant. Historically the client read a non-existent
+// `cursor` field, so the cursor was permanently undefined: every pull was a full
+// snapshot AND the delete reconciliation (remove local articles absent from the
+// response) happened to be correct *because* the response was always complete.
+//
+// We now read `server_time` as the cursor. That makes pulls true deltas, which
+// means absence from a delta response no longer implies server-side deletion —
+// so the delete reconciliation must run ONLY on a full (no-`since`) sync. Doing
+// one without the other risks mass article deletion (see the project memory note
+// "sync-cursor / toDelete coupling").
+
+/**
+ * The server's sync cursor lives on the wire as `server_time` (an RFC3339
+ * timestamp). The shared `ConfigResponse` type may still carry the legacy
+ * optional `cursor`; prefer `cursor` when a future backend supplies it, else
+ * fall back to `server_time`.
+ */
+function readCursor(response: ConfigResponse): string | undefined {
+	const withTime = response as ConfigResponse & { server_time?: string };
+	return response.cursor ?? withTime.server_time;
+}
+
+// Freshness signal stored alongside a cached payload so an out-of-band re-enrich
+// (another device) that bumps `updated_at` without changing `enrichment_version`
+// still busts the local cache. Stored as an untyped property on the payload row;
+// Dexie persists arbitrary fields and the reader ignores unknown ones.
+const PAYLOAD_FRESHNESS_KEY = '_synced_updated_at';
+type CachedPayload = ArticlePayload & { [PAYLOAD_FRESHNESS_KEY]?: string };
+
+/** Whether a cached payload is still fresh for the given server meta. */
+function isPayloadFresh(
+	cached: CachedPayload | undefined,
+	meta: { enrichment_version: number; updated_at: string }
+): boolean {
+	if (!cached) return false;
+	if (cached.enrichment_version !== meta.enrichment_version) return false;
+	// A same-version re-enrich (other device) bumps updated_at but not the
+	// version — compare the freshness signal so the stale payload is refetched.
+	return cached[PAYLOAD_FRESHNESS_KEY] === meta.updated_at;
+}
+
+/** Parse an RFC3339/ISO timestamp to epoch ms; NaN sorts as oldest. */
+function instant(ts: string | undefined): number {
+	if (!ts) return Number.NEGATIVE_INFINITY;
+	const ms = Date.parse(ts);
+	return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+/**
+ * Last-writer-wins comparison for progress timestamps. Compares parsed instants
+ * rather than lexicographically: server timestamps can be RFC3339Nano while the
+ * client emits millisecond ISO strings, and a raw string compare can invert the
+ * true order across that precision mismatch.
+ */
+function isNewer(candidate: string | undefined, existing: string | undefined): boolean {
+	return instant(candidate) > instant(existing);
+}
 
 // ---------------------------------------------------------------------------
 // pull — server → local diff
@@ -28,15 +100,21 @@ import type { Progress, ProgressUpdate, ReEnrichMode, SettingsPatch } from '$lib
 /**
  * Fetch a delta from the server and apply it to the local IndexedDB.
  * - Upserts new / changed articles_meta.
- * - Removes articles deleted server-side (absent from server list but present locally).
+ * - Removes articles deleted server-side — ONLY on a full (no-cursor) sync,
+ *   where absence from the response truly means deletion. On a delta sync the
+ *   response carries only changed records, so absence is not deletion.
  * - Upserts progress rows (LWW: keep whichever updated_at is newer).
  * - Updates settings singleton in sync_state.
- * - Advances the cursor to the server-returned value.
- * - For newly enriched articles without a cached payload, lazily fetches and
- *   caches the full payload (cache-first; payloads are immutable).
+ * - Advances the cursor to the server-returned `server_time`.
+ * - For enriched articles whose cached payload is stale (version or updated_at
+ *   changed) or absent, lazily fetches and caches the full payload.
  */
 export async function pull(): Promise<void> {
 	const state = await getSyncState();
+	// Empty/undefined cursor → a full snapshot request (no ?since). Delete
+	// reconciliation is only safe on this full request.
+	const isFullSync = !state.cursor;
+	addSyncBreadcrumb('pull start', { full: isFullSync });
 	const response = await getConfig(state.cursor);
 
 	// The session expired or was revoked server-side — drop it and stop. The
@@ -51,9 +129,6 @@ export async function pull(): Promise<void> {
 		[db.articles_meta, db.articles_payload, db.progress, db.sync_state, db.outbox],
 		async () => {
 			// --- articles_meta ---
-			const serverIds = new Set(response.articles.map((a) => a.id));
-			const localMetas = await db.articles_meta.toArray();
-
 			// Exclude articles that are pending deletion in the outbox — a concurrent
 			// pull must not re-insert an article the user just deleted optimistically.
 			const pendingDeletes = await db.outbox.where('kind').equals('delete_article').toArray();
@@ -63,46 +138,58 @@ export async function pull(): Promise<void> {
 			const articlesToUpsert = response.articles.filter((a) => !pendingDeleteIds.has(a.id));
 			await db.articles_meta.bulkPut(articlesToUpsert);
 
-			// Remove articles that are no longer on the server.
-			// Only delete what was previously synced (not newly locally added pending items).
-			const toDelete = localMetas.filter((a) => !serverIds.has(a.id)).map((a) => a.id);
-			if (toDelete.length > 0) {
-				await db.articles_meta.bulkDelete(toDelete);
-				await db.articles_payload.bulkDelete(toDelete);
+			// Remove articles that are no longer on the server — ONLY on a full sync.
+			// On a delta sync the response is the set of *changed* records, so an
+			// article's absence means "unchanged", not "deleted"; deleting on a delta
+			// would wipe the whole untouched library.
+			if (isFullSync) {
+				const serverIds = new Set(response.articles.map((a) => a.id));
+				const localMetas = await db.articles_meta.toArray();
+				// Only delete what was previously synced (not newly locally added
+				// pending items, which are not yet on the server).
+				const toDelete = localMetas
+					.filter((a) => !serverIds.has(a.id) && !pendingDeleteIds.has(a.id))
+					.map((a) => a.id);
+				if (toDelete.length > 0) {
+					await db.articles_meta.bulkDelete(toDelete);
+					await db.articles_payload.bulkDelete(toDelete);
+				}
 			}
 
-			// --- progress (LWW by updated_at) ---
+			// --- progress (LWW by parsed updated_at instant) ---
 			for (const serverProg of response.progress) {
 				const local = await db.progress.get(serverProg.article_id);
-				if (!local || serverProg.updated_at > local.updated_at) {
+				if (!local || isNewer(serverProg.updated_at, local.updated_at)) {
 					await db.progress.put(serverProg);
 				}
 			}
 
-			// --- settings + markdown.new budget + server info ---
+			// --- settings + markdown.new budget + server info + cursor ---
 			await updateSyncState({
 				settings: response.settings,
 				markdownBudget: response.markdown_budget,
 				serverInfo: response.server_info,
-				cursor: response.cursor
+				cursor: readCursor(response)
 			});
 		}
 	);
 
-	// --- lazy payload fetch for enriched articles without a local cache ---
+	// --- lazy payload fetch for enriched articles with a stale/absent cache ---
 	// Run outside the transaction so we don't hold it open during network I/O.
 	const enrichedMetas = response.articles.filter((a) => a.status === 'enriched');
 	for (const meta of enrichedMetas) {
-		const cached = await db.articles_payload.get(meta.id);
-		if (cached && cached.enrichment_version === meta.enrichment_version) continue;
+		const cached = (await db.articles_payload.get(meta.id)) as CachedPayload | undefined;
+		if (isPayloadFresh(cached, meta)) continue;
 
 		// Swallow OfflineError mid-pull; the next pull will retry.
 		try {
 			// Cache-bust by updated_at so a re-enriched article (same
 			// enrichment_version) is fetched fresh rather than served from the
-			// immutable HTTP cache.
+			// immutable HTTP cache. Stamp the freshness signal so a later
+			// out-of-band re-enrich (other device) is detected by isPayloadFresh.
 			const payload = await apiGetArticle(meta.id, undefined, { version: meta.updated_at });
-			await db.articles_payload.put(payload);
+			const stamped: CachedPayload = { ...payload, [PAYLOAD_FRESHNESS_KEY]: meta.updated_at };
+			await db.articles_payload.put(stamped);
 		} catch (err) {
 			if (err instanceof OfflineError) break; // stop trying; no network
 			console.warn(`[sync] payload fetch failed for ${meta.id}`, err);
@@ -115,9 +202,32 @@ export async function pull(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * A redacted, size-only summary of an outbox entry's payload for telemetry.
+ * Never includes raw values — article text, URLs, and settings can be
+ * sensitive — only the key set and the serialized byte size.
+ */
+function payloadSummary(entry: OutboxEntry): Record<string, unknown> {
+	let bytes: number;
+	try {
+		bytes = JSON.stringify(entry.payload ?? null).length;
+	} catch {
+		bytes = -1;
+	}
+	const keys =
+		entry.payload && typeof entry.payload === 'object'
+			? Object.keys(entry.payload as Record<string, unknown>)
+			: [];
+	return { kind: entry.kind, payload_keys: keys, payload_bytes: bytes };
+}
+
+/**
  * Drain the outbox FIFO, sending each entry to the server.
  * - Stops on OfflineError (will retry on next sync).
- * - Drops entries that produce permanent 4xx errors (logs them).
+ * - On 401: keeps the entry, clears the session, and stops.
+ * - Drops entries that produce permanent 4xx errors (reports to Sentry first —
+ *   this is irrecoverable user-write loss — then logs and deletes).
+ * - On 5xx: keeps the entry and stops (reports to Sentry; a persistent 500 can
+ *   otherwise wedge the whole outbox silently).
  * - LWW for progress: skip if a newer local progress row exists.
  */
 export async function flushOutbox(): Promise<void> {
@@ -125,6 +235,7 @@ export async function flushOutbox(): Promise<void> {
 	const entries = await db.outbox.orderBy('id').toArray();
 
 	for (const entry of entries) {
+		addSyncBreadcrumb('outbox dispatch', { id: entry.id, kind: entry.kind });
 		try {
 			await dispatchEntry(entry);
 			// Success — remove from outbox.
@@ -139,7 +250,13 @@ export async function flushOutbox(): Promise<void> {
 			}
 
 			if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-				// Permanent client error — drop to avoid infinite retry.
+				// Permanent client error — drop to avoid infinite retry. This is
+				// irrecoverable loss of a queued write, so report it before deleting
+				// (with a redacted, size-only payload summary — never the raw body).
+				captureError(err, {
+					area: 'sync',
+					extra: { kind: entry.kind, http_status: err.status, ...payloadSummary(entry) }
+				});
 				console.error(
 					`[sync] dropping outbox entry ${entry.id} (${entry.kind}): ${err.status}`,
 					err.body
@@ -148,7 +265,15 @@ export async function flushOutbox(): Promise<void> {
 				continue;
 			}
 
-			// Transient server error — stop; will retry on next sync.
+			// Transient server error (5xx) — keep the entry and stop; will retry on
+			// the next sync. A persistent 500 wedges the whole outbox, so surface it
+			// to Sentry rather than only console.warn.
+			if (err instanceof ApiError) {
+				captureError(err, {
+					area: 'sync',
+					extra: { kind: entry.kind, http_status: err.status, ...payloadSummary(entry) }
+				});
+			}
 			console.warn(`[sync] outbox flush stopped at entry ${entry.id} (${entry.kind})`, err);
 			return;
 		}
@@ -160,9 +285,9 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 	switch (entry.kind) {
 		case 'progress': {
 			const p = entry.payload as { article_id: string } & ProgressUpdate;
-			// LWW: compare with the current local progress row.
+			// LWW: compare parsed instants with the current local progress row.
 			const local = await db.progress.get(p.article_id);
-			if (local && local.updated_at > p.updated_at) return; // superseded
+			if (local && isNewer(local.updated_at, p.updated_at)) return; // superseded
 			await putProgress(p);
 			return;
 		}
@@ -250,9 +375,10 @@ function isOnline(): boolean {
 
 /** Enqueue a progress update and optimistically update local db. */
 export async function enqueueProgress(progress: Progress): Promise<void> {
-	// Optimistic update.
+	// Optimistic update. Write on newer-or-equal (parsed instants), so a same-
+	// instant update from this device still applies.
 	const local = await db.progress.get(progress.article_id);
-	if (!local || progress.updated_at >= local.updated_at) {
+	if (!local || !isNewer(local.updated_at, progress.updated_at)) {
 		await db.progress.put(progress);
 	}
 

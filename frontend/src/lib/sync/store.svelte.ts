@@ -47,9 +47,13 @@ async function runSync(): Promise<void> {
 
 	try {
 		await sync();
-		// Refresh reactive state after a successful sync.
+		// Refresh reactive state after a successful sync. Stamp the last-synced
+		// time from a real local clock rather than the server cursor: the cursor
+		// wire contract (server_time vs cursor) leaves state.cursor undefined, so
+		// binding the indicator to it meant "Synced" never appeared. A local
+		// timestamp is the correct source for a "last successful pull" UI label.
 		const state = await getSyncState();
-		syncStatus.lastSyncedAt = state.cursor; // cursor doubles as last-sync timestamp
+		syncStatus.lastSyncedAt = new Date().toISOString();
 		syncStatus.markdownBudget = state.markdownBudget;
 		syncStatus.pending = await db.outbox.count();
 	} catch (err) {
@@ -104,9 +108,16 @@ export function initSync(): () => void {
 		runSync().catch(console.warn);
 	}
 
+	// Live-update pending count whenever the outbox table changes. Named so the
+	// cleanup below can unsubscribe it (an inline arrow could not be removed).
+	function handleOutboxCreating() {
+		void refreshPending();
+	}
+
 	window.addEventListener('online', handleOnline);
 	window.addEventListener('offline', handleOffline);
 	window.addEventListener('focus', handleFocus);
+	db.outbox.hook('creating', handleOutboxCreating);
 
 	// Initial sync on mount.
 	runSync().catch(console.warn);
@@ -116,18 +127,14 @@ export function initSync(): () => void {
 		if (syncStatus.online) runSync().catch(console.warn);
 	}, FOREGROUND_INTERVAL_MS);
 
-	// Live-update pending count whenever the outbox table changes.
-	db.outbox.hook('creating', () => {
-		void refreshPending();
-	});
-
 	return () => {
 		window.removeEventListener('online', handleOnline);
 		window.removeEventListener('offline', handleOffline);
 		window.removeEventListener('focus', handleFocus);
 		clearInterval(intervalHandle);
-		// Dexie hooks are unsubscribed by calling the returned hook instance.
-		// The hook API doesn't return a cleanup fn in the same way, but we
-		// can safely ignore it for a singleton store that lives for the app lifetime.
+		intervalHandle = undefined;
+		// Unsubscribe the Dexie hook via its DexieEvent so the listener is fully
+		// torn down (the inline subscribe form has no return handle to remove).
+		db.outbox.hook.creating.unsubscribe(handleOutboxCreating);
 	};
 }

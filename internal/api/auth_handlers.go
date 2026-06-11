@@ -79,7 +79,11 @@ func (s *Server) login(c fiber.Ctx) error {
 	user, err := s.store.GetUser(c.Context())
 	if err != nil {
 		if errors.Is(err, ports.ErrNotFound) {
-			// Not initialized yet — the client should be on /setup.
+			// Not initialized yet — the client should be on /setup. Still count
+			// the attempt against the per-IP guard so a script hammering /login
+			// pre-setup is throttled the same as a post-setup brute-force run,
+			// and the uniform 401 keeps the pre/post-setup state from leaking.
+			s.registerLoginFailure(ip)
 			return sendError(c, fiber.StatusUnauthorized, "invalid username or password")
 		}
 		return s.serverError(c, "get user", err)

@@ -23,6 +23,12 @@
 	// Synced threshold from the settings singleton (appears once boot sync runs).
 	let threshold = $state(DEFAULT_THRESHOLD);
 	let dismiss = $state<Dismiss | null>(null);
+	// Reactive "current UTC day". `isDismissed` reads this so a dismissal stops
+	// sticking once the budget resets at UTC midnight even on a long-lived tab.
+	// We avoid a per-second ticker: the day can only change at midnight, so we
+	// schedule a single timer to the next UTC midnight and also recompute when
+	// the tab regains visibility/focus (covers a slept/backgrounded device).
+	let today = $state(utcDay());
 
 	onMount(() => {
 		dismiss = loadDismiss();
@@ -34,11 +40,53 @@
 				console.error('[md-budget-banner] sync_state liveQuery error', err);
 			}
 		});
-		return () => sub.unsubscribe();
+
+		const refreshDay = () => {
+			today = utcDay();
+		};
+
+		// Re-derive the day whenever the user returns to the tab — a backgrounded
+		// timer may have been throttled/coalesced across midnight.
+		document.addEventListener('visibilitychange', refreshDay);
+		window.addEventListener('focus', refreshDay);
+
+		// Tick once at the next UTC midnight (and re-arm for each subsequent day).
+		let timer: ReturnType<typeof setTimeout>;
+		const armMidnight = () => {
+			timer = setTimeout(() => {
+				refreshDay();
+				armMidnight();
+			}, msUntilNextUtcMidnight());
+		};
+		armMidnight();
+
+		return () => {
+			sub.unsubscribe();
+			document.removeEventListener('visibilitychange', refreshDay);
+			window.removeEventListener('focus', refreshDay);
+			clearTimeout(timer);
+		};
 	});
 
 	function utcDay(): string {
 		return new Date().toISOString().slice(0, 10);
+	}
+
+	// Milliseconds from now until the next UTC midnight (00:00:00.000 UTC).
+	function msUntilNextUtcMidnight(): number {
+		const now = new Date();
+		const next = Date.UTC(
+			now.getUTCFullYear(),
+			now.getUTCMonth(),
+			now.getUTCDate() + 1,
+			0,
+			0,
+			0,
+			0
+		);
+		// Guard against a 0/negative interval (rounding at the boundary) so the
+		// timer never tight-loops; fall back to ~1 minute.
+		return Math.max(next - now.getTime(), 60_000);
 	}
 
 	function loadDismiss(): Dismiss | null {
@@ -60,9 +108,10 @@
 	const exhausted = $derived(active && remaining <= 0);
 
 	// A dismissal sticks only for the same UTC day and while the remaining count
-	// hasn't dropped below the value at dismiss time.
+	// hasn't dropped below the value at dismiss time. Reads the reactive `today`
+	// (not utcDay() directly) so it re-evaluates when the UTC day rolls over.
 	const isDismissed = $derived(
-		dismiss !== null && dismiss.day === utcDay() && remaining >= dismiss.atRemaining
+		dismiss !== null && dismiss.day === today && remaining >= dismiss.atRemaining
 	);
 
 	const visible = $derived(active && remaining <= threshold && !isDismissed);

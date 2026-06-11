@@ -312,6 +312,13 @@ func (s *SQLite) GetArticleByHash(ctx context.Context, urlHash string) (*model.A
 
 // ListArticleMeta returns library metadata for all articles whose updated_at is
 // >= since. Pass the zero time to list everything.
+//
+// The comparison is inclusive (>=), not strict (>), on purpose: timestamps are
+// stored at second resolution (see now()), so a strict > against a second-
+// truncated cursor would silently drop a write that landed in the same second
+// the cursor was handed out — a lost update that never rides any delta sync. The
+// inclusive bound instead re-includes the boundary row; the client de-dups it
+// idempotently (articles_meta.bulkPut on the same id is a no-op overwrite).
 func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.ArticleMeta, error) {
 	var (
 		rows *sql.Rows
@@ -325,7 +332,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 	} else {
 		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
                           json_array_length(tokens), enrichment_coverage, COALESCE(summary, ''), progress_stage, llm_model
-                   FROM articles WHERE updated_at > ? ORDER BY created_at DESC`
+                   FROM articles WHERE updated_at >= ? ORDER BY created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
 	}
 	if err != nil {
@@ -993,8 +1000,13 @@ func (s *SQLite) UpsertProgress(ctx context.Context, p model.Progress) (bool, er
 	return true, nil
 }
 
-// ListProgress returns progress records updated after since. Pass zero time
-// for everything.
+// ListProgress returns progress records whose updated_at is >= since. Pass zero
+// time for everything.
+//
+// As with ListArticleMeta the bound is inclusive (>=) rather than strict (>) so
+// a progress write in the same second the cursor was issued is not lost; the
+// client de-dups the boundary row via progress LWW (the re-sent record has an
+// equal updated_at and is rejected as not strictly newer).
 func (s *SQLite) ListProgress(ctx context.Context, since time.Time) ([]model.Progress, error) {
 	var (
 		rows *sql.Rows
@@ -1005,7 +1017,7 @@ func (s *SQLite) ListProgress(ctx context.Context, since time.Time) ([]model.Pro
 			`SELECT article_id, position, is_read, updated_at FROM progress`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT article_id, position, is_read, updated_at FROM progress WHERE updated_at > ?`,
+			`SELECT article_id, position, is_read, updated_at FROM progress WHERE updated_at >= ?`,
 			fmtTime(since))
 	}
 	if err != nil {

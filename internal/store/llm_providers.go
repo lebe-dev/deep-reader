@@ -112,7 +112,10 @@ func (s *SQLite) UpdateLLMProvider(ctx context.Context, id string, in model.LLMP
 }
 
 // DeleteLLMProvider removes the profile id, promoting the most-recently-created
-// remaining profile to active if the deleted one was active.
+// remaining profile to active if the deleted one was active. The delete and the
+// conditional promote run in a single transaction so a crash between them can
+// never leave the deployment with zero active providers: either both land or
+// neither does.
 func (s *SQLite) DeleteLLMProvider(ctx context.Context, id string) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
@@ -126,19 +129,29 @@ func (s *SQLite) DeleteLLMProvider(ctx context.Context, id string) error {
 		return fmt.Errorf("store: DeleteLLMProvider read: %w", err)
 	}
 
-	if _, err := s.write.ExecContext(ctx, `DELETE FROM llm_providers WHERE id = ?`, id); err != nil {
+	tx, err := s.write.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: DeleteLLMProvider begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM llm_providers WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("store: DeleteLLMProvider delete: %w", err)
 	}
 
-	if wasActive == 0 {
-		return nil
+	if wasActive != 0 {
+		// Promote the newest remaining profile so an active connection always
+		// exists while any profile remains. The subquery yields no row when the
+		// table is now empty, so the UPDATE is a safe no-op in that case.
+		const promoteQ = `UPDATE llm_providers SET is_active = 1
+		                  WHERE id = (SELECT id FROM llm_providers ORDER BY created_at DESC, id DESC LIMIT 1)`
+		if _, err := tx.ExecContext(ctx, promoteQ); err != nil {
+			return fmt.Errorf("store: DeleteLLMProvider promote: %w", err)
+		}
 	}
-	// Promote the newest remaining profile so an active connection always exists
-	// while any profile remains.
-	const promoteQ = `UPDATE llm_providers SET is_active = 1
-	                  WHERE id = (SELECT id FROM llm_providers ORDER BY created_at DESC, id DESC LIMIT 1)`
-	if _, err := s.write.ExecContext(ctx, promoteQ); err != nil {
-		return fmt.Errorf("store: DeleteLLMProvider promote: %w", err)
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: DeleteLLMProvider commit: %w", err)
 	}
 	return nil
 }
@@ -189,7 +202,22 @@ func (s *SQLite) seedLLMProvider(ctx context.Context, cfg *config.Config) error 
 	if count > 0 {
 		return nil
 	}
+	// No LLM env config at all — nothing to seed, and the user will configure a
+	// provider through the UI. This is the expected fresh-install path.
 	if cfg.LLMAPIKey == "" && cfg.LLMAPIBaseURL == "" && cfg.LLMModel == "" {
+		return nil
+	}
+	// Some LLM env config is present but incomplete: a seeded profile missing
+	// base_url or model would later fail LLMProviderInput.Validate() (and every
+	// LLM call), so do not persist a broken profile. Warn loudly instead so the
+	// operator knows their partial env config was ignored and must finish the
+	// profile in the UI.
+	if cfg.LLMAPIBaseURL == "" || cfg.LLMModel == "" {
+		slog.Warn("store: skipping LLM provider seed — incomplete env config (LLM_API_BASE_URL and LLM_MODEL are both required); configure a provider in Settings > LLM",
+			"has_base_url", cfg.LLMAPIBaseURL != "",
+			"has_model", cfg.LLMModel != "",
+			"has_api_key", cfg.LLMAPIKey != "",
+		)
 		return nil
 	}
 	if _, err := s.CreateLLMProvider(ctx, model.LLMProvider{

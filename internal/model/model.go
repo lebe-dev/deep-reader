@@ -651,8 +651,17 @@ type AuthStatus struct {
 }
 
 // ConfigResponse is the single bootstrap/delta-sync response from
-// GET /api/config. ServerTime is the authoritative clock the client should use
-// as the next sync cursor.
+// GET /api/config. Cursor is the authoritative value the client persists and
+// passes back as ?since= on its next sync; ServerTime is the same instant kept
+// under its historical name for backward compatibility.
+//
+// Wire contract (delta sync): the PWA reads Cursor (`cursor`), stores it, and
+// echoes it as ?since= next time. The contract is intentionally coupled to the
+// client's delete reconciliation: the client must only reconcile server-side
+// deletions on a FULL sync (no cursor / empty ?since=), never on a delta. A
+// delta response carries only rows changed since the cursor, so treating its
+// absent rows as deletions would mass-delete the library. Do not populate Cursor
+// on the backend without the matching client guard (and vice versa).
 //
 // Auth is always populated. When the caller is not authenticated (or the service
 // is not initialized) the heavy library fields are left empty — the client only
@@ -668,8 +677,16 @@ type ConfigResponse struct {
 	// Sentry carries the non-secret browser Sentry configuration. It is present
 	// even for unauthenticated callers so error reporting works on the /login and
 	// /setup pages; DSN is empty when frontend reporting is disabled.
-	Sentry     SentryConfig `json:"sentry"`
-	ServerTime time.Time    `json:"server_time"`
+	Sentry SentryConfig `json:"sentry"`
+	// Cursor is the next-sync cursor the client persists and echoes as ?since=.
+	// It is the same instant as ServerTime; the field exists so the wire name
+	// (`cursor`) matches what the PWA sync engine reads. Because timestamps are
+	// stored at second resolution and ListArticleMeta/ListProgress select with
+	// updated_at >= since (inclusive), a cursor at second T re-includes any row
+	// stamped at exactly T — the client de-dups idempotently (bulkPut / progress
+	// LWW), closing the same-second lost-update window a strict > comparison left.
+	Cursor     time.Time `json:"cursor"`
+	ServerTime time.Time `json:"server_time"`
 }
 
 // SentryConfig is the browser Sentry configuration delivered to the client on

@@ -10,10 +10,11 @@ import {
 	login as apiLogin,
 	logout as apiLogout,
 	setup as apiSetup,
+	ApiError,
 	OfflineError
 } from '$lib/api';
 import { getSyncState, updateSyncState } from '$lib/db';
-import { initSentry } from '$lib/sentry';
+import { captureError, clearSentryUser, initSentry, setSentryUser } from '$lib/sentry';
 
 export interface AuthState {
 	/**
@@ -30,6 +31,24 @@ export interface AuthState {
 }
 
 export const authState = $state<AuthState>({ authenticated: false, checked: false });
+
+/**
+ * Whether an error from a best-effort, server-touching action is "expected" and
+ * therefore should be swallowed silently rather than reported to Sentry.
+ *
+ * - `OfflineError` is routine (the user is simply offline).
+ * - A 4xx response means the server was reached and answered deterministically
+ *   (e.g. logging out with an already-revoked token returns 401); that is the
+ *   action's normal failure mode, not a systemic backend problem.
+ *
+ * Everything else — 5xx, unexpected exceptions — is captured so a systemic
+ * backend issue surfacing across many users produces an aggregate signal.
+ */
+function isExpectedActionError(err: unknown): boolean {
+	if (err instanceof OfflineError) return true;
+	if (err instanceof ApiError) return err.status >= 400 && err.status < 500;
+	return false;
+}
 
 /**
  * Re-evaluate auth state against the server. Uses `GET /api/config`, the only
@@ -68,6 +87,8 @@ export async function setupAccount(username: string, password: string): Promise<
 	authState.initialized = true;
 	authState.authenticated = true;
 	authState.username = res.username;
+	// Associate subsequent Sentry events with this user (single-user app, no PII).
+	setSentryUser(res.username);
 }
 
 /** Verify credentials, store the returned token, mark as authenticated. */
@@ -77,14 +98,22 @@ export async function login(username: string, password: string): Promise<void> {
 	authState.initialized = true;
 	authState.authenticated = true;
 	authState.username = res.username;
+	// Associate subsequent Sentry events with this user (single-user app, no PII).
+	setSentryUser(res.username);
 }
 
 /** End the session server-side (best-effort) and clear the local token. */
 export async function logout(): Promise<void> {
 	try {
 		await apiLogout();
-	} catch {
-		// Best-effort: even if the network call fails, drop the local token below.
+	} catch (err) {
+		// Best-effort: even if the call fails, drop the local token below. Offline
+		// and expected 4xx (e.g. an already-revoked token) are routine and stay
+		// silent; anything else (5xx, unexpected) is captured so a systemic backend
+		// problem hitting many users produces an aggregate signal.
+		if (!isExpectedActionError(err)) {
+			captureError(err, { area: 'auth', extra: { action: 'logout' } });
+		}
 	}
 	await clearSession();
 }
@@ -97,4 +126,6 @@ export async function clearSession(): Promise<void> {
 	await updateSyncState({ authToken: undefined });
 	authState.authenticated = false;
 	authState.username = undefined;
+	// Stop associating future Sentry events with the (now logged-out) user.
+	clearSentryUser();
 }

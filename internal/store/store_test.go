@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1460,5 +1461,290 @@ func TestSetProgressStage(t *testing.T) {
 	}
 	if p, _ := s.GetArticlePayload(ctx, a.ID); p.ProgressStage != "" {
 		t.Errorf("progress_stage after SetFailed: got %q, want empty", p.ProgressStage)
+	}
+}
+
+// ── since cursor: same-second window ─────────────────────────────────────────
+
+// TestListArticleMeta_SinceInclusiveSameSecond is the regression test for the
+// same-second lost-update window: timestamps are stored at second resolution,
+// so a write that lands in the exact second a cursor was issued must still ride
+// the next delta. The ListArticleMeta `since` bound is inclusive (>=), so a
+// cursor equal to the row's updated_at re-includes that row (the client de-dups
+// it idempotently). A strict > bound would silently drop it.
+func TestListArticleMeta_SinceInclusiveSameSecond(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// A single article whose updated_at is an exact, second-truncated instant.
+	ts := time.Now().UTC().Truncate(time.Second)
+	a := makeArticle("https://example.com/same-second")
+	a.UpdatedAt = ts
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	// A cursor equal to the row's own updated_at (the same-second case) must
+	// still return the row — proving the boundary is inclusive, not strict.
+	metas, err := s.ListArticleMeta(ctx, ts)
+	if err != nil {
+		t.Fatalf("ListArticleMeta(since==updated_at): %v", err)
+	}
+	if len(metas) != 1 || metas[0].ID != a.ID {
+		t.Fatalf("same-second cursor should re-include the boundary row, got %+v", metas)
+	}
+
+	// A cursor one second in the future excludes it (nothing newer exists).
+	metas, err = s.ListArticleMeta(ctx, ts.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ListArticleMeta(since>updated_at): %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("a strictly-future cursor should exclude the row, got %+v", metas)
+	}
+}
+
+// TestListProgress_SinceInclusiveSameSecond is the progress-side companion of
+// the same-second regression: a progress write stamped in the same second the
+// cursor was handed out must still be returned (inclusive >= bound). The client
+// de-dups the boundary row via progress LWW (equal updated_at is not strictly
+// newer, so it is rejected).
+func TestListProgress_SinceInclusiveSameSecond(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/progress-same-second")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	ts := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.UpsertProgress(ctx, model.Progress{ArticleID: a.ID, Position: 42, UpdatedAt: ts}); err != nil {
+		t.Fatalf("UpsertProgress: %v", err)
+	}
+
+	got, err := s.ListProgress(ctx, ts)
+	if err != nil {
+		t.Fatalf("ListProgress(since==updated_at): %v", err)
+	}
+	if len(got) != 1 || got[0].ArticleID != a.ID {
+		t.Fatalf("same-second cursor should re-include the progress row, got %+v", got)
+	}
+
+	got, err = s.ListProgress(ctx, ts.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ListProgress(since>updated_at): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a strictly-future cursor should exclude the progress row, got %+v", got)
+	}
+}
+
+// ── SaveSummary ──────────────────────────────────────────────────────────────
+
+// TestSaveSummary persists the article summary (the first step of step-wise
+// enrichment) and asserts it round-trips through the reader payload and the
+// library metadata projection WITHOUT touching status — an interrupted article
+// must still be re-selected and resumed, so SaveSummary deliberately leaves the
+// pipeline state alone.
+func TestSaveSummary(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/summary")
+	a.Status = model.StatusEnriching // a mid-pipeline state we expect preserved
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	const summary = "A short abstract of the article."
+	if err := s.SaveSummary(ctx, a.ID, summary); err != nil {
+		t.Fatalf("SaveSummary: %v", err)
+	}
+
+	// Round-trips through the reader payload.
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.Summary != summary {
+		t.Errorf("payload summary: got %q, want %q", payload.Summary, summary)
+	}
+
+	// Round-trips through the library metadata projection.
+	metas, err := s.ListArticleMeta(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListArticleMeta: %v", err)
+	}
+	if len(metas) != 1 || metas[0].Summary != summary {
+		t.Fatalf("meta summary: got %+v, want one row with the summary", metas)
+	}
+
+	// Status is preserved (resume-friendly): SaveSummary must not advance it.
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusEnriching {
+		t.Errorf("status after SaveSummary: got %q, want %q (unchanged)", got.Status, model.StatusEnriching)
+	}
+}
+
+// TestSaveSummary_NotFound asserts the ErrNotFound branch: saving a summary for
+// a never-existed article (and for one deleted mid-flight) returns the sentinel
+// rather than a silent no-op.
+func TestSaveSummary_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	if err := s.SaveSummary(ctx, "no-such-id", "x"); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing article, got %v", err)
+	}
+
+	a := makeArticle("https://example.com/summary-deleted")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.DeleteArticle(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteArticle: %v", err)
+	}
+	if err := s.SaveSummary(ctx, a.ID, "x"); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+}
+
+// ── SaveEnrichmentProgress ───────────────────────────────────────────────────
+
+// TestSaveEnrichmentProgress_PartialPreservesStatus verifies the intermediate
+// step-wise save: it persists a partial enrichment blob, recomputes the
+// sentence-coverage signal, and — crucially — leaves status UNCHANGED and does
+// not stamp enriched_at, so an interrupted article is still re-selected by
+// ListWork and resumed. It does NOT flip the article to enriched.
+func TestSaveEnrichmentProgress_PartialPreservesStatus(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/progress-partial")
+	a.Status = model.StatusEnriching
+	// Four tokens; the partial step covers only the first two.
+	a.Tokens = []model.Token{
+		{Index: 0, Text: "a", Start: 0, End: 1},
+		{Index: 1, Text: "b", Start: 1, End: 2},
+		{Index: 2, Text: "c", Start: 2, End: 3},
+		{Index: 3, Text: "d", Start: 3, End: 4},
+	}
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	partial := model.Enrichment{
+		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 1, Translation: "ab"}},
+	}
+	if err := s.SaveEnrichmentProgress(ctx, a.ID, partial); err != nil {
+		t.Fatalf("SaveEnrichmentProgress: %v", err)
+	}
+
+	// The partial enrichment is persisted and readable.
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.Enrichment == nil || len(payload.Enrichment.Sentences) != 1 {
+		t.Fatalf("partial enrichment not persisted: %+v", payload.Enrichment)
+	}
+
+	// Coverage reflects the half-covered article (2 of 4 tokens).
+	if payload.EnrichmentCoverage != 0.5 {
+		t.Errorf("coverage: got %v, want 0.5", payload.EnrichmentCoverage)
+	}
+
+	// Status is still the in-flight state and enriched_at is unset — the worker
+	// will re-select and resume this article.
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusEnriching {
+		t.Errorf("status: got %q, want %q (unchanged)", got.Status, model.StatusEnriching)
+	}
+	if !got.EnrichedAt.IsZero() {
+		t.Errorf("enriched_at should remain zero for a partial save, got %v", got.EnrichedAt)
+	}
+
+	// A subsequent full-coverage save lifts coverage to 1.0 while still leaving
+	// status untouched (the terminal flip is SaveEnrichment's job, not this one).
+	full := model.Enrichment{
+		Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 3, Translation: "abcd"}},
+	}
+	if err := s.SaveEnrichmentProgress(ctx, a.ID, full); err != nil {
+		t.Fatalf("SaveEnrichmentProgress (full): %v", err)
+	}
+	payload, err = s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload after full: %v", err)
+	}
+	if payload.EnrichmentCoverage != 1.0 {
+		t.Errorf("coverage after full save: got %v, want 1.0", payload.EnrichmentCoverage)
+	}
+	if payload.Status != model.StatusEnriching {
+		t.Errorf("status after full progress save: got %q, want %q (still unchanged)", payload.Status, model.StatusEnriching)
+	}
+}
+
+// TestSaveEnrichmentProgress_NotFound asserts both ErrNotFound branches of the
+// step-wise save: the article never existed, and the article was deleted while
+// the enrichment was in flight (the FOREIGN KEY violation on the enrichments
+// upsert is mapped via isSQLiteForeignKey to the ErrNotFound sentinel rather
+// than surfacing a raw constraint error). This is also the behavioral guard on
+// the fragile string-match in isSQLiteForeignKey: a driver text change that
+// stopped matching "FOREIGN KEY" would break this 404 mapping and fail here.
+func TestSaveEnrichmentProgress_NotFound(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// Never-existed article — the in-tx token-count read misses (sql.ErrNoRows).
+	if err := s.SaveEnrichmentProgress(ctx, "no-such-id", model.Enrichment{}); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing article, got %v", err)
+	}
+
+	// Article that existed, then was deleted before the progress save.
+	a := makeArticle("https://example.com/progress-deleted")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.DeleteArticle(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteArticle: %v", err)
+	}
+	if err := s.SaveEnrichmentProgress(ctx, a.ID, model.Enrichment{}); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+}
+
+// TestForeignKeyErrorTextContract pins the fragile substring that
+// isSQLiteForeignKey relies on to gate the ErrNotFound (404) mapping. The
+// matcher classifies a constraint error as a FOREIGN KEY violation purely by
+// string-matching "FOREIGN KEY" in the driver's error text, so a modernc.org/
+// sqlite upgrade that reworded the message would silently break the mapping
+// (SaveEnrichment/SaveEnrichmentProgress would surface a raw 500 instead of a
+// benign 404 race). This drives a REAL foreign-key violation through the live
+// driver (inserting progress for a non-existent article) and asserts the text
+// still contains the substring. If this fails after a dependency bump, update
+// isSQLiteForeignKey to match the new wording.
+func TestForeignKeyErrorTextContract(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	// No article with this id exists, so the progress INSERT violates the
+	// progress.article_id -> articles.id foreign key.
+	_, err := s.UpsertProgress(ctx, model.Progress{
+		ArticleID: "ghost-article-id",
+		Position:  1,
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
+	})
+	if err == nil {
+		t.Fatal("expected a foreign-key constraint error inserting progress for a missing article, got nil")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("driver FK error text changed — isSQLiteForeignKey would stop mapping 404s.\n got: %v", err)
 	}
 }

@@ -107,7 +107,12 @@
 	function handleWarnThresholdChange(raw: string) {
 		if (!settings) return;
 		const n = Number.parseInt(raw, 10);
-		if (Number.isNaN(n) || n < 0 || n > 100) return;
+		// Surface invalid input with a toast (mirrors the chunk-size handler in
+		// LlmSettings) instead of silently no-op'ing.
+		if (Number.isNaN(n) || n < 0 || n > 100) {
+			toast.error('Threshold must be between 0 and 100');
+			return;
+		}
 		if (n === settings.markdown_warn_threshold) return;
 		patchField({ markdown_warn_threshold: n });
 	}

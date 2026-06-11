@@ -55,9 +55,18 @@ type fakeStore struct {
 	lastUpsert     model.Progress
 	lastSinceMeta  time.Time
 	markdownUsed   int
+	markdownErr    error
 	setPinnedErr   error
 	lastPinID      string
 	lastPinned     bool
+
+	// sessionErr, when set, makes SessionExists fail — simulating a DB outage so
+	// auth must surface a 5xx rather than masking it as a 401.
+	sessionErr error
+
+	// panicOnIsInitialized, when set, makes IsInitialized panic with this value —
+	// used to exercise the recover middleware (GET /api/config calls it first).
+	panicOnIsInitialized string
 
 	// llm providers
 	providers []model.LLMProvider
@@ -212,7 +221,7 @@ func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {
 }
 
 func (f *fakeStore) MarkdownUnitsUsedToday(context.Context) (int, error) {
-	return f.markdownUsed, nil
+	return f.markdownUsed, f.markdownErr
 }
 
 func (f *fakeStore) TryConsumeMarkdownUnits(context.Context, int, int) (bool, int, error) {
@@ -221,7 +230,12 @@ func (f *fakeStore) TryConsumeMarkdownUnits(context.Context, int, int) (bool, in
 
 func (f *fakeStore) RefundMarkdownUnits(context.Context, int) error { return nil }
 
-func (f *fakeStore) IsInitialized(context.Context) (bool, error) { return f.initialized, nil }
+func (f *fakeStore) IsInitialized(context.Context) (bool, error) {
+	if f.panicOnIsInitialized != "" {
+		panic(f.panicOnIsInitialized)
+	}
+	return f.initialized, nil
+}
 
 func (f *fakeStore) CreateUser(_ context.Context, username, hash string) error {
 	if f.createUserErr != nil {
@@ -248,6 +262,9 @@ func (f *fakeStore) CreateSession(_ context.Context, tokenHash string, _ time.Ti
 }
 
 func (f *fakeStore) SessionExists(_ context.Context, tokenHash string) (bool, error) {
+	if f.sessionErr != nil {
+		return false, f.sessionErr
+	}
 	return f.sessions[tokenHash], nil
 }
 
@@ -302,6 +319,13 @@ func (f *fakeIngestor) ReEnrich(_ context.Context, id, mode string) error {
 
 func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 	t.Helper()
+	return newTestServerCfg(t, st, ing, nil)
+}
+
+// newTestServerCfg builds a test server like newTestServer but lets a test tweak
+// the config (e.g. enable markdown.new) before construction.
+func newTestServerCfg(t *testing.T, st ports.Store, ing ports.Ingestor, tweak func(*config.Config)) *Server {
+	t.Helper()
 	cfg := &config.Config{
 		HTTPPort:          8080,
 		LogLevel:          "info",
@@ -309,6 +333,9 @@ func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 		SentryDSN:         testSentryBackendDSN,
 		SentryFrontendDSN: testSentryDSN,
 		SentryEnvironment: testSentryEnv,
+	}
+	if tweak != nil {
+		tweak(cfg)
 	}
 	// Seed the common case: an initialized service with a valid session for
 	// testToken, so existing protected-route tests authenticate with that bearer.
@@ -320,17 +347,8 @@ func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 		}
 		fs.sessions[auth.HashToken(testToken)] = true
 	}
-	siteFS := fstest.MapFS{
-		"index.html":                  &fstest.MapFile{Data: []byte("<!doctype html><title>app</title>")},
-		"manifest.json":               &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
-		"manifest.webmanifest":        &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
-		"service-worker.js":           &fstest.MapFile{Data: []byte("self.addEventListener('install',()=>{})")},
-		"_app/start.js":               &fstest.MapFile{Data: []byte("console.log('hi')")},
-		"_app/immutable/chunk.abc.js": &fstest.MapFile{Data: []byte("export{}")},
-		"icons/icon-192.png":          &fstest.MapFile{Data: []byte("png")},
-	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, st, ing, WithStaticFS(fs.FS(siteFS)), WithLogger(log))
+	return New(cfg, st, ing, WithStaticFS(testSiteFS()), WithLogger(log))
 }
 
 func doReq(t *testing.T, s *Server, method, target string, body any, token string) *http.Response {
@@ -684,6 +702,29 @@ func TestLogin(t *testing.T) {
 		}
 		if ra := resp.Header.Get("Retry-After"); ra == "" {
 			t.Error("expected a Retry-After header on lockout")
+		}
+	})
+
+	t.Run("pre-setup attempts count toward lockout", func(t *testing.T) {
+		// No user yet (GetUser -> ErrNotFound). A script hammering /login before
+		// setup must still be throttled rather than getting unlimited free tries.
+		st := &fakeStore{}
+		s := newTestServer(t, st, &fakeIngestor{})
+		st.user = nil
+		s.loginGuard = newLoginGuard(3, 15*time.Minute, 15*time.Minute)
+
+		attempt := model.LoginRequest{Username: "anyone", Password: "whatever1"}
+		for i := range 3 {
+			resp := doReq(t, s, http.MethodPost, "/api/login", attempt, "")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("pre-setup attempt %d: status = %d, want 401", i+1, resp.StatusCode)
+			}
+		}
+		// The 4th attempt is now locked out (429) — the ErrNotFound branch records
+		// failures too.
+		resp := doReq(t, s, http.MethodPost, "/api/login", attempt, "")
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("post-threshold pre-setup attempt: status = %d, want 429", resp.StatusCode)
 		}
 	})
 
@@ -1316,4 +1357,335 @@ func TestStaticRevalidationServesFresh(t *testing.T) {
 	if resp := doConditional("/_app/immutable/chunk.abc.js"); resp.StatusCode != http.StatusNotModified {
 		t.Errorf("immutable asset: conditional GET status = %d, want 304", resp.StatusCode)
 	}
+}
+
+// TestIsStaticPath guards the scoping that keeps the cache-stripping middleware
+// from mutating request headers on API/healthz routes (which never reach the
+// static handler anyway).
+func TestIsStaticPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/", true},
+		{"/article/abc", true},
+		{"/service-worker.js", true},
+		{"/_app/immutable/x.js", true},
+		{"/healthz", false},
+		{"/api", false},
+		{"/api/config", false},
+		{"/api/articles/a1", false},
+	}
+	for _, tc := range cases {
+		if got := isStaticPath(tc.path); got != tc.want {
+			t.Errorf("isStaticPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// --- rate limiter ----------------------------------------------------------
+
+// TestIngestRateLimiter verifies the limiter actually runs (it used to be
+// registered AFTER the terminal addArticle handler, which never calls c.Next(),
+// so it never executed and POST /api/articles was unthrottled). Driving the
+// endpoint past its per-minute Max must yield a 429.
+func TestIngestRateLimiter(t *testing.T) {
+	// A server whose ingest limiter caps at 2/minute so the 429 trips quickly.
+	s := newTestServerCfg(t, &fakeStore{}, &fakeIngestor{}, nil)
+	s.ingestMax = 2
+	s.app = s.buildApp(testSiteFS())
+
+	body := model.AddArticleRequest{URL: "https://example.com/x"}
+	// The first Max requests succeed (201)...
+	for i := range 2 {
+		resp := doReq(t, s, http.MethodPost, "/api/articles", body, testToken)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("request %d: status = %d, want 201", i+1, resp.StatusCode)
+		}
+	}
+	// ...the next one is throttled.
+	resp := doReq(t, s, http.MethodPost, "/api/articles", body, testToken)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("over-limit request: status = %d, want 429", resp.StatusCode)
+	}
+}
+
+// --- request id ------------------------------------------------------------
+
+// TestRequestIDHeader verifies every response carries an X-Request-ID and that a
+// caller-supplied id is echoed back (so logs on both ends correlate).
+func TestRequestIDHeader(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+
+	t.Run("generated when absent", func(t *testing.T) {
+		resp := doReq(t, s, http.MethodGet, "/healthz", nil, "")
+		if got := resp.Header.Get("X-Request-Id"); got == "" {
+			t.Error("expected a generated X-Request-Id on the response")
+		}
+	})
+
+	t.Run("echoes caller id", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Header.Set("X-Request-Id", "trace-abc-123")
+		resp, err := s.App().Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		if got := resp.Header.Get("X-Request-Id"); got != "trace-abc-123" {
+			t.Errorf("X-Request-Id = %q, want echoed trace-abc-123", got)
+		}
+	})
+
+	t.Run("rejects oversized/garbage id", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Header.Set("X-Request-Id", strings.Repeat("z", 200)) // over the 64 cap
+		resp, err := s.App().Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		got := resp.Header.Get("X-Request-Id")
+		if got == "" || len(got) > 64 {
+			t.Errorf("X-Request-Id = %q, want a fresh bounded id (oversized rejected)", got)
+		}
+	})
+}
+
+// TestRequestLogIncludesRequestID asserts the structured http_request line
+// carries request_id so a per-request log can be correlated with the response.
+func TestRequestLogIncludesRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	s := newTestServerLogged(t, &fakeStore{}, &fakeIngestor{}, &buf)
+
+	resp := doReq(t, s, http.MethodGet, "/api/stats", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "http_request") {
+		t.Fatalf("expected an http_request log line, got: %s", logs)
+	}
+	if !strings.Contains(logs, "request_id=") {
+		t.Errorf("http_request log missing request_id: %s", logs)
+	}
+}
+
+// --- panic recovery --------------------------------------------------------
+
+// TestPanicRecoveryLogsStack verifies a handler panic is recovered to a 500 AND
+// slog.Error'd with the panic value, a stack trace, and the request id (Fiber's
+// recover does not log a stack by default).
+func TestPanicRecoveryLogsStack(t *testing.T) {
+	var buf bytes.Buffer
+	st := &fakeStore{panicOnIsInitialized: "boom-in-handler"}
+	s := newTestServerLogged(t, st, &fakeIngestor{}, &buf)
+
+	resp := doReq(t, s, http.MethodGet, "/api/config", nil, "")
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "http handler panic") {
+		t.Fatalf("expected a panic log line, got: %s", logs)
+	}
+	if !strings.Contains(logs, "boom-in-handler") {
+		t.Errorf("panic log missing the panic value: %s", logs)
+	}
+	if !strings.Contains(logs, "stack=") {
+		t.Errorf("panic log missing a stack trace: %s", logs)
+	}
+	if !strings.Contains(logs, "request_id=") {
+		t.Errorf("panic log missing request_id: %s", logs)
+	}
+}
+
+// --- auth store-error -> 503 -----------------------------------------------
+
+// TestAuthStoreErrorIs503 verifies a session-lookup failure surfaces as 503
+// (a DB outage), not 401, so the request line is 5xx and reaches Sentry and is
+// not mistaken for a credential problem.
+func TestAuthStoreErrorIs503(t *testing.T) {
+	t.Run("protected route", func(t *testing.T) {
+		st := &fakeStore{sessionErr: errors.New("db is down")}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodGet, "/api/stats", nil, testToken)
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", resp.StatusCode)
+		}
+	})
+
+	t.Run("config endpoint", func(t *testing.T) {
+		st := &fakeStore{sessionErr: errors.New("db is down")}
+		s := newTestServer(t, st, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, testToken)
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", resp.StatusCode)
+		}
+	})
+
+	t.Run("missing token is still a clean 401", func(t *testing.T) {
+		st := &fakeStore{sessionErr: errors.New("db is down")}
+		s := newTestServer(t, st, &fakeIngestor{})
+		// No token: bearerToken fails before the store is consulted, so the DB
+		// error must not be reached and the result is an ordinary 401.
+		resp := doReq(t, s, http.MethodGet, "/api/stats", nil, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", resp.StatusCode)
+		}
+	})
+}
+
+// --- markdown budget -------------------------------------------------------
+
+// TestMarkdownBudget exercises markdownBudget's enabled-branch math: the
+// remaining-units clamp, the articles-remaining division, the divide-by-zero
+// guard when cost is 0, and store-error propagation to a 500.
+func TestMarkdownBudget(t *testing.T) {
+	enable := func(limit, cost int) func(*config.Config) {
+		return func(cfg *config.Config) {
+			cfg.MarkdownEnabled = true
+			cfg.MarkdownDailyLimit = limit
+			cfg.MarkdownCostPerArticle = cost
+		}
+	}
+
+	t.Run("disabled returns enabled=false", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{}) // markdown off by default
+		got := getBudget(t, s, testToken)
+		if got.Enabled {
+			t.Errorf("budget enabled = true, want false")
+		}
+	})
+
+	t.Run("normal math", func(t *testing.T) {
+		st := &fakeStore{markdownUsed: 30}
+		s := newTestServerCfg(t, st, &fakeIngestor{}, enable(100, 25))
+		got := getBudget(t, s, testToken)
+		if !got.Enabled {
+			t.Fatal("budget enabled = false, want true")
+		}
+		if got.UnitsRemaining != 70 {
+			t.Errorf("units_remaining = %d, want 70", got.UnitsRemaining)
+		}
+		if got.ArticlesRemaining != 2 { // 70 / 25 = 2
+			t.Errorf("articles_remaining = %d, want 2", got.ArticlesRemaining)
+		}
+	})
+
+	t.Run("over-budget clamps remaining to 0", func(t *testing.T) {
+		st := &fakeStore{markdownUsed: 250} // used > limit
+		s := newTestServerCfg(t, st, &fakeIngestor{}, enable(100, 25))
+		got := getBudget(t, s, testToken)
+		if got.UnitsRemaining != 0 {
+			t.Errorf("units_remaining = %d, want 0 (clamped)", got.UnitsRemaining)
+		}
+		if got.ArticlesRemaining != 0 {
+			t.Errorf("articles_remaining = %d, want 0", got.ArticlesRemaining)
+		}
+	})
+
+	t.Run("zero cost does not divide by zero", func(t *testing.T) {
+		st := &fakeStore{markdownUsed: 10}
+		s := newTestServerCfg(t, st, &fakeIngestor{}, enable(100, 0))
+		got := getBudget(t, s, testToken)
+		if got.ArticlesRemaining != 0 {
+			t.Errorf("articles_remaining = %d, want 0 when cost is 0", got.ArticlesRemaining)
+		}
+	})
+
+	t.Run("store error propagates to 500", func(t *testing.T) {
+		st := &fakeStore{markdownErr: errors.New("count failed")}
+		s := newTestServerCfg(t, st, &fakeIngestor{}, enable(100, 25))
+		resp := doReq(t, s, http.MethodGet, "/api/config", nil, testToken)
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", resp.StatusCode)
+		}
+	})
+}
+
+func getBudget(t *testing.T, s *Server, token string) model.MarkdownBudget {
+	t.Helper()
+	resp := doReq(t, s, http.MethodGet, "/api/config", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("config status = %d, want 200", resp.StatusCode)
+	}
+	return decode[model.ConfigResponse](t, resp).MarkdownBudget
+}
+
+// --- error handler ---------------------------------------------------------
+
+// TestErrorHandler verifies the global error handler maps a raw 500 to a
+// generic body (no internal leak) while a *fiber.Error below 500 echoes its
+// message, and that a >=500 is logged so Sentry/triage sees it.
+func TestErrorHandler(t *testing.T) {
+	t.Run("raw 500 does not leak internals", func(t *testing.T) {
+		var buf bytes.Buffer
+		st := &fakeStore{getPayloadErr: errors.New("secret internal detail: dsn=postgres://...")}
+		s := newTestServerLogged(t, st, &fakeIngestor{}, &buf)
+
+		resp := doReq(t, s, http.MethodGet, "/api/articles/a1", nil, testToken)
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", resp.StatusCode)
+		}
+		got := decode[apiError](t, resp)
+		if got.Error != "internal server error" {
+			t.Errorf("body error = %q, want generic 'internal server error'", got.Error)
+		}
+		if strings.Contains(got.Error, "secret") || strings.Contains(got.Error, "dsn") {
+			t.Errorf("500 body leaked internals: %q", got.Error)
+		}
+		// The 5xx must be logged (so it reaches Sentry's slog bridge).
+		if !strings.Contains(buf.String(), "request failed") {
+			t.Errorf("expected a 5xx error log, got: %s", buf.String())
+		}
+	})
+
+	t.Run("client fiber.Error echoes its message", func(t *testing.T) {
+		// A 400 from a handler (invalid since) must surface the handler's message,
+		// not the generic 500 text — exercising the status<500 branch.
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		resp := doReq(t, s, http.MethodGet, "/api/config?since=not-a-time", nil, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		got := decode[apiError](t, resp)
+		if !strings.Contains(got.Error, "since") {
+			t.Errorf("400 body = %q, want the handler's message", got.Error)
+		}
+	})
+}
+
+// newTestServerLogged builds a test server that writes structured logs to buf,
+// so tests can assert on log content (request_id, panic stack, 5xx lines).
+func newTestServerLogged(t *testing.T, st ports.Store, ing ports.Ingestor, buf *bytes.Buffer) *Server {
+	t.Helper()
+	cfg := &config.Config{
+		HTTPPort:          8080,
+		LogLevel:          "debug",
+		LogFormat:         "text",
+		SentryDSN:         testSentryBackendDSN,
+		SentryFrontendDSN: testSentryDSN,
+		SentryEnvironment: testSentryEnv,
+	}
+	if fs, ok := st.(*fakeStore); ok {
+		fs.initialized = true
+		if fs.sessions == nil {
+			fs.sessions = map[string]bool{}
+		}
+		fs.sessions[auth.HashToken(testToken)] = true
+	}
+	log := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return New(cfg, st, ing, WithStaticFS(testSiteFS()), WithLogger(log))
+}
+
+// testSiteFS returns the embedded-PWA stand-in used across the api tests.
+func testSiteFS() fs.FS {
+	return fs.FS(fstest.MapFS{
+		"index.html":                  &fstest.MapFile{Data: []byte("<!doctype html><title>app</title>")},
+		"manifest.json":               &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
+		"manifest.webmanifest":        &fstest.MapFile{Data: []byte(`{"name":"app"}`)},
+		"service-worker.js":           &fstest.MapFile{Data: []byte("self.addEventListener('install',()=>{})")},
+		"_app/start.js":               &fstest.MapFile{Data: []byte("console.log('hi')")},
+		"_app/immutable/chunk.abc.js": &fstest.MapFile{Data: []byte("export{}")},
+		"icons/icon-192.png":          &fstest.MapFile{Data: []byte("png")},
+	})
 }

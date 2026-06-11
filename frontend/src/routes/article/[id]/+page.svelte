@@ -37,7 +37,7 @@
 		SentenceMenuContent,
 		SentenceSheetContent
 	} from '$lib/components/reader/reader-utils';
-	import { debounce } from '$lib/components/reader/reader-utils';
+	import { captureError } from '$lib/sentry';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
 	import {
 		readerFullscreen,
@@ -185,6 +185,10 @@
 				startPolling(id);
 				return;
 			}
+			// Genuine load failure (500, JSON.parse, unexpected error). Surface it to
+			// the user AND report it — these are otherwise console-only and invisible
+			// in production. Offline / 409-processing are handled above and excluded.
+			captureError(err, { area: 'reader', extra: { article_id: id } });
 			errorMessage = err instanceof Error ? err.message : String(err);
 			loadState = 'error';
 		}
@@ -289,21 +293,40 @@
 
 	const PROGRESS_DEBOUNCE_MS = 2000;
 
-	const debouncedPersistProgress = debounce((tokenIndex: number) => {
-		if (!articleId) return;
-		const now = new Date().toISOString();
-		const updated: Progress = {
-			article_id: articleId,
-			position: tokenIndex,
-			is_read: progress?.is_read ?? false,
-			updated_at: now
-		};
-		progress = updated;
-		enqueueProgress(updated).catch(console.warn);
-	}, PROGRESS_DEBOUNCE_MS);
+	// Pending progress-save timer. We roll our own debounce (rather than the shared
+	// reader-utils one) because we MUST be able to cancel a pending tick on
+	// navigation/destroy: otherwise a tick scheduled while reading article A can
+	// fire after the page has switched to article B and write A's scroll position
+	// onto B — corrupting B locally and on the server, and losing A's progress.
+	let progressTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function cancelPendingProgress() {
+		if (!progressTimer) return;
+		clearTimeout(progressTimer);
+		progressTimer = undefined;
+	}
 
 	function handleProgress(tokenIndex: number) {
-		debouncedPersistProgress(tokenIndex);
+		// Bind the article id at call time so a pending write can never be retargeted
+		// at a different article that becomes current before the timer fires.
+		const id = articleId;
+		if (!id) return;
+		cancelPendingProgress();
+		progressTimer = setTimeout(() => {
+			progressTimer = undefined;
+			// The page navigated to another article while this tick was pending —
+			// drop the stale write rather than persist A's position under B.
+			if (id !== currentId) return;
+			const now = new Date().toISOString();
+			const updated: Progress = {
+				article_id: id,
+				position: tokenIndex,
+				is_read: progress?.is_read ?? false,
+				updated_at: now
+			};
+			progress = updated;
+			enqueueProgress(updated).catch(console.warn);
+		}, PROGRESS_DEBOUNCE_MS);
 	}
 
 	async function handleToggleRead() {
@@ -419,6 +442,9 @@
 		if (!browser) return;
 		const id = articleId;
 		if (!id || id === currentId) return;
+		// Drop any progress-save still pending for the outgoing article before
+		// currentId flips, so it can never be misattributed to the new one.
+		cancelPendingProgress();
 		currentId = id;
 		stopPolling();
 		reEnrichMode = undefined;
@@ -435,12 +461,16 @@
 			},
 			error(err) {
 				console.error('[reader] sync_state liveQuery error', err);
+				captureError(err, { area: 'reader', extra: { query: 'sync_state' } });
 			}
 		});
 		return () => sub.unsubscribe();
 	});
 
 	onDestroy(stopPolling);
+	// Flush nothing, just drop: a pending tick on teardown would otherwise fire
+	// after the component is gone (and could target a since-changed article).
+	onDestroy(cancelPendingProgress);
 	// Immersive mode is reader-only; leave it when navigating away.
 	onDestroy(exitReaderFullscreen);
 </script>

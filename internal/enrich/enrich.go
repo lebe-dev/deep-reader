@@ -15,6 +15,7 @@ import (
 	"html"
 	"log/slog"
 	"math"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode"
@@ -112,11 +113,20 @@ func (p *Pool) Start(ctx context.Context) {
 	for i := 0; i < n; i++ {
 		go func(workerID int) {
 			defer func() { done <- struct{}{} }()
-			// Report a worker panic to Sentry before letting it propagate, so the
-			// crash is still loud (process dies) but observable. No-op when Sentry
-			// is not configured.
+			// Report a worker panic before letting it propagate, so the crash is
+			// still loud (process dies) but observable. We slog.Error with the
+			// worker id, panic value, and stack BEFORE re-panicking so the crash is
+			// attributable in the structured logs even when Sentry is off — and so
+			// the trace isn't only emitted as Go's unstructured default dump that
+			// would break JSON log parsing. Sentry capture is best-effort and a
+			// no-op when Sentry is not configured.
 			defer func() {
 				if r := recover(); r != nil {
+					slog.Error("enrich: worker panicked",
+						"worker", workerID,
+						"panic", r,
+						"stack", string(debug.Stack()),
+					)
 					sentry.CurrentHub().Recover(r)
 					sentry.Flush(2 * time.Second)
 					panic(r)
@@ -247,6 +257,13 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		existing = *payload.Enrichment
 	}
 
+	// Resolve a single token/text slice up front and write it back onto a, so the
+	// LLM call (EnrichSpans reads a.Tokens to build the span prompt) and the
+	// sanitize validation (which uses the local tokens) operate on the identical
+	// slice. Falling back to the payload's copy when the in-memory article was
+	// loaded without content (e.g. a bare top-up-queued row from ListWork) avoids
+	// a latent mismatch where the LLM annotates one token stream while we validate
+	// against another.
 	tokens := a.Tokens
 	if len(tokens) == 0 {
 		tokens = payload.Tokens
@@ -255,6 +272,8 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	if text == "" {
 		text = payload.OriginalText
 	}
+	a.Tokens = tokens
+	a.OriginalText = text
 
 	spans := uncoveredSpans(existing, len(tokens))
 	if len(spans) == 0 {
@@ -287,6 +306,12 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 
 		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, spans)
 		if err != nil {
+			// Graceful shutdown: a cancelled context is not a real enrich failure.
+			// Bail out before logging ERROR / persisting enrich_failed / firing
+			// Sentry, so a clean shutdown leaves the article topup-queued.
+			if cancelled(ctx, err) {
+				return
+			}
 			lastErr = err
 			if isRetryable(err) {
 				log.Warn("enrich: topup transient error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
@@ -312,6 +337,9 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		if err := p.store.SaveEnrichment(ctx, a.ID, merged, time.Now().UTC(), usage.Model); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
 				log.Info("enrich: article deleted during topup, skipping")
+				return
+			}
+			if cancelled(ctx, err) {
 				return
 			}
 			lastErr = err
@@ -412,6 +440,12 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 
 		result, err := p.ex.Extract(ctx, a.SourceURL)
 		if err != nil {
+			// Graceful shutdown: a cancelled context is not a real fetch failure.
+			// Bail out before logging ERROR / persisting fetch_failed / firing
+			// Sentry, so a clean shutdown leaves the article queued for next boot.
+			if cancelled(ctx, err) {
+				return false
+			}
 			lastErr = err
 			if isRetryable(err) {
 				log.Warn("enrich: transient fetch error, will retry", "attempt", attempt, "max_retries", maxRetries, "err", err)
@@ -459,6 +493,9 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		if err := p.store.SaveContent(ctx, a.ID, update); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
 				log.Info("enrich: article deleted during fetch, skipping")
+				return false
+			}
+			if cancelled(ctx, err) {
 				return false
 			}
 			lastErr = err
@@ -861,144 +898,8 @@ func (p *Pool) setFailed(ctx context.Context, a *model.Article, status string, e
 }
 
 // ---------------------------------------------------------------------------
-// Validation
+// Sanitization
 // ---------------------------------------------------------------------------
-
-// ValidationError is returned when the LLM-produced enrichment contains token
-// indices that are out of range for the article.
-type ValidationError struct {
-	Field   string
-	Index   int
-	TokenN  int
-	Message string
-}
-
-func (e *ValidationError) Error() string {
-	return fmt.Sprintf("enrich: validation: %s[%d]: %s (token count=%d)", e.Field, e.Index, e.Message, e.TokenN)
-}
-
-// validateEnrichment checks that all token-index references in e are within
-// [0, tokenCount). It also verifies Phrase.StartIndex <= Phrase.EndIndex and
-// Sentence.StartIndex <= Sentence.EndIndex, and that each Phrase.Text matches
-// the words actually spanned by its [StartIndex, EndIndex] range — the guard
-// against over-wide / drifted phrase ranges (see model.Phrase.Text).
-func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
-	if e == nil {
-		return errors.New("enrich: validation: nil enrichment")
-	}
-	tokenCount := len(tokens)
-
-	for i, dw := range e.DifficultWords {
-		if dw.TokenIndex < 0 || dw.TokenIndex >= tokenCount {
-			return &ValidationError{
-				Field:   "difficult_words",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("token_index %d out of range", dw.TokenIndex),
-			}
-		}
-		if strings.TrimSpace(dw.Translation) == "" {
-			return &ValidationError{
-				Field:   "difficult_words",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: "empty translation",
-			}
-		}
-	}
-
-	for i, ph := range e.Phrases {
-		if ph.StartIndex < 0 || ph.StartIndex >= tokenCount {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("start_index %d out of range", ph.StartIndex),
-			}
-		}
-		if ph.EndIndex < 0 || ph.EndIndex >= tokenCount {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("end_index %d out of range", ph.EndIndex),
-			}
-		}
-		if ph.StartIndex > ph.EndIndex {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("start_index %d > end_index %d", ph.StartIndex, ph.EndIndex),
-			}
-		}
-		if strings.TrimSpace(ph.Translation) == "" {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: "empty translation",
-			}
-		}
-		if strings.TrimSpace(ph.Text) == "" {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: "empty text",
-			}
-		}
-		// Indices are already known valid here. The echoed text must spell the
-		// same word sequence as the claimed range; a mismatch means the model
-		// drifted the range (e.g. a one-word term tagged onto a whole clause).
-		want := normalizePhraseText(joinTokenText(tokens, ph.StartIndex, ph.EndIndex))
-		if got := normalizePhraseText(ph.Text); got != want {
-			return &ValidationError{
-				Field:   "phrases",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("text %q does not match tokens [%d,%d] (%q)", ph.Text, ph.StartIndex, ph.EndIndex, want),
-			}
-		}
-	}
-
-	for i, s := range e.Sentences {
-		if s.StartIndex < 0 || s.StartIndex >= tokenCount {
-			return &ValidationError{
-				Field:   "sentences",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("start_index %d out of range", s.StartIndex),
-			}
-		}
-		if s.EndIndex < 0 || s.EndIndex >= tokenCount {
-			return &ValidationError{
-				Field:   "sentences",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("end_index %d out of range", s.EndIndex),
-			}
-		}
-		if s.StartIndex > s.EndIndex {
-			return &ValidationError{
-				Field:   "sentences",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: fmt.Sprintf("start_index %d > end_index %d", s.StartIndex, s.EndIndex),
-			}
-		}
-		if strings.TrimSpace(s.Translation) == "" {
-			return &ValidationError{
-				Field:   "sentences",
-				Index:   i,
-				TokenN:  tokenCount,
-				Message: "empty translation",
-			}
-		}
-	}
-
-	return nil
-}
 
 // sanitizeEnrichment returns a copy of e with every individually-invalid
 // annotation dropped, rather than rejecting the whole batch. The step-wise and
@@ -1009,9 +910,13 @@ func validateEnrichment(e *model.Enrichment, tokens []model.Token) error {
 // behind "chunk validation failed … empty translation"). Whatever is dropped
 // stays uncovered and is picked up by a later top-up pass.
 //
-// The accept/reject predicates mirror validateEnrichment exactly; only the
-// action differs (skip the entry vs. return an error). Glossary items are not
-// validated, so they pass through unchanged. The input is never mutated.
+// This is the single accept/reject authority for LLM-produced annotations: a
+// token index must fall within [0, tokenCount), each range must satisfy
+// start <= end, translations must be non-empty, and a phrase's echoed Text must
+// spell the same word sequence as its [StartIndex, EndIndex] range (the guard
+// against over-wide / drifted phrase ranges; see model.Phrase.Text). Glossary
+// items are not validated, so they pass through unchanged. The input is never
+// mutated.
 func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, log *slog.Logger) model.Enrichment {
 	tokenCount := len(tokens)
 
@@ -1307,6 +1212,19 @@ func isRetryable(err error) bool {
 		return re.Retryable()
 	}
 	return false
+}
+
+// cancelled reports whether a stage error is the result of the worker's context
+// being cancelled (graceful shutdown) rather than a genuine pipeline failure.
+// It is true when ctx is already done, or when err wraps context.Canceled /
+// context.DeadlineExceeded — either way the caller must bail out without logging
+// an ERROR, persisting a *_failed status, or firing Sentry: the article stays in
+// its current queued/in-flight state and is re-selected on the next boot.
+func cancelled(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // rawResponder is implemented by errors that carry the raw LLM output that

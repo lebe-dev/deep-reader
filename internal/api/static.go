@@ -36,8 +36,12 @@ func registerStatic(app *fiber.App, siteFS fs.FS) {
 	// banner reappears after each reload and never sticks. Forcing a full 200
 	// for these tiny, must-revalidate files fixes it; content-hashed
 	// /_app/immutable/ assets keep their (correct) 304 revalidation.
+	//
+	// It is scoped past the API/healthz routes (isStaticPath) so it does not
+	// needlessly mutate request headers for JSON endpoints, which never reach
+	// the static handler anyway.
 	app.Use("/", func(c fiber.Ctx) error {
-		if cacheControlFor(c.Path()) == cacheNoCache {
+		if isStaticPath(c.Path()) && cacheControlFor(c.Path()) == cacheNoCache {
 			c.Request().Header.Del(fiber.HeaderIfModifiedSince)
 			c.Request().Header.Del(fiber.HeaderIfNoneMatch)
 		}
@@ -108,6 +112,20 @@ func newSPAFallback(siteFS fs.FS) fiber.Handler {
 		c.Set(fiber.HeaderCacheControl, cacheNoCache)
 		return c.Status(http.StatusOK).Send(index)
 	}
+}
+
+// isStaticPath reports whether a request path is served by the embedded PWA
+// rather than the API. The /api group and /healthz are registered before the
+// static mount and short-circuit it, so the cache-stripping middleware has no
+// business touching their request headers.
+func isStaticPath(path string) bool {
+	if path == "/healthz" || path == "/api" {
+		return false
+	}
+	if strings.HasPrefix(path, "/api/") {
+		return false
+	}
+	return true
 }
 
 // hasFileExtension reports whether the last path segment contains a dot,

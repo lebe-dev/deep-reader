@@ -9,11 +9,6 @@ import (
 	"deep-reader/internal/ports"
 )
 
-// ValidateEnrichment exposes the unexported validateEnrichment for unit tests.
-func ValidateEnrichment(e *model.Enrichment, tokens []model.Token) error {
-	return validateEnrichment(e, tokens)
-}
-
 // BackoffDuration exposes the unexported backoffDuration for unit tests.
 func BackoffDuration(attempt int, base, cap time.Duration) time.Duration {
 	return backoffDuration(attempt, base, cap)

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -174,6 +175,14 @@ type chatResponse struct {
 	Choices []chatChoice `json:"choices"`
 	Usage   *chatUsage   `json:"usage,omitempty"`
 }
+
+// maxResponseBytes caps how much of a provider response body we read into memory.
+// The base URL is user-configurable, so a misbehaving or hostile endpoint could
+// stream an unbounded body and OOM the process; an over-limit body is treated as
+// a transient decode failure (see postChat) so the enrichment pool re-sends
+// rather than failing the chunk permanently. A real chat completion — even a long
+// enrichment for a big article — is far under this cap.
+const maxResponseBytes = 16 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 // Prompt construction.
@@ -603,20 +612,31 @@ func (c *Client) complete(ctx context.Context, cn conn, articleID, modelID, syst
 	)
 
 	enrichment, usage, err := c.do(ctx, cn, reqBody)
-	if err != nil {
-		// If the provider rejected json_schema, retry once with json_object. When
-		// the profile already forces json_object there is nothing to fall back from.
-		if !cn.forceJSONObject && isSchemaUnsupported(err) {
-			slog.Warn("llm: provider rejected json_schema, falling back to json_object",
-				"article_id", articleID,
-				"model", reqBody.Model,
-				"err", err,
-			)
-			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
-			enrichment, usage, err = c.do(ctx, cn, reqBody)
-		}
+	if err == nil {
+		return enrichment, usage, nil
 	}
-	return enrichment, usage, err
+	// If the provider rejected json_schema, retry once with json_object. When the
+	// profile already forces json_object there is nothing to fall back from.
+	if cn.forceJSONObject || !isSchemaUnsupported(err) {
+		return enrichment, usage, err
+	}
+	firstErr := err
+	slog.Warn("llm: provider rejected json_schema, falling back to json_object",
+		"article_id", articleID,
+		"model", reqBody.Model,
+		"err", firstErr,
+	)
+	reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
+	enrichment, usage, err = c.do(ctx, cn, reqBody)
+	if err == nil {
+		return enrichment, usage, nil
+	}
+	// Both legs failed: join them so the persisted reason and the Sentry exception
+	// reflect the original json_schema rejection AND the json_object failure,
+	// instead of silently dropping the first. The retry error is joined first so
+	// errors.As (used by the pool for Retryable() and RawResponse()) resolves the
+	// json_object leg — the one that actually decided the outcome.
+	return enrichment, usage, errors.Join(err, firstErr)
 }
 
 // do sends the chat request and decodes the enrichment JSON from the first
@@ -660,9 +680,28 @@ func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Cap the body: the base URL is user-configurable, so guard against a
+	// misbehaving/hostile endpoint streaming an unbounded body. Read one byte past
+	// the cap so we can detect an over-limit body rather than silently truncating
+	// (a truncated body would otherwise decode-fail with a confusing JSON error).
+	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	respBody, err := io.ReadAll(limited)
 	if err != nil {
 		return "", ports.Usage{}, fmt.Errorf("llm: read response body: %w", err)
+	}
+	if int64(len(respBody)) > maxResponseBytes {
+		slog.Warn("llm: response body exceeds limit",
+			"model", req.Model,
+			"status", resp.StatusCode,
+			"limit_bytes", maxResponseBytes,
+		)
+		// Over-limit is treated as a transient decode failure: a runaway/garbled
+		// stream may succeed on re-send, and the pool re-sends transient decode
+		// errors. Raw is omitted to avoid persisting a 16 MiB blob.
+		return "", ports.Usage{}, &DecodeError{
+			Err:       fmt.Errorf("llm: response body exceeds %d bytes", maxResponseBytes),
+			Transient: true,
+		}
 	}
 
 	slog.Debug("llm: response received",

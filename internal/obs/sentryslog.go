@@ -12,9 +12,13 @@ import (
 )
 
 // forwardLevel is the minimum slog level forwarded to Sentry. WARN and above
-// are forwarded; this captures 4xx HTTP responses (logged at Warn) as well as
-// errors.
+// are forwarded; this captures HTTP responses logged at Warn (see
+// shouldForward for the 4xx exception) as well as errors.
 const forwardLevel = slog.LevelWarn
+
+// httpStatusKey is the attribute key the request logger (see
+// middleware.newRequestLogger) attaches to "http_request" records.
+const httpStatusKey = "status"
 
 // errorChainDepth bounds how deep a wrapped-error chain is unwound into Sentry
 // exception entries; it mirrors sentry-go's own default.
@@ -71,10 +75,28 @@ func (h *SentryHandler) Enabled(ctx context.Context, level slog.Level) bool {
 // handler. Forwarding is skipped entirely when the level is below the threshold
 // or no Sentry client is bound, so the common path adds a single comparison.
 func (h *SentryHandler) Handle(ctx context.Context, r slog.Record) error {
-	if r.Level >= forwardLevel && h.hub.Client() != nil {
+	if r.Level >= forwardLevel && h.hub.Client() != nil && shouldForward(r) {
 		h.capture(r)
 	}
 	return h.next.Handle(ctx, r)
+}
+
+// shouldForward reports whether r should be sent to Sentry. Of 4xx HTTP
+// responses, only 400 (Bad Request) is forwarded — the rest (401, 403, 404,
+// 429, ...) are expected client conditions, not application errors worth
+// triaging.
+func shouldForward(r slog.Record) bool {
+	forward := true
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == httpStatusKey && a.Value.Kind() == slog.KindInt64 {
+			if status := a.Value.Int64(); status > 400 && status < 500 {
+				forward = false
+				return false
+			}
+		}
+		return true
+	})
+	return forward
 }
 
 // WithAttrs returns a handler that carries attrs both for the wrapped handler

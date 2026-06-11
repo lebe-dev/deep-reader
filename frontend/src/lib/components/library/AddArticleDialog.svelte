@@ -15,7 +15,9 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 
-	// open is bindable so parent can control it, or the internal trigger button opens it.
+	// Internal-only open state — this dialog owns its visibility; the split
+	// trigger button (and the dropdown items) below open it. Not a prop: there
+	// is no parent control.
 	let open = $state(false);
 	// Which input mode the dialog is showing: a URL to fetch, or raw pasted text.
 	let mode = $state<'url' | 'text'>('url');

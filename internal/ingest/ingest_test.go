@@ -536,6 +536,49 @@ func TestNormalizeURL(t *testing.T) {
 			input: "https://example.com/?UTM_SOURCE=x&keep=1",
 			want:  "https://example.com/?keep=1",
 		},
+		{
+			// A scheme-less URL (//host/path) parses with a host but no
+			// scheme, so it would never be fetchable. Default it to https
+			// rather than create a permanently stuck record.
+			name:  "scheme-less URL defaults to https",
+			input: "//example.com/foo",
+			want:  "https://example.com/foo",
+		},
+		{
+			name:  "scheme-less URL is normalized (host lowercased, utm/fragment stripped)",
+			input: "//Example.com/Foo?utm_source=x#frag",
+			want:  "https://example.com/Foo",
+		},
+		{
+			// http stays http; only the missing scheme is defaulted.
+			name:  "explicit http preserved",
+			input: "http://example.com/path",
+			want:  "http://example.com/path",
+		},
+		{
+			// A non-HTTP(S) scheme can never be fetched by the HTTP pipeline,
+			// so reject it at ingest time instead of stranding a record.
+			name:    "ftp scheme rejected",
+			input:   "ftp://example.com/file",
+			wantErr: true,
+		},
+		{
+			name:    "ws scheme rejected",
+			input:   "ws://example.com/socket",
+			wantErr: true,
+		},
+		{
+			// javascript:/mailto: have no host and were already rejected; keep
+			// asserting they stay rejected after the scheme validation.
+			name:    "javascript scheme rejected",
+			input:   "javascript:alert(1)",
+			wantErr: true,
+		},
+		{
+			name:    "mailto scheme rejected",
+			input:   "mailto:foo@bar.com",
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {

@@ -8,6 +8,7 @@
 
 import { browser } from '$app/environment';
 import { getSyncState } from './db';
+import { captureError } from './sentry';
 import type {
 	AddArticleResponse,
 	ArticlePayload,
@@ -27,10 +28,16 @@ import type {
 // Errors
 // ---------------------------------------------------------------------------
 
-/** Thrown when a request cannot reach the network (offline / fetch failed). */
+/**
+ * Thrown when a request cannot reach the network (offline / fetch failed).
+ *
+ * The original fetch rejection (a `TypeError` for DNS/TLS/CORS/mixed-content, or
+ * any other connectivity failure) is preserved as `cause` so it is not lost when
+ * a genuine connectivity bug masquerades as "offline".
+ */
 export class OfflineError extends Error {
-	constructor(message = 'Network unavailable') {
-		super(message);
+	constructor(message = 'Network unavailable', options?: { cause?: unknown }) {
+		super(message, options);
 		this.name = 'OfflineError';
 	}
 }
@@ -64,6 +71,19 @@ async function resolveBaseUrl(): Promise<string> {
 
 /** Fetch cache modes (avoids relying on the DOM lib's RequestCache global). */
 type FetchCache = 'default' | 'no-store' | 'reload' | 'no-cache' | 'force-cache' | 'only-if-cached';
+
+/**
+ * Whether a fetch rejection is a caller-initiated abort (an `AbortSignal` fired,
+ * e.g. on navigation or a superseding request). Browsers throw a `DOMException`
+ * with `name === 'AbortError'`; we match on the name so a stubbed/polyfilled
+ * error works too. Aborts are not connectivity failures and must propagate
+ * unchanged rather than being misread as "offline".
+ */
+function isAbortError(err: unknown): boolean {
+	return (
+		typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError'
+	);
+}
 
 interface RequestOptions {
 	method?: string;
@@ -102,9 +122,23 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 			signal: opts.signal,
 			cache: opts.cache
 		});
-	} catch {
-		// fetch rejects on network failure / offline.
-		throw new OfflineError();
+	} catch (err) {
+		// A caller-initiated abort is not a connectivity failure — propagate it
+		// unchanged so callers can distinguish cancellation from "offline".
+		if (isAbortError(err)) throw err;
+
+		// Any other rejection (DNS/TLS/CORS/mixed-content/genuine offline) is a
+		// network failure. If the browser still reports itself online the cause is
+		// a real connectivity bug, not the user being offline — surface it to
+		// Sentry so it does not silently hide as "offline". When truly offline we
+		// expect this and stay quiet.
+		if (typeof navigator !== 'undefined' && navigator.onLine) {
+			captureError(err, { area: 'api', extra: { path } });
+		}
+
+		// Preserve the original rejection as the cause so the connectivity detail
+		// survives even though callers branch on `instanceof OfflineError`.
+		throw new OfflineError(undefined, { cause: err });
 	}
 
 	if (!res.ok) {

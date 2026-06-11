@@ -20,18 +20,24 @@
 	let errorMessage: string | undefined = $state();
 
 	// Fetch the raw response each time the dialog opens (it is not synced offline).
+	// An AbortController guards against stale results: rapidly closing and
+	// re-opening (or switching articleId) aborts the prior request so a late
+	// resolution can't clobber the current view. AbortErrors are ignored.
 	$effect(() => {
 		if (!open) return;
 		const id = articleId;
+		const controller = new AbortController();
 		loadState = 'loading';
 		data = undefined;
 		errorMessage = undefined;
-		getArticleRaw(id)
+		getArticleRaw(id, controller.signal)
 			.then((res) => {
+				if (controller.signal.aborted) return;
 				data = res;
 				loadState = 'ready';
 			})
 			.catch((err) => {
+				if (controller.signal.aborted) return;
 				errorMessage =
 					err instanceof OfflineError
 						? 'You are offline — the raw response is only available online.'
@@ -40,6 +46,7 @@
 							: String(err);
 				loadState = 'error';
 			});
+		return () => controller.abort();
 	});
 
 	const hasRaw = $derived(loadState === 'ready' && !!data?.raw);

@@ -29,7 +29,15 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	if err != nil {
 		return s.serverError(c, "is initialized", err)
 	}
-	authed := initialized && s.authenticate(c)
+
+	authed := false
+	if initialized {
+		ok, authErr := s.authenticate(c)
+		if authErr != nil {
+			return s.serverError(c, "authenticate", authErr)
+		}
+		authed = ok
+	}
 
 	// Unauthenticated (or uninitialized) callers receive only the auth flag so
 	// the client can route to /setup or /login; no library data leaks.
@@ -126,8 +134,10 @@ func (s *Server) getArticle(c fiber.Ctx) error {
 		return c.Status(fiber.StatusConflict).JSON(payload)
 	}
 
-	// Enriched articles are immutable; allow aggressive client caching.
-	c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
+	// Enriched articles are immutable, but this is a per-user authenticated
+	// endpoint — use private so only the requesting client (never a shared
+	// proxy) caches the response.
+	c.Set(fiber.HeaderCacheControl, "private, max-age=31536000, immutable")
 	return c.JSON(payload)
 }
 
@@ -172,7 +182,13 @@ func (s *Server) addArticle(c fiber.Ctx) error {
 	if err != nil {
 		status, msg := mapAddError(err)
 		if status >= 500 {
-			s.log.Error("ingest add failed", slog.String("url", req.URL), slog.Any("error", err))
+			s.log.Error("ingest add failed",
+				slog.String("url", req.URL),
+				slog.String("method", c.Method()),
+				slog.String("path", c.Path()),
+				slog.String("request_id", requestIDOf(c)),
+				slog.Any("error", err),
+			)
 		}
 		return sendError(c, status, msg)
 	}
@@ -410,6 +426,18 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 // characters survive and the rest become asterisks, so the operator can
 // recognise the value without it being readable or leaving the server in full.
 // The asterisk run is capped so very long values don't render unwieldy.
+//
+// This is intentionally distinct from model.MaskSecret. The two masks render
+// different field families with different conventions and must not be merged:
+//   - model.MaskSecret previews LLM API keys for the providers UI as bullets
+//     plus the last four chars (e.g. "••••1234") with no length cap, because a
+//     key is short and the bullet style matches the settings list.
+//   - this maskSecret renders long server-config secrets (Sentry DSNs) shown in
+//     ServerInfo as asterisks with a *capped* run so a long DSN does not become
+//     an unwieldy wall of stars.
+//
+// Consolidating would force one of those wire formats onto the other and change
+// what operators/tests already expect, so the two are kept separate by design.
 func maskSecret(s string) string {
 	if s == "" {
 		return ""
@@ -463,8 +491,21 @@ func parseSince(raw string) (time.Time, error) {
 }
 
 // serverError logs an unexpected store/dependency failure and returns a 500
-// without leaking internals to the client.
+// without leaking internals to the client. It attaches the request path,
+// method, correlation id, and (when the route carries one) the :id path
+// parameter — the article or provider id — so a single 500 line is
+// self-contained and can be tied back to the request and the affected record.
 func (s *Server) serverError(c fiber.Ctx, op string, err error) error {
-	s.log.Error("request failed", slog.String("op", op), slog.Any("error", err))
+	attrs := []any{
+		slog.String("op", op),
+		slog.String("method", c.Method()),
+		slog.String("path", c.Path()),
+		slog.String("request_id", requestIDOf(c)),
+	}
+	if id := c.Params("id"); id != "" {
+		attrs = append(attrs, slog.String("id", id))
+	}
+	attrs = append(attrs, slog.Any("error", err))
+	s.log.Error("request failed", attrs...)
 	return sendError(c, fiber.StatusInternalServerError, "internal server error")
 }
