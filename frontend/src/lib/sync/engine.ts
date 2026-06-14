@@ -124,6 +124,12 @@ export async function pull(): Promise<void> {
 		return;
 	}
 
+	// The backend (Go) marshals empty slices as JSON `null`, so a delta sync that
+	// changed nothing — or an empty library — arrives with `articles`/`progress`
+	// as null. Coerce to arrays so the filter/map/iteration below never throws.
+	const serverArticles = response.articles ?? [];
+	const serverProgress = response.progress ?? [];
+
 	await db.transaction(
 		'rw',
 		[db.articles_meta, db.articles_payload, db.progress, db.sync_state, db.outbox],
@@ -135,7 +141,7 @@ export async function pull(): Promise<void> {
 			const pendingDeleteIds = new Set(pendingDeletes.map((e) => (e.payload as { id: string }).id));
 
 			// Upsert server articles, skipping those pending local deletion.
-			const articlesToUpsert = response.articles.filter((a) => !pendingDeleteIds.has(a.id));
+			const articlesToUpsert = serverArticles.filter((a) => !pendingDeleteIds.has(a.id));
 			await db.articles_meta.bulkPut(articlesToUpsert);
 
 			// Remove articles that are no longer on the server — ONLY on a full sync.
@@ -143,7 +149,7 @@ export async function pull(): Promise<void> {
 			// article's absence means "unchanged", not "deleted"; deleting on a delta
 			// would wipe the whole untouched library.
 			if (isFullSync) {
-				const serverIds = new Set(response.articles.map((a) => a.id));
+				const serverIds = new Set(serverArticles.map((a) => a.id));
 				const localMetas = await db.articles_meta.toArray();
 				// Only delete what was previously synced (not newly locally added
 				// pending items, which are not yet on the server).
@@ -157,7 +163,7 @@ export async function pull(): Promise<void> {
 			}
 
 			// --- progress (LWW by parsed updated_at instant) ---
-			for (const serverProg of response.progress) {
+			for (const serverProg of serverProgress) {
 				const local = await db.progress.get(serverProg.article_id);
 				if (!local || isNewer(serverProg.updated_at, local.updated_at)) {
 					await db.progress.put(serverProg);
@@ -176,7 +182,7 @@ export async function pull(): Promise<void> {
 
 	// --- lazy payload fetch for enriched articles with a stale/absent cache ---
 	// Run outside the transaction so we don't hold it open during network I/O.
-	const enrichedMetas = response.articles.filter((a) => a.status === 'enriched');
+	const enrichedMetas = serverArticles.filter((a) => a.status === 'enriched');
 	for (const meta of enrichedMetas) {
 		const cached = (await db.articles_payload.get(meta.id)) as CachedPayload | undefined;
 		if (isPayloadFresh(cached, meta)) continue;
@@ -499,6 +505,23 @@ export async function enqueueReEnrich(id: string, mode: ReEnrichMode): Promise<v
 	await enqueueOutbox('reenrich', { id, mode });
 
 	if (isOnline()) sync().catch(console.warn);
+}
+
+/**
+ * True while a re-enrich request for `id` is still queued (or in flight) in the
+ * outbox — i.e. the server has NOT yet applied it.
+ *
+ * The reader's completion poll keys off `status === 'enriched'`, but until the
+ * re-enrich request reaches the server the article is still in its PRE-re-enrich
+ * `enriched` state. Completing on that snapshot shows the stale translation and a
+ * stale coverage %. The poll must therefore treat `enriched` as "done" only once
+ * this returns false: the outbox entry is dropped after `apiReEnrichArticle`
+ * resolves, by which point the server has already moved the article out of
+ * `enriched` (→ `fetched` / `topup_queued`), so any later `enriched` is fresh.
+ */
+export async function isReEnrichPending(id: string): Promise<boolean> {
+	const entries = await db.outbox.where('kind').equals('reenrich').toArray();
+	return entries.some((e) => (e.payload as { id: string }).id === id);
 }
 
 /**

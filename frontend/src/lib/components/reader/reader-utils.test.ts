@@ -3,6 +3,7 @@ import {
 	buildDifficultWordMap,
 	buildPhraseMap,
 	buildRenderSegments,
+	normalizeEnrichment,
 	sliceText,
 	findCoveringSentence,
 	findCoveringSentenceForRange,
@@ -106,6 +107,47 @@ describe('buildPhraseMap', () => {
 			]
 		});
 		expect(map.get(2)?.translation).toBe('first');
+	});
+});
+
+describe('normalizeEnrichment', () => {
+	it('replaces null arrays (Go nil slices) with empty arrays', () => {
+		// The backend marshals empty slices as JSON null; mirror that shape.
+		const raw = {
+			difficult_words: null,
+			phrases: null,
+			sentences: null,
+			glossary: null
+		} as unknown as Enrichment;
+		const norm = normalizeEnrichment(raw);
+		expect(norm.difficult_words).toEqual([]);
+		expect(norm.phrases).toEqual([]);
+		expect(norm.sentences).toEqual([]);
+		expect(norm.glossary).toEqual([]);
+	});
+
+	it('returns a fully-empty enrichment when the whole object is absent', () => {
+		expect(normalizeEnrichment(undefined)).toEqual(emptyEnrichment);
+		expect(normalizeEnrichment(null)).toEqual(emptyEnrichment);
+	});
+
+	it('preserves populated arrays unchanged', () => {
+		const filled: Enrichment = {
+			...emptyEnrichment,
+			difficult_words: [{ token_index: 1, lemma: 'run', translation: 'бежать', cefr_level: 'B1' }],
+			glossary: [{ term: 'API', definition: 'interface' }]
+		};
+		const norm = normalizeEnrichment(filled);
+		expect(norm.difficult_words).toEqual(filled.difficult_words);
+		expect(norm.glossary).toEqual(filled.glossary);
+	});
+
+	it('lets the result feed the lookup builders without throwing on null input', () => {
+		const raw = { difficult_words: null, phrases: null } as unknown as Enrichment;
+		const norm = normalizeEnrichment(raw);
+		expect(() => buildDifficultWordMap(norm)).not.toThrow();
+		expect(() => buildPhraseMap(norm)).not.toThrow();
+		expect(buildDifficultWordMap(norm).size).toBe(0);
 	});
 });
 

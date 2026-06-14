@@ -232,6 +232,7 @@ import {
 	enqueueDelete,
 	enqueueRetry,
 	enqueueReEnrich,
+	isReEnrichPending,
 	enqueuePin,
 	enqueueSettings,
 	enqueueAddArticle
@@ -338,6 +339,23 @@ describe('pull — cursor contract', () => {
 		await pull();
 		const row = await sync_state.get('singleton');
 		expect(row!.cursor).toBe('explicit');
+	});
+});
+
+describe('pull — null arrays (Go nil slices)', () => {
+	it('tolerates null articles/progress in the response without throwing', async () => {
+		await articles_meta.put(meta({ id: 'existing' }));
+		// A delta sync that changed nothing comes back with null arrays (Go marshals
+		// empty slices as JSON null). pull() must not crash on .filter/.map/iteration.
+		// Seed a cursor so this is a delta (not a full snapshot that prunes absences).
+		await sync_state.put({ id: 'singleton', cursor: 'prev' } as never);
+		getConfig.mockResolvedValue(
+			configResponse({ cursor: 'c0', articles: null, progress: null, server_time: 'srv2' })
+		);
+		await expect(pull()).resolves.toBeUndefined();
+		// Delta sync (cursor present) → untouched library is preserved, not wiped.
+		expect(await articles_meta.get('existing')).toBeDefined();
+		expect((await sync_state.get('singleton'))!.cursor).toBe('c0');
 	});
 });
 
@@ -803,6 +821,23 @@ describe('enqueueReEnrich', () => {
 
 		expect((await articles_meta.get('a'))!.status).toBe('fetched');
 		expect(await articles_payload.get('a')).toBeUndefined();
+	});
+});
+
+describe('isReEnrichPending', () => {
+	it('is true while a reenrich entry for the id is queued', async () => {
+		await queue('reenrich', { id: 'a', mode: 'full' });
+		expect(await isReEnrichPending('a')).toBe(true);
+	});
+
+	it('is false when no reenrich entry is queued for the id', async () => {
+		expect(await isReEnrichPending('a')).toBe(false);
+	});
+
+	it('ignores reenrich entries for a different id and other kinds', async () => {
+		await queue('reenrich', { id: 'other', mode: 'full' });
+		await queue('retry', { id: 'a' });
+		expect(await isReEnrichPending('a')).toBe(false);
 	});
 });
 

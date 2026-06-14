@@ -17,7 +17,8 @@
 		enqueueProgress,
 		enqueueReEnrich,
 		enqueueSetRead,
-		enqueueResetProgress
+		enqueueResetProgress,
+		isReEnrichPending
 	} from '$lib/sync/engine';
 	import { OfflineError } from '$lib/api';
 	import type {
@@ -32,10 +33,11 @@
 	import WordPopover from '$lib/components/reader/WordPopover.svelte';
 	import SentenceSheet from '$lib/components/reader/SentenceSheet.svelte';
 	import SentenceMenu from '$lib/components/reader/SentenceMenu.svelte';
-	import type {
-		PopoverContent,
-		SentenceMenuContent,
-		SentenceSheetContent
+	import {
+		normalizeEnrichment,
+		type PopoverContent,
+		type SentenceMenuContent,
+		type SentenceSheetContent
 	} from '$lib/components/reader/reader-utils';
 	import { captureError } from '$lib/sentry';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
@@ -103,6 +105,11 @@
 	const safeSourceUrl = $derived(
 		meta?.source_url && /^https?:\/\//i.test(meta.source_url) ? meta.source_url : null
 	);
+
+	// The enrichment with all arrays guaranteed. The backend may send any of the
+	// four arrays as JSON `null` (Go nil slices) — or omit the object entirely —
+	// so normalise once here and let the renderer rely on the type contract.
+	const enrichment = $derived(normalizeEnrichment(payload?.enrichment));
 
 	// Enrichment completeness for the header indicator. The payload is the
 	// authoritative source on this page (meta may be absent on a cold network load).
@@ -238,8 +245,14 @@
 				return;
 			}
 			try {
+				// A re-enrich still queued in the outbox means the server has not yet
+				// applied it, so it may still be serving the PRE-re-enrich `enriched`
+				// snapshot. Checked BEFORE the fetch: once the request has drained the
+				// server has already left `enriched`, so any `enriched` seen below is
+				// the fresh result — never the stale one we'd otherwise complete on.
+				const pending = await isReEnrichPending(id);
 				const fetched = await getArticle(id, undefined, { noStore: true });
-				if (fetched.status === 'enriched') {
+				if (fetched.status === 'enriched' && !pending) {
 					await db.articles_payload.put(fetched);
 					payload = fetched;
 					progress = await db.progress.get(id);
@@ -249,9 +262,12 @@
 					return;
 				}
 				// Still processing (200 with a non-enriched status) — refresh the
-				// live stage/coverage so the waiting screen advances.
-				processingStage = fetched.progress_stage;
-				processingCoverage = fetched.enrichment_coverage ?? 0;
+				// live stage/coverage so the waiting screen advances. Skip while a
+				// re-enrich is pending: the payload may still be the stale snapshot.
+				if (!pending) {
+					processingStage = fetched.progress_stage;
+					processingCoverage = fetched.enrichment_coverage ?? 0;
+				}
 			} catch (err) {
 				// 409 still carries the payload — refresh the live stage/coverage from
 				// it. Offline / other errors are expected here; keep polling.
@@ -693,7 +709,7 @@
 		<TokenRenderer
 			tokens={payload.tokens}
 			originalText={payload.original_text}
-			enrichment={payload.enrichment}
+			{enrichment}
 			format={payload.content_format}
 			initialPosition={progress?.position ?? 0}
 			onProgress={handleProgress}
@@ -703,11 +719,11 @@
 	</div>
 
 	<!-- Glossary (if any) -->
-	{#if payload.enrichment.glossary.length > 0}
+	{#if enrichment.glossary.length > 0}
 		<div class="mt-10 border-t pt-6">
 			<h2 class="mb-4 text-sm font-semibold tracking-wide uppercase opacity-60">Glossary</h2>
 			<dl class="flex flex-col gap-4">
-				{#each payload.enrichment.glossary as item (item.term)}
+				{#each enrichment.glossary as item (item.term)}
 					<div class="flex flex-col gap-0.5">
 						<dt class="text-sm font-semibold">{item.term}</dt>
 						<dd class="text-muted-foreground text-sm leading-relaxed">{item.definition}</dd>

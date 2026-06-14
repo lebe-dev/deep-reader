@@ -4,6 +4,33 @@
 import type { DifficultWord, Enrichment, GlossaryItem, Phrase, Sentence, Token } from '$lib/types';
 
 // ---------------------------------------------------------------------------
+// Enrichment normalisation
+// ---------------------------------------------------------------------------
+
+/**
+ * Coerce a server-provided enrichment into one with all four arrays guaranteed.
+ *
+ * The backend (Go) marshals empty slices as JSON `null`, and an article can be
+ * `enriched` with, say, no difficult words at all — so `difficult_words`,
+ * `phrases`, `sentences` or `glossary` may each arrive as `null` even though the
+ * TypeScript `Enrichment` type declares them non-null. The whole object can also
+ * be absent (`enrichment,omitempty`). Reader code maps/iterates these arrays, so
+ * a single `null` crashes the render with "Cannot read properties of null
+ * (reading 'map')". Normalising once at the boundary lets every downstream
+ * consumer rely on the type contract. Stale payloads cached in IndexedDB before
+ * this fix are normalised on read too (the reader normalises whatever it loads,
+ * cache or network).
+ */
+export function normalizeEnrichment(enrichment: Enrichment | null | undefined): Enrichment {
+	return {
+		difficult_words: enrichment?.difficult_words ?? [],
+		phrases: enrichment?.phrases ?? [],
+		sentences: enrichment?.sentences ?? [],
+		glossary: enrichment?.glossary ?? []
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Lookup maps — built once per article load.
 // ---------------------------------------------------------------------------
 

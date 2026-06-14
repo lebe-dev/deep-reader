@@ -65,7 +65,9 @@
 
 	const difficultWordMap = $derived(buildDifficultWordMap(enrichment));
 	const phraseMap = $derived(buildPhraseMap(enrichment));
-	const difficultSet = $derived(new Set(enrichment.difficult_words.map((d) => d.token_index)));
+	// The difficult-word token indices — the keys of difficultWordMap, reused here
+	// rather than re-reading enrichment.difficult_words (which may be null).
+	const difficultSet = $derived(new Set(difficultWordMap.keys()));
 
 	// Static per-token class (difficult/phrase styling). Depends only on the
 	// enrichment maps, so it's computed once per article — NOT on every click.
