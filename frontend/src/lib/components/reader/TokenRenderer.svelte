@@ -81,7 +81,7 @@
 			map.set(
 				token.index,
 				cn(
-					'token cursor-pointer rounded-sm px-[1px] transition-colors duration-100',
+					'token rounded-sm px-[1px] transition-colors duration-100',
 					isDifficult &&
 						'underline decoration-dotted decoration-amber-500/70 decoration-1 underline-offset-3 dark:decoration-amber-400/60',
 					isPhrase &&
@@ -328,7 +328,7 @@
 	// ---------------------------------------------------------------------------
 
 	function tokenClass(index: number): string {
-		const base = baseTokenClass.get(index) ?? 'token cursor-pointer rounded-sm px-[1px]';
+		const base = baseTokenClass.get(index) ?? 'token rounded-sm px-[1px]';
 		const isHighlightedPhrase =
 			highlightedPhraseRange !== null &&
 			index >= highlightedPhraseRange.start &&
@@ -481,6 +481,12 @@
 		-webkit-touch-callout: none;
 		-webkit-user-select: none;
 		user-select: none;
+	}
+
+	@media (pointer: coarse) {
+		:global(.token) {
+			cursor: pointer;
+		}
 	}
 
 	/* Markdown images rendered inline in the token stream. */
