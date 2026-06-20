@@ -107,21 +107,48 @@
 	let headerHidden = $state(false);
 	const isReader = $derived(page.url.pathname.startsWith('/article/'));
 
+	// True while the header's theme menu is open. The menu (bits-ui) locks body
+	// scroll on open and restores it on close — those programmatic scroll jumps
+	// would otherwise be read as "scrolled down" and hide the header out from
+	// under the open menu (and keep it hidden until you scroll back to the top).
+	let themeMenuOpen = $state(false);
+	let lastScrollY = 0;
+	// performance.now() deadline during which scroll events only update the
+	// baseline and make no hide/show decision — covers the async scroll-lock
+	// restore that fires just after the menu closes.
+	let ignoreScrollUntil = 0;
+
 	$effect(() => {
 		if (!isReader) {
 			headerHidden = false;
 			return;
 		}
-		let lastY = window.scrollY;
+		lastScrollY = window.scrollY;
 		function onScroll() {
 			const y = window.scrollY;
+			// While the menu is open or settling after close, track position only.
+			if (themeMenuOpen || performance.now() < ignoreScrollUntil) {
+				lastScrollY = y;
+				return;
+			}
 			if (y < 80) headerHidden = false;
-			else if (y > lastY + 6) headerHidden = true;
-			else if (y < lastY - 6) headerHidden = false;
-			lastY = y;
+			else if (y > lastScrollY + 6) headerHidden = true;
+			else if (y < lastScrollY - 6) headerHidden = false;
+			lastScrollY = y;
 		}
 		window.addEventListener('scroll', onScroll, { passive: true });
 		return () => window.removeEventListener('scroll', onScroll);
+	});
+
+	// Keep the header visible while the menu is open; on close, resync the
+	// baseline and briefly ignore the scroll-lock restore jump.
+	$effect(() => {
+		if (themeMenuOpen) {
+			headerHidden = false;
+			return;
+		}
+		lastScrollY = window.scrollY;
+		ignoreScrollUntil = performance.now() + 300;
 	});
 </script>
 
@@ -184,7 +211,7 @@
 						</nav>
 
 						<div class="ml-auto flex items-center gap-1">
-							<DropdownMenu.Root>
+							<DropdownMenu.Root bind:open={themeMenuOpen}>
 								<DropdownMenu.Trigger
 									class={buttonVariants({ variant: 'ghost', size: 'icon' })}
 									aria-label="Reading theme"
