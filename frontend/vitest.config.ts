@@ -8,7 +8,12 @@ import { fileURLToPath } from 'node:url';
 export default defineConfig({
 	resolve: {
 		alias: {
-			$lib: fileURLToPath(new URL('./src/lib', import.meta.url))
+			$lib: fileURLToPath(new URL('./src/lib', import.meta.url)),
+			// mode-watcher only exports under the `svelte` condition, so it can't be
+			// resolved in the node test env — point it at a stub for tests.
+			'mode-watcher': fileURLToPath(
+				new URL('./src/lib/test-stubs/mode-watcher.ts', import.meta.url)
+			)
 		}
 	},
 	test: {

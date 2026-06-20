@@ -11,6 +11,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Label } from '$lib/components/ui/label';
 	import { Button } from '$lib/components/ui/button';
+	import { Switch } from '$lib/components/ui/switch';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
@@ -24,6 +25,13 @@
 		lineHeightMultiplier
 	} from '$lib/reader-typography';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
+	import {
+		readerWidth,
+		setReaderWidth,
+		READER_WIDTH_OPTIONS,
+		getReaderWidthRem
+	} from '$lib/reader-width.svelte';
+	import { readerMarks, setReaderMarks } from '$lib/reader-marks.svelte';
 
 	// ---------------------------------------------------------------------------
 	// State — subscribe to the synced settings singleton.
@@ -126,14 +134,52 @@
 				<p class="text-muted-foreground text-xs">Vertical space between lines of text.</p>
 			</div>
 
+			<!-- Column width (reading measure) -->
+			<div class="grid gap-1.5">
+				<Label>Column width</Label>
+				<div class="flex gap-2">
+					{#each READER_WIDTH_OPTIONS as opt (opt.value)}
+						<Button
+							variant={readerWidth.value === opt.value ? 'default' : 'outline'}
+							class="flex-1"
+							aria-pressed={readerWidth.value === opt.value}
+							onclick={() => setReaderWidth(opt.value)}
+						>
+							{opt.label}
+						</Button>
+					{/each}
+				</div>
+				<p class="text-muted-foreground text-xs">
+					How wide the text column gets. Narrower lines are easier to read. Stored locally on this
+					device.
+				</p>
+			</div>
+
+			<!-- Enrichment markers toggle -->
+			<div class="flex items-start justify-between gap-4">
+				<div class="grid gap-0.5">
+					<Label for="marks-switch">Show word underlines</Label>
+					<p class="text-muted-foreground text-xs">
+						Underline difficult words and phrases. Turn off to read clean text — tapping a word
+						still shows its translation.
+					</p>
+				</div>
+				<Switch
+					id="marks-switch"
+					checked={readerMarks.show}
+					onCheckedChange={setReaderMarks}
+					aria-label="Show word underlines"
+				/>
+			</div>
+
 			<!-- Live preview -->
 			<div class="grid gap-1.5">
 				<Label>Preview</Label>
 				<div
-					class="bg-muted/40 rounded-lg border p-4"
-					style="font-family: {getReaderFontCss(readerFont.value)}; font-size: {fontSizeRem(
-						fontSize
-					)}; line-height: {lineHeightMultiplier(lineHeight)};"
+					class="bg-muted/40 mx-auto w-full rounded-lg border p-4"
+					style="max-width: {getReaderWidthRem(readerWidth.value)}; font-family: {getReaderFontCss(
+						readerFont.value
+					)}; font-size: {fontSizeRem(fontSize)}; line-height: {lineHeightMultiplier(lineHeight)};"
 				>
 					The quick brown fox jumps over the lazy dog. Reading should feel comfortable — neither
 					cramped nor sprawling — so your eyes glide from line to line without effort.

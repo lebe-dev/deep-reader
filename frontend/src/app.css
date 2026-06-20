@@ -16,12 +16,14 @@
 @plugin '@tailwindcss/typography';
 
 :root {
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.145 0 0);
-	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.145 0 0);
-	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.145 0 0);
+	/* Warm off-white over near-black instead of pure #fff/#000 — pure-contrast
+	   "shimmer" tires the eye on long reads. */
+	--background: oklch(0.985 0.004 83);
+	--foreground: oklch(0.255 0.006 65);
+	--card: oklch(0.995 0.003 83);
+	--card-foreground: oklch(0.255 0.006 65);
+	--popover: oklch(0.995 0.003 83);
+	--popover-foreground: oklch(0.255 0.006 65);
 	--primary: oklch(50% 0.134 242.749);
 	--primary-foreground: oklch(1 0 0);
 	--secondary: oklch(0.97 0 0);
@@ -82,6 +84,38 @@
 	--sidebar-accent-foreground: oklch(0.985 0 0);
 	--sidebar-border: oklch(1 0 0 / 10%);
 	--sidebar-ring: oklch(0.556 0 0);
+}
+
+/* Sepia — a warm paper palette readers reach for far more than its share. It is
+   a light-mode theme (applied as data-theme="sepia" without the .dark class),
+   so these variables override the light :root ones above. */
+[data-theme='sepia'] {
+	--background: oklch(0.94 0.022 83);
+	--foreground: oklch(0.345 0.035 52);
+	--card: oklch(0.96 0.02 83);
+	--card-foreground: oklch(0.345 0.035 52);
+	--popover: oklch(0.96 0.02 83);
+	--popover-foreground: oklch(0.345 0.035 52);
+	--primary: oklch(50% 0.134 242.749);
+	--primary-foreground: oklch(0.98 0.01 83);
+	--secondary: oklch(0.89 0.03 83);
+	--secondary-foreground: oklch(0.345 0.035 52);
+	--muted: oklch(0.9 0.028 83);
+	--muted-foreground: oklch(0.5 0.035 58);
+	--accent: oklch(0.89 0.03 83);
+	--accent-foreground: oklch(0.345 0.035 52);
+	--destructive: oklch(0.55 0.2 27.325);
+	--border: oklch(0.82 0.03 78);
+	--input: oklch(0.82 0.03 78);
+	--ring: oklch(50% 0.134 242.749);
+	--sidebar: oklch(0.92 0.025 83);
+	--sidebar-foreground: oklch(0.345 0.035 52);
+	--sidebar-primary: oklch(50% 0.134 242.749);
+	--sidebar-primary-foreground: oklch(0.98 0.01 83);
+	--sidebar-accent: oklch(0.89 0.03 83);
+	--sidebar-accent-foreground: oklch(0.345 0.035 52);
+	--sidebar-border: oklch(0.82 0.03 78);
+	--sidebar-ring: oklch(0.6 0.03 70);
 }
 
 @theme inline {
@@ -157,4 +191,11 @@
 	&::-webkit-scrollbar {
 		display: none;
 	}
+}
+
+/* Reader "clean text" mode: hide the difficult-word / phrase underlines while
+   keeping tokens fully interactive (tap still opens the translation). Toggled
+   from Appearance settings via the wrapper class in the reader. */
+.reader-marks-hidden .token {
+	text-decoration: none !important;
 }

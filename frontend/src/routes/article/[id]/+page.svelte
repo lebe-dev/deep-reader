@@ -41,6 +41,8 @@
 	} from '$lib/components/reader/reader-utils';
 	import { captureError } from '$lib/sentry';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
+	import { readerWidth, getReaderWidthRem } from '$lib/reader-width.svelte';
+	import { readerMarks } from '$lib/reader-marks.svelte';
 	import {
 		readerFullscreen,
 		enterReaderFullscreen,
@@ -67,6 +69,8 @@
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import LanguagesIcon from '@lucide/svelte/icons/languages';
 	import ListPlusIcon from '@lucide/svelte/icons/list-plus';
+	import XIcon from '@lucide/svelte/icons/x';
+	import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
 	import CircleIcon from '@lucide/svelte/icons/circle';
@@ -129,8 +133,27 @@
 			` font-family: ${getReaderFontCss(readerFont.value)}`
 	);
 
+	// Reading measure — constrains the column width to a comfortable line length.
+	// Applied to the whole article column (header, body, glossary) so they align.
+	const readerMeasureStyle = $derived(`max-width: ${getReaderWidthRem(readerWidth.value)}`);
+
 	// Summary disclosure — collapsed by default; the user expands on demand.
 	let summaryOpen = $state(false);
+
+	// Marker legend — shown by default, dismissible per-device (it's a one-time
+	// hint, not something to re-read on every open). Dismissing leaves a small "?"
+	// affordance to bring it back. Guarded for SSR (localStorage is client-only).
+	let legendDismissed = $state(browser && localStorage.getItem('reader-legend-dismissed') === '1');
+
+	function dismissLegend() {
+		legendDismissed = true;
+		if (browser) localStorage.setItem('reader-legend-dismissed', '1');
+	}
+
+	function showLegend() {
+		legendDismissed = false;
+		if (browser) localStorage.removeItem('reader-legend-dismissed');
+	}
 
 	// Popover / sheet state.
 	let wordContent: PopoverContent | null = $state(null);
@@ -581,155 +604,179 @@
 		<Button variant="outline" href="/">Back to library</Button>
 	</div>
 {:else if loadState === 'ready' && payload}
-	<!-- Article header -->
-	<div class="relative mb-6 flex flex-col gap-3">
-		<div class="flex items-start justify-between gap-3">
-			<h1
-				class="text-2xl font-semibold leading-snug sm:text-3xl"
-				style="font-family: {getReaderFontCss(readerFont.value)}"
-			>
-				{meta?.title ?? 'Article'}
-			</h1>
-			<Button
-				variant="ghost"
-				size="icon"
-				class="shrink-0"
-				onclick={toggleFullscreen}
-				aria-label={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
-				title={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
-			>
-				{#if readerFullscreen.active}
-					<Minimize2Icon class="text-muted-foreground size-5" />
-				{:else}
-					<Maximize2Icon class="text-muted-foreground size-5" />
-				{/if}
-			</Button>
-		</div>
-
-		<div class="text-muted-foreground flex flex-wrap items-center gap-2 text-sm">
-			{#if meta?.author}
-				<span>{meta.author}</span>
-				<span aria-hidden="true">·</span>
-			{/if}
-			{#if meta?.source_domain && safeSourceUrl}
-				<a
-					href={safeSourceUrl}
-					target="_blank"
-					rel="noopener noreferrer"
-					class="hover:text-foreground inline-flex items-center gap-1 transition-colors"
+	<!-- Reading column — constrained to a comfortable line length and centered. -->
+	<div class="mx-auto w-full" style={readerMeasureStyle}>
+		<!-- Article header -->
+		<div class="relative mb-6 flex flex-col gap-3">
+			<div class="flex items-start justify-between gap-3">
+				<h1
+					class="text-2xl font-semibold leading-snug sm:text-3xl"
+					style="font-family: {getReaderFontCss(readerFont.value)}"
 				>
-					{meta.source_domain}
-					<ExternalLinkIcon class="size-3" />
-				</a>
-			{/if}
-			{#if coverage !== null}
-				<CoverageBadge {coverage} showLabel />
-			{/if}
-			{#if llmModel}
-				<span aria-hidden="true">·</span>
-				<span class="inline-flex items-center gap-1" title="Process with LLM">
-					<BotIcon class="size-3.5" />
-					<span class="font-mono text-xs">{llmModel}</span>
-				</span>
-			{/if}
-			<DropdownMenu.Root>
-				<DropdownMenu.Trigger
-					class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })}
-					title="Article options"
-					aria-label="Article options"
+					{meta?.title ?? 'Article'}
+				</h1>
+				<Button
+					variant="ghost"
+					size="icon"
+					class="shrink-0"
+					onclick={toggleFullscreen}
+					aria-label={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
+					title={readerFullscreen.active ? 'Exit fullscreen reading' : 'Fullscreen reading'}
 				>
-					<EllipsisIcon class="size-4" />
-				</DropdownMenu.Trigger>
-				<DropdownMenu.Content align="start" class="w-60">
-					<DropdownMenu.Label>Improve translation</DropdownMenu.Label>
-					<DropdownMenu.Separator />
-					<DropdownMenu.Item onSelect={() => handleReEnrich('full')}>
-						<LanguagesIcon class="size-4" />
-						Re-translate from scratch
-					</DropdownMenu.Item>
-					<DropdownMenu.Item onSelect={() => handleReEnrich('topup')} disabled={!canTopUp}>
-						<ListPlusIcon class="size-4" />
-						Fill in missing parts
-					</DropdownMenu.Item>
-					<DropdownMenu.Separator />
-					<DropdownMenu.Label>Reading</DropdownMenu.Label>
-					<DropdownMenu.Item onSelect={handleToggleRead}>
-						{#if progress?.is_read}
-							<CircleIcon class="size-4" />
-							Mark as unread
-						{:else}
-							<CheckCheckIcon class="size-4" />
-							Mark as read
-						{/if}
-					</DropdownMenu.Item>
-					{#if (progress?.position ?? 0) > 0}
-						<DropdownMenu.Item onSelect={handleResetProgress}>
-							<RotateCcwIcon class="size-4" />
-							Reset reading progress
-						</DropdownMenu.Item>
+					{#if readerFullscreen.active}
+						<Minimize2Icon class="text-muted-foreground size-5" />
+					{:else}
+						<Maximize2Icon class="text-muted-foreground size-5" />
 					{/if}
-				</DropdownMenu.Content>
-			</DropdownMenu.Root>
-			{#if progress?.is_read}
-				<Badge variant="secondary" class="ml-auto text-xs">Read</Badge>
+				</Button>
+			</div>
+
+			<div class="text-muted-foreground flex flex-wrap items-center gap-2 text-sm">
+				{#if meta?.author}
+					<span>{meta.author}</span>
+					<span aria-hidden="true">·</span>
+				{/if}
+				{#if meta?.source_domain && safeSourceUrl}
+					<a
+						href={safeSourceUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="hover:text-foreground inline-flex items-center gap-1 transition-colors"
+					>
+						{meta.source_domain}
+						<ExternalLinkIcon class="size-3" />
+					</a>
+				{/if}
+				{#if coverage !== null}
+					<CoverageBadge {coverage} showLabel />
+				{/if}
+				{#if llmModel}
+					<span aria-hidden="true">·</span>
+					<span class="inline-flex items-center gap-1" title="Process with LLM">
+						<BotIcon class="size-3.5" />
+						<span class="font-mono text-xs">{llmModel}</span>
+					</span>
+				{/if}
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger
+						class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })}
+						title="Article options"
+						aria-label="Article options"
+					>
+						<EllipsisIcon class="size-4" />
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="start" class="w-60">
+						<DropdownMenu.Label>Improve translation</DropdownMenu.Label>
+						<DropdownMenu.Separator />
+						<DropdownMenu.Item onSelect={() => handleReEnrich('full')}>
+							<LanguagesIcon class="size-4" />
+							Re-translate from scratch
+						</DropdownMenu.Item>
+						<DropdownMenu.Item onSelect={() => handleReEnrich('topup')} disabled={!canTopUp}>
+							<ListPlusIcon class="size-4" />
+							Fill in missing parts
+						</DropdownMenu.Item>
+						<DropdownMenu.Separator />
+						<DropdownMenu.Label>Reading</DropdownMenu.Label>
+						<DropdownMenu.Item onSelect={handleToggleRead}>
+							{#if progress?.is_read}
+								<CircleIcon class="size-4" />
+								Mark as unread
+							{:else}
+								<CheckCheckIcon class="size-4" />
+								Mark as read
+							{/if}
+						</DropdownMenu.Item>
+						{#if (progress?.position ?? 0) > 0}
+							<DropdownMenu.Item onSelect={handleResetProgress}>
+								<RotateCcwIcon class="size-4" />
+								Reset reading progress
+							</DropdownMenu.Item>
+						{/if}
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+				{#if progress?.is_read}
+					<Badge variant="secondary" class="ml-auto text-xs">Read</Badge>
+				{/if}
+			</div>
+
+			<!-- Enrichment legend hint — dismissible one-time guidance, recallable via "?". -->
+			{#if legendDismissed}
+				<button
+					type="button"
+					onclick={showLegend}
+					class="text-muted-foreground hover:text-foreground inline-flex w-fit items-center gap-1 text-xs transition-colors"
+				>
+					<CircleHelpIcon class="size-3.5" />
+					Reading marks
+				</button>
+			{:else}
+				<div
+					class="text-muted-foreground bg-muted/40 flex items-start gap-2 rounded-md px-3 py-2 text-xs"
+				>
+					<p class="flex-1">
+						<span class="underline decoration-dotted decoration-1 underline-offset-3">Dotted</span>
+						= difficult word ·
+						<span class="underline decoration-solid decoration-1 underline-offset-3">Solid</span>
+						= phrase · Tap a word to translate · Long-press or right-click for sentence
+					</p>
+					<button
+						type="button"
+						onclick={dismissLegend}
+						aria-label="Dismiss hint"
+						class="hover:text-foreground -mr-1 shrink-0 transition-colors"
+					>
+						<XIcon class="size-3.5" />
+					</button>
+				</div>
 			{/if}
 		</div>
 
-		<!-- Enrichment legend hint (show on first visit feeling) -->
-		<p class="text-muted-foreground text-xs">
-			<span class="underline decoration-dotted decoration-1 underline-offset-3"
-				>Dotted underline</span
-			>
-			= difficult word ·
-			<span class="underline decoration-solid decoration-1 underline-offset-3">Solid underline</span
-			> = phrase · Tap a word to translate · Long-press or right-click for sentence
-		</p>
-	</div>
+		<!-- Summary (if any) — collapsed by default, toggled by the header. -->
+		{#if payload.summary}
+			<div class="bg-muted/40 mb-6 rounded-lg border">
+				<button
+					type="button"
+					onclick={() => (summaryOpen = !summaryOpen)}
+					aria-expanded={summaryOpen}
+					class="text-muted-foreground flex w-full items-center justify-between gap-2 p-4 text-xs font-semibold tracking-wide uppercase opacity-60 transition-opacity hover:opacity-100"
+				>
+					Summary
+					<ChevronDownIcon class="size-4 transition-transform {summaryOpen ? 'rotate-180' : ''}" />
+				</button>
+				{#if summaryOpen}
+					<p class="px-4 pb-4 text-sm leading-relaxed">{payload.summary}</p>
+				{/if}
+			</div>
+		{/if}
 
-	<!-- Summary (if any) — collapsed by default, toggled by the header. -->
-	{#if payload.summary}
-		<div class="bg-muted/40 mb-6 rounded-lg border">
-			<button
-				type="button"
-				onclick={() => (summaryOpen = !summaryOpen)}
-				aria-expanded={summaryOpen}
-				class="text-muted-foreground flex w-full items-center justify-between gap-2 p-4 text-xs font-semibold tracking-wide uppercase opacity-60 transition-opacity hover:opacity-100"
-			>
-				Summary
-				<ChevronDownIcon class="size-4 transition-transform {summaryOpen ? 'rotate-180' : ''}" />
-			</button>
-			{#if summaryOpen}
-				<p class="px-4 pb-4 text-sm leading-relaxed">{payload.summary}</p>
-			{/if}
+		<!-- Token renderer -->
+		<div style={readerStyle} class:reader-marks-hidden={!readerMarks.show}>
+			<TokenRenderer
+				tokens={payload.tokens}
+				originalText={payload.original_text}
+				{enrichment}
+				format={payload.content_format}
+				initialPosition={progress?.position ?? 0}
+				onProgress={handleProgress}
+				onWordClick={handleWordClick}
+				onSentenceMenu={handleSentenceMenu}
+			/>
 		</div>
-	{/if}
 
-	<!-- Token renderer -->
-	<div style={readerStyle}>
-		<TokenRenderer
-			tokens={payload.tokens}
-			originalText={payload.original_text}
-			{enrichment}
-			format={payload.content_format}
-			initialPosition={progress?.position ?? 0}
-			onProgress={handleProgress}
-			onWordClick={handleWordClick}
-			onSentenceMenu={handleSentenceMenu}
-		/>
+		<!-- Glossary (if any) -->
+		{#if enrichment.glossary.length > 0}
+			<div class="mt-10 border-t pt-6">
+				<h2 class="mb-4 text-sm font-semibold tracking-wide uppercase opacity-60">Glossary</h2>
+				<dl class="flex flex-col gap-4">
+					{#each enrichment.glossary as item (item.term)}
+						<div class="flex flex-col gap-0.5">
+							<dt class="text-sm font-semibold">{item.term}</dt>
+							<dd class="text-muted-foreground text-sm leading-relaxed">{item.definition}</dd>
+						</div>
+					{/each}
+				</dl>
+			</div>
+		{/if}
 	</div>
-
-	<!-- Glossary (if any) -->
-	{#if enrichment.glossary.length > 0}
-		<div class="mt-10 border-t pt-6">
-			<h2 class="mb-4 text-sm font-semibold tracking-wide uppercase opacity-60">Glossary</h2>
-			<dl class="flex flex-col gap-4">
-				{#each enrichment.glossary as item (item.term)}
-					<div class="flex flex-col gap-0.5">
-						<dt class="text-sm font-semibold">{item.term}</dt>
-						<dd class="text-muted-foreground text-sm leading-relaxed">{item.definition}</dd>
-					</div>
-				{/each}
-			</dl>
-		</div>
-	{/if}
 {/if}

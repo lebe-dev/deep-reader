@@ -82,11 +82,14 @@
 				token.index,
 				cn(
 					'token rounded-sm px-[1px] transition-colors duration-100',
+					// Quiet, theme-aware markers: a thin underline in a muted shade of the
+					// text colour rather than a bright accent, so half-underlined text
+					// still reads as prose. Dotted = difficult word, solid = phrase.
 					isDifficult &&
-						'underline decoration-dotted decoration-amber-500/70 decoration-1 underline-offset-3 dark:decoration-amber-400/60',
+						'underline decoration-dotted decoration-foreground/30 decoration-1 underline-offset-4',
 					isPhrase &&
 						!isDifficult &&
-						'underline decoration-solid decoration-sky-400/60 decoration-1 underline-offset-3 dark:decoration-sky-500/50'
+						'underline decoration-solid decoration-foreground/25 decoration-1 underline-offset-4'
 				)
 			);
 		}

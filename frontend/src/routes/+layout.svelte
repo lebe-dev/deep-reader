@@ -2,19 +2,23 @@
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import favicon from '$lib/assets/favicon.svg';
-	import { ModeWatcher, toggleMode, mode } from 'mode-watcher';
+	import { ModeWatcher, mode, theme } from 'mode-watcher';
 	import { page } from '$app/state';
 	import { navigating } from '$app/stores';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { Toaster } from '$lib/components/ui/sonner';
-	import { Button } from '$lib/components/ui/button';
+	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import LibraryIcon from '@lucide/svelte/icons/library';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import SunIcon from '@lucide/svelte/icons/sun';
 	import MoonIcon from '@lucide/svelte/icons/moon';
+	import CoffeeIcon from '@lucide/svelte/icons/coffee';
+	import CheckIcon from '@lucide/svelte/icons/check';
 	import { cn } from '$lib/utils';
+	import { READER_THEME_OPTIONS, resolveReaderTheme, applyReaderTheme } from '$lib/reader-theme';
 	import { readerFullscreen } from '$lib/reader-fullscreen.svelte';
 	import { initSync } from '$lib/sync/store.svelte';
 	import { bootstrapPWA } from '$lib/pwa/bootstrap';
@@ -93,6 +97,32 @@
 
 	// Show the app chrome only for an authenticated user on a non-auth route.
 	const showChrome = $derived(authState.authenticated && !AUTH_ROUTES.includes(page.url.pathname));
+
+	// Active reading theme (light / sepia / dark), derived from mode-watcher.
+	const currentTheme = $derived(resolveReaderTheme(mode.current, theme.current));
+
+	// Minimal-chrome reading: auto-hide the sticky header when scrolling down in
+	// the reader and reveal it on scroll up, so the text owns the screen. Limited
+	// to the reader route — forms elsewhere want the header to stay put.
+	let headerHidden = $state(false);
+	const isReader = $derived(page.url.pathname.startsWith('/article/'));
+
+	$effect(() => {
+		if (!isReader) {
+			headerHidden = false;
+			return;
+		}
+		let lastY = window.scrollY;
+		function onScroll() {
+			const y = window.scrollY;
+			if (y < 80) headerHidden = false;
+			else if (y > lastY + 6) headerHidden = true;
+			else if (y < lastY - 6) headerHidden = false;
+			lastY = y;
+		}
+		window.addEventListener('scroll', onScroll, { passive: true });
+		return () => window.removeEventListener('scroll', onScroll);
+	});
 </script>
 
 <svelte:head>
@@ -121,7 +151,10 @@
 				<UpdateBanner />
 				<MarkdownBudgetBanner />
 				<header
-					class="bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40 w-full border-b pt-[env(safe-area-inset-top)] backdrop-blur"
+					class={cn(
+						'bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-40 w-full border-b pt-[env(safe-area-inset-top)] backdrop-blur transition-transform duration-300',
+						headerHidden && '-translate-y-full'
+					)}
 				>
 					<div class="mx-auto flex h-14 w-full max-w-3xl items-center gap-2 px-4">
 						<a href="/" class="mr-2 flex items-center gap-2 font-semibold">
@@ -151,19 +184,38 @@
 						</nav>
 
 						<div class="ml-auto flex items-center gap-1">
-							<Button
-								variant="ghost"
-								size="icon"
-								onclick={toggleMode}
-								aria-label="Toggle light / dark mode"
-								title="Toggle theme"
-							>
-								{#if mode.current === 'dark'}
-									<MoonIcon class="size-4" />
-								{:else}
-									<SunIcon class="size-4" />
-								{/if}
-							</Button>
+							<DropdownMenu.Root>
+								<DropdownMenu.Trigger
+									class={buttonVariants({ variant: 'ghost', size: 'icon' })}
+									aria-label="Reading theme"
+									title="Reading theme"
+								>
+									{#if currentTheme === 'dark'}
+										<MoonIcon class="size-4" />
+									{:else if currentTheme === 'sepia'}
+										<CoffeeIcon class="size-4" />
+									{:else}
+										<SunIcon class="size-4" />
+									{/if}
+								</DropdownMenu.Trigger>
+								<DropdownMenu.Content align="end" class="w-36">
+									{#each READER_THEME_OPTIONS as opt (opt.value)}
+										<DropdownMenu.Item onSelect={() => applyReaderTheme(opt.value)}>
+											{#if opt.value === 'light'}
+												<SunIcon class="size-4" />
+											{:else if opt.value === 'sepia'}
+												<CoffeeIcon class="size-4" />
+											{:else}
+												<MoonIcon class="size-4" />
+											{/if}
+											{opt.label}
+											{#if currentTheme === opt.value}
+												<CheckIcon class="ml-auto size-4" />
+											{/if}
+										</DropdownMenu.Item>
+									{/each}
+								</DropdownMenu.Content>
+							</DropdownMenu.Root>
 						</div>
 					</div>
 				</header>
