@@ -2,7 +2,9 @@
 
 ![Deep Reader Screenshot](screenshot.png)
 
-Word translation example::
+A self-hosted app for reading English-language articles with partial AI-assisted translation tuned to your CEFR proficiency level. Add an article URL, let the backend extract and enrich it via an OpenAI-compatible LLM, then read offline on any device — tap words and phrases to get in-context translations without a network connection.
+
+Word translation example:
 
 ![Word translation assistance screenshot](screenshot2.png)
 
@@ -10,7 +12,7 @@ Sentence translation example:
 
 ![Sentence translation assistance screenshot](screenshot3.png)
 
-A self-hosted app for reading English-language articles with partial AI-assisted translation tuned to your CEFR proficiency level. Add an article URL, let the backend extract and enrich it via an OpenAI-compatible LLM, then read offline on any device — tap words and phrases to get in-context translations without a network connection.
+
 
 ## Features
 
