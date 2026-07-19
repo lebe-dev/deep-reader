@@ -6,6 +6,7 @@
 
 import Dexie, { type Table } from 'dexie';
 import { captureError, captureWarning } from './sentry';
+import { mirrorSyncState } from './platform/kv';
 import type {
 	ArticleMeta,
 	ArticlePayload,
@@ -185,6 +186,14 @@ export async function updateSyncState(patch: Partial<Omit<SyncState, 'id'>>): Pr
 		const current = await getSyncState();
 		const next: SyncState = { ...current, ...patch, id: SYNC_STATE_ID };
 		await db.sync_state.put(next);
+		// Mirror the recovery-critical fields to native KV so they survive an
+		// IndexedDB eviction (§6.5, D4). No-op on web. Fire-and-forget: a mirror
+		// failure must not fail the write — report it for triage instead.
+		void mirrorSyncState({
+			authToken: next.authToken,
+			serverUrl: next.serverUrl,
+			cursor: next.cursor
+		}).catch((err) => captureError(err, { area: 'kv', extra: { op: 'mirrorSyncState' } }));
 		return next;
 	});
 }

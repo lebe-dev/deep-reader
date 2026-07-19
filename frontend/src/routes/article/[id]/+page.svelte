@@ -75,6 +75,7 @@
 	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
 	import CircleIcon from '@lucide/svelte/icons/circle';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
 	import BotIcon from '@lucide/svelte/icons/bot';
 
 	// ---------------------------------------------------------------------------
@@ -401,6 +402,10 @@
 		} else {
 			enterReaderFullscreen();
 		}
+	}
+
+	function scrollToTop() {
+		window.scrollTo({ top: 0, behavior: 'smooth' });
 	}
 
 	// ---------------------------------------------------------------------------
@@ -778,5 +783,20 @@
 				</dl>
 			</div>
 		{/if}
+
+		<!-- End-of-article actions: "mark as read" (only while still unread; the
+			 dropdown menu above covers the reverse and reset) and "back to top". -->
+		<div class="mt-10 flex justify-center gap-3 border-t pt-6">
+			{#if !progress?.is_read}
+				<Button variant="outline" onclick={handleToggleRead} class="gap-2">
+					<CheckCheckIcon class="size-4" />
+					Mark as read
+				</Button>
+			{/if}
+			<Button variant="outline" onclick={scrollToTop} class="gap-2">
+				<ArrowUpIcon class="size-4" />
+				Back to top
+			</Button>
+		</div>
 	</div>
 {/if}

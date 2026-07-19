@@ -21,3 +21,6 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Capacitor — transient package.json backup from `just cap-sync-versioned`
+.package.json.bak

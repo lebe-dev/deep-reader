@@ -47,7 +47,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # ---------------------------------------------------------------------------
 # Stage 3 — Minimal runtime image
 # ---------------------------------------------------------------------------
-FROM alpine:3.23 AS runtime
+FROM alpine:3.24 AS runtime
 
 # ca-certificates: HTTPS calls to LLM providers; tzdata: correct timestamps
 RUN apk add --no-cache ca-certificates tzdata wget

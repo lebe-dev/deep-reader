@@ -17,11 +17,15 @@
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import CoffeeIcon from '@lucide/svelte/icons/coffee';
 	import CheckIcon from '@lucide/svelte/icons/check';
+	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
 	import { cn } from '$lib/utils';
 	import { READER_THEME_OPTIONS, resolveReaderTheme, applyReaderTheme } from '$lib/reader-theme';
 	import { readerFullscreen } from '$lib/reader-fullscreen.svelte';
 	import { initSync } from '$lib/sync/store.svelte';
 	import { bootstrapPWA } from '$lib/pwa/bootstrap';
+	import { isNative } from '$lib/platform';
+	import { connectState, initConnect } from '$lib/platform/connect.svelte';
+	import { initNativeUI, syncStatusBar } from '$lib/platform/native-ui';
 	import { authState, refreshAuth } from '$lib/auth/store.svelte';
 	import { captureError } from '$lib/sentry';
 	import UpdateBanner from '$lib/components/UpdateBanner.svelte';
@@ -44,9 +48,19 @@
 
 	let syncStarted = false;
 
-	onMount(() => {
-		bootstrapPWA();
-		refreshAuth();
+	onMount(async () => {
+		// PWA machinery (service worker, update banner, hourly update checks) is
+		// web-only: on native the app shell is a local bundle and no SW is
+		// registered (MOBILE-ARCH.md §9, D6).
+		if (!isNative()) bootstrapPWA();
+
+		// Native chrome: hide the splash and wire the Android back button (§12).
+		void initNativeUI();
+
+		// Native must resolve its server-URL gate before any auth/network work (§7).
+		// On web this is an immediate no-op (same-origin ⇒ already configured).
+		await initConnect();
+		if (connectState.serverConfigured) refreshAuth();
 	});
 
 	// Always land at the top when navigating between pages. The reader window
@@ -63,8 +77,16 @@
 	// Auth guard: route between /setup, /login and the app based on auth state,
 	// and start background sync once authenticated. Re-runs on auth/path changes.
 	$effect(() => {
-		if (!authState.checked) return;
 		const path = page.url.pathname;
+
+		// Native onboarding gate (§7): until a server URL is configured, route to
+		// /connect and let nothing else run. No-op on web (always configured).
+		if (connectState.ready && !connectState.serverConfigured) {
+			if (path !== '/connect') goto('/connect');
+			return;
+		}
+
+		if (!authState.checked) return;
 
 		if (authState.initialized === false) {
 			if (path !== '/setup') goto('/setup');
@@ -74,8 +96,8 @@
 			if (path !== '/login') goto('/login');
 			return;
 		}
-		// Authenticated: keep the user out of the auth pages and start syncing.
-		if (AUTH_ROUTES.includes(path)) {
+		// Authenticated: keep the user out of the onboarding/auth pages and sync.
+		if (AUTH_ROUTES.includes(path) || path === '/connect') {
 			goto('/');
 			return;
 		}
@@ -100,6 +122,11 @@
 
 	// Active reading theme (light / sepia / dark), derived from mode-watcher.
 	const currentTheme = $derived(resolveReaderTheme(mode.current, theme.current));
+
+	// Keep the native status bar in step with the theme (no-op on web, §12).
+	$effect(() => {
+		void syncStatusBar(currentTheme === 'dark');
+	});
 
 	// Minimal-chrome reading: auto-hide the sticky header when scrolling down in
 	// the reader and reveal it on scroll up, so the text owns the screen. Limited
@@ -150,6 +177,26 @@
 		lastScrollY = window.scrollY;
 		ignoreScrollUntil = performance.now() + 300;
 	});
+
+	// "Back to top" button in the header, shown once the page has scrolled
+	// down a bit. Independent of the reader's auto-hide behaviour above and
+	// active on every route that has the app chrome.
+	let showScrollTop = $state(false);
+	const SCROLL_TOP_THRESHOLD = 120;
+
+	$effect(() => {
+		if (!showChrome) return;
+		function onScroll() {
+			showScrollTop = window.scrollY > SCROLL_TOP_THRESHOLD;
+		}
+		onScroll();
+		window.addEventListener('scroll', onScroll, { passive: true });
+		return () => window.removeEventListener('scroll', onScroll);
+	});
+
+	function scrollToTop() {
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	}
 </script>
 
 <svelte:head>
@@ -170,12 +217,14 @@
 {/if}
 
 <svelte:boundary onerror={reportRenderError}>
-	{#if !authState.checked}
+	{#if !authState.checked && page.url.pathname !== '/connect'}
 		<div class="bg-background min-h-svh"></div>
 	{:else if showChrome}
 		<div class="bg-background text-foreground flex min-h-svh flex-col">
 			{#if !readerFullscreen.active}
-				<UpdateBanner />
+				{#if !isNative()}
+					<UpdateBanner />
+				{/if}
 				<MarkdownBudgetBanner />
 				<header
 					class={cn(
@@ -211,6 +260,18 @@
 						</nav>
 
 						<div class="ml-auto flex items-center gap-1">
+							{#if showScrollTop}
+								<Button
+									variant="ghost"
+									size="icon"
+									onclick={scrollToTop}
+									aria-label="Scroll to top"
+									title="Scroll to top"
+									class="animate-in fade-in zoom-in-95 duration-150"
+								>
+									<ArrowUpIcon class="size-4" />
+								</Button>
+							{/if}
 							<DropdownMenu.Root bind:open={themeMenuOpen}>
 								<DropdownMenu.Trigger
 									class={buttonVariants({ variant: 'ghost', size: 'icon' })}

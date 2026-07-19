@@ -9,6 +9,8 @@
 import { browser } from '$app/environment';
 import { getSyncState } from './db';
 import { captureError } from './sentry';
+import { httpRequest, type HttpResponse } from './platform/http';
+import { isNative } from './platform';
 import type {
 	AddArticleResponse,
 	ArticlePayload,
@@ -97,6 +99,13 @@ interface RequestOptions {
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 	const base = await resolveBaseUrl();
+
+	// On native there is no same-origin fallback: an empty base would target
+	// `capacitor://localhost`. Until the user configures a serverUrl, treat every
+	// request as offline so refreshAuth degrades gracefully and the root layout
+	// routes to /connect (MOBILE-ARCH.md §7) instead of firing doomed requests.
+	if (isNative() && base === '') throw new OfflineError('No server configured');
+
 	const state = await getSyncState();
 
 	const url = new URL(`${base}${path}`, browser ? window.location.origin : 'http://localhost');
@@ -113,9 +122,9 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 	// A relative base must keep the request relative so it stays same-origin.
 	const target = base === '' ? `${path}${url.search}` : url.toString();
 
-	let res: Response;
+	let res: HttpResponse;
 	try {
-		res = await fetch(target, {
+		res = await httpRequest(target, {
 			method: opts.method ?? 'GET',
 			headers,
 			body: opts.body === undefined ? undefined : JSON.stringify(opts.body),

@@ -22,7 +22,16 @@ import * as Sentry from '@sentry/sveltekit';
 import type { SentryConfig } from '$lib/types';
 
 /** Logical subsystem an event came from — becomes the `area` tag. */
-export type SentryArea = 'sync' | 'idb' | 'api' | 'sw' | 'reader' | 'bootstrap' | 'auth' | 'ui';
+export type SentryArea =
+	| 'sync'
+	| 'idb'
+	| 'api'
+	| 'sw'
+	| 'reader'
+	| 'bootstrap'
+	| 'auth'
+	| 'ui'
+	| 'kv';
 
 /**
  * The event type `beforeSend` receives, derived straight from the installed

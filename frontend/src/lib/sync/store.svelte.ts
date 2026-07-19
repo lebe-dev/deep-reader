@@ -7,6 +7,8 @@
 import { browser } from '$app/environment';
 import { sync } from './engine';
 import { db, getSyncState } from '$lib/db';
+import { isOnline, onNetworkChange } from '$lib/platform/network';
+import { onForeground } from '$lib/platform/lifecycle';
 import type { MarkdownBudget } from '$lib/types';
 
 // ---------------------------------------------------------------------------
@@ -84,8 +86,14 @@ let intervalHandle: ReturnType<typeof setInterval> | undefined;
 export function initSync(): () => void {
 	if (!browser) return () => {};
 
-	// Seed online state.
+	// Seed online state. navigator.onLine is a fine synchronous first guess; the
+	// authoritative status (native plugin) resolves right after.
 	syncStatus.online = navigator.onLine;
+	isOnline()
+		.then((online) => {
+			syncStatus.online = online;
+		})
+		.catch(console.warn);
 
 	// Seed the cached markdown budget so the UI shows it even before (or without)
 	// a fresh sync — e.g. when the app opens offline.
@@ -95,28 +103,21 @@ export function initSync(): () => void {
 		})
 		.catch(console.warn);
 
-	function handleOnline() {
-		syncStatus.online = true;
-		runSync().catch(console.warn);
-	}
-
-	function handleOffline() {
-		syncStatus.online = false;
-	}
-
-	function handleFocus() {
-		runSync().catch(console.warn);
-	}
-
 	// Live-update pending count whenever the outbox table changes. Named so the
 	// cleanup below can unsubscribe it (an inline arrow could not be removed).
 	function handleOutboxCreating() {
 		void refreshPending();
 	}
 
-	window.addEventListener('online', handleOnline);
-	window.addEventListener('offline', handleOffline);
-	window.addEventListener('focus', handleFocus);
+	// Connectivity and foreground triggers come from the platform layer: window
+	// events on web, @capacitor/network + @capacitor/app on native (§6.3, §6.4).
+	const offNetwork = onNetworkChange((online) => {
+		syncStatus.online = online;
+		if (online) runSync().catch(console.warn);
+	});
+	const offForeground = onForeground(() => {
+		runSync().catch(console.warn);
+	});
 	db.outbox.hook('creating', handleOutboxCreating);
 
 	// Initial sync on mount.
@@ -128,9 +129,8 @@ export function initSync(): () => void {
 	}, FOREGROUND_INTERVAL_MS);
 
 	return () => {
-		window.removeEventListener('online', handleOnline);
-		window.removeEventListener('offline', handleOffline);
-		window.removeEventListener('focus', handleFocus);
+		offNetwork();
+		offForeground();
 		clearInterval(intervalHandle);
 		intervalHandle = undefined;
 		// Unsubscribe the Dexie hook via its DexieEvent so the listener is fully

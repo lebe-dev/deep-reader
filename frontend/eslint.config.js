@@ -18,6 +18,11 @@ const runes = {
 	$host: 'readonly'
 };
 
+// Compile-time constants injected by Vite `define` (vite.config.ts).
+const buildConstants = {
+	__APP_VERSION__: 'readonly'
+};
+
 // Shared no-unused-vars config: defer to the type-aware rule and let `_`-prefixed
 // names mark deliberately-unused params/vars (e.g. `(_event) => …`, `{#each … as _, i}`).
 const unusedVars = {
@@ -31,7 +36,16 @@ const unusedVars = {
 /** @type {import('eslint').Linter.Config[]} */
 export default [
 	{
-		ignores: ['src/lib/components/ui/**', 'build/**', '.svelte-kit/**', 'node_modules/**']
+		ignores: [
+			'src/lib/components/ui/**',
+			'build/**',
+			'.svelte-kit/**',
+			'node_modules/**',
+			// Capacitor native projects: generated Xcode/Gradle sources plus a copy
+			// of the built web bundle (ios|android/.../public). Never our source.
+			'ios/**',
+			'android/**'
+		]
 	},
 	js.configs.recommended,
 	{
@@ -44,7 +58,8 @@ export default [
 			globals: {
 				...globals.browser,
 				...globals.node,
-				...runes
+				...runes,
+				...buildConstants
 			}
 		},
 		plugins: {
@@ -73,7 +88,8 @@ export default [
 			},
 			globals: {
 				...globals.browser,
-				...runes
+				...runes,
+				...buildConstants
 			}
 		},
 		plugins: {

@@ -8,6 +8,11 @@ declare global {
 		// interface PageState {}
 		// interface Platform {}
 	}
+
+	// Client build version, injected by Vite from package.json (vite.config.ts).
+	// On mobile sideload builds this carries VERSION + short commit hash so the
+	// Settings screen can report exactly which build is installed (MOBILE-ARCH.md §10.4).
+	const __APP_VERSION__: string;
 }
 
 export {};

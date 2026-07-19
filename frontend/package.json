@@ -1,7 +1,7 @@
 {
 	"name": "frontend",
 	"private": true,
-	"version": "0.1.0-dev",
+	"version": "0.0.0",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
@@ -17,6 +17,7 @@
 		"test:watch": "vitest"
 	},
 	"devDependencies": {
+		"@capacitor/assets": "^3.0.5",
 		"@eslint/js": "^10.0.1",
 		"@fontsource-variable/inter": "^5.2.8",
 		"@internationalized/date": "^3.12.2",
@@ -53,6 +54,16 @@
 		"vitest": "^4.1.7"
 	},
 	"dependencies": {
+		"@capacitor/android": "^8.4.2",
+		"@capacitor/app": "^8.1.1",
+		"@capacitor/cli": "^8.4.2",
+		"@capacitor/core": "^8.4.2",
+		"@capacitor/ios": "^8.4.2",
+		"@capacitor/keyboard": "^8.0.5",
+		"@capacitor/network": "^8.0.1",
+		"@capacitor/preferences": "^8.0.1",
+		"@capacitor/splash-screen": "^8.0.2",
+		"@capacitor/status-bar": "^8.0.3",
 		"@fontsource/libre-baskerville": "^5.2.10",
 		"@fontsource/merriweather": "^5.2.11",
 		"@fontsource/pt-serif": "^5.2.8",

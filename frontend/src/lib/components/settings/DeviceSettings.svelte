@@ -17,6 +17,7 @@
 	import { sync } from '$lib/sync/engine';
 	import { authState, logout } from '$lib/auth/store.svelte';
 	import { checkForUpdate } from '$lib/pwa/bootstrap';
+	import { isNative } from '$lib/platform';
 	import MonitorSmartphoneIcon from '@lucide/svelte/icons/monitor-smartphone';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
@@ -144,17 +145,21 @@
 			{isSyncing ? 'Syncing…' : 'Test Connection / Sync Now'}
 		</Button>
 
-		<Button
-			variant="outline"
-			onclick={handleCheckUpdate}
-			disabled={isCheckingUpdate}
-			class="w-full gap-2"
-		>
-			<ArrowUpCircleIcon
-				class={['size-4', isCheckingUpdate && 'animate-pulse'].filter(Boolean).join(' ')}
-			/>
-			{isCheckingUpdate ? 'Checking…' : 'Check for Updates'}
-		</Button>
+		<!-- Update checks are service-worker based — web only. On native, updating
+		     means rebuilding and reinstalling the app (MOBILE-ARCH.md §9, D7). -->
+		{#if !isNative()}
+			<Button
+				variant="outline"
+				onclick={handleCheckUpdate}
+				disabled={isCheckingUpdate}
+				class="w-full gap-2"
+			>
+				<ArrowUpCircleIcon
+					class={['size-4', isCheckingUpdate && 'animate-pulse'].filter(Boolean).join(' ')}
+				/>
+				{isCheckingUpdate ? 'Checking…' : 'Check for Updates'}
+			</Button>
+		{/if}
 
 		<Separator />
 
@@ -167,5 +172,8 @@
 				password. There is only one account — all devices share it.
 			</Alert.Description>
 		</Alert.Root>
+
+		<!-- Installed build version (VERSION + commit on mobile sideload builds). -->
+		<p class="text-muted-foreground text-center text-xs">App version {__APP_VERSION__}</p>
 	</Card.Content>
 </Card.Root>
