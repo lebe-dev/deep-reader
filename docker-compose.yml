@@ -15,7 +15,7 @@ services:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
-    image: tinyops/deep-reader:0.1.0
+    image: tinyops/deep-reader:1.0.0
     env_file: .env
     volumes:
       - ./data:/data
