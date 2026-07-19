@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <rect width="64" height="64" rx="14" fill="oklch(0.50 0.12 243)"/>
+  <rect width="64" height="64" rx="14" fill="#0369a2"/>
   <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-weight="800" font-size="30" text-anchor="middle">
     <!-- D: верхняя левая позиция -->
-    <text x="24.5" y="32" fill="rgba(0,0,0,0.28)">D</text>
-    <text x="23" y="30.5" fill="#ffffff">D</text>
+    <text x="24.6" y="35.6" fill="rgba(0,0,0,0.28)">D</text>
+    <text x="23.1" y="34.1" fill="#ffffff">D</text>
     <!-- R: нижняя правая позиция, по диагонали -->
-    <text x="42.5" y="49" fill="rgba(0,0,0,0.28)">R</text>
-    <text x="41" y="47.5" fill="#ffffff">R</text>
+    <text x="42.6" y="52.6" fill="rgba(0,0,0,0.28)">R</text>
+    <text x="41.1" y="51.1" fill="#ffffff">R</text>
   </g>
 </svg>
