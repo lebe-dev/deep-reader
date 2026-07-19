@@ -3,8 +3,6 @@
 Deep Reader's SvelteKit frontend is packaged into native iOS and Android apps
 with [CapacitorJS](https://capacitorjs.com/). This is for **personal sideload
 use only** — installing on your own devices, no App Store / Play Store release.
-See [MOBILE-ARCH.md](../MOBILE-ARCH.md) for the underlying architecture
-(platform layer, offline sync, onboarding flow).
 
 The native app loads the same static bundle as the web PWA (`frontend/build`)
 and talks to a **remote** Deep Reader server you configure on first launch — it
@@ -114,5 +112,4 @@ off to the normal login/setup flow. The URL and auth token are mirrored into
 
 No push notifications, no background sync, no App/Play Store distribution, no
 OTA/live updates — updating the app means re-running `just deploy-ios` /
-`just deploy-android`. See [MOBILE-ARCH.md §13](../MOBILE-ARCH.md) for the full
-list of non-goals and why.
+`just deploy-android`.
