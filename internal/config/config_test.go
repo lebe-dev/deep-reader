@@ -29,16 +29,38 @@ func setEnv(t *testing.T, env map[string]string) {
 }
 
 func TestLoadDefaults(t *testing.T) {
-	// Explicitly clear the optional seed/secret vars so a developer's exported
-	// shell environment cannot leak into the assertions below.
+	// Clear every variable Load reads so the assertions below exercise the
+	// documented defaults regardless of the ambient environment. This must be
+	// exhaustive: the Justfile sets `dotenv-load`, so `just test` exports the
+	// project's root .env into the process env, and any variable not cleared
+	// here would leak that value in instead of falling through to its default.
 	setEnv(t, map[string]string{
-		"LLM_API_BASE_URL":    "",
-		"LLM_API_KEY":         "",
-		"LLM_MODEL":           "",
-		"TRUSTED_PROXIES":     "",
-		"SENTRY_DSN":          "",
-		"SENTRY_FRONTEND_DSN": "",
-		"SENTRY_ENVIRONMENT":  "",
+		"HTTP_PORT":                 "",
+		"DATABASE_PATH":             "",
+		"TRUST_PROXY":               "",
+		"TRUSTED_PROXIES":           "",
+		"LOGIN_MAX_ATTEMPTS":        "",
+		"LOGIN_ATTEMPT_WINDOW":      "",
+		"LOGIN_LOCKOUT_DURATION":    "",
+		"LLM_API_BASE_URL":          "",
+		"LLM_API_KEY":               "",
+		"LLM_MODEL":                 "",
+		"LLM_MAX_CONCURRENT":        "",
+		"LLM_REQUEST_TIMEOUT":       "",
+		"LLM_MAX_RETRIES":           "",
+		"LLM_CHUNK_TOKENS":          "",
+		"READABILITY_TIMEOUT":       "",
+		"MARKDOWN_ENABLED":          "",
+		"MARKDOWN_BASE_URL":         "",
+		"MARKDOWN_TIMEOUT":          "",
+		"MARKDOWN_DAILY_LIMIT":      "",
+		"MARKDOWN_COST_PER_ARTICLE": "",
+		"ENRICHMENT_VERSION":        "",
+		"LOG_LEVEL":                 "",
+		"LOG_FORMAT":                "",
+		"SENTRY_DSN":                "",
+		"SENTRY_FRONTEND_DSN":       "",
+		"SENTRY_ENVIRONMENT":        "",
 	})
 
 	cfg, err := Load()
