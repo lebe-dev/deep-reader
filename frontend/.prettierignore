@@ -2,3 +2,8 @@ src/lib/components/ui
 build
 .svelte-kit
 node_modules
+
+# Native Capacitor projects — Xcode/Gradle-managed sources and the generated
+# web bundle copied in by `cap sync`. Prettier must not reformat these.
+ios
+android
