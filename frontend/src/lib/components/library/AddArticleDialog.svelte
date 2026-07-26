@@ -160,7 +160,18 @@
 </div>
 
 <Dialog.Root {open} onOpenChange={handleOpenChange}>
-	<Dialog.Content class="flex max-h-[90vh] max-w-md flex-col">
+	<!--
+		This is the only dialog that autofocuses an input, so it is the only one that
+		summons the mobile keyboard on open. The keyboard arrives a beat *after* the
+		dialog is painted, and the browser then scrolls the visual viewport to reveal
+		the focused field — a vertically centred dialog visibly jumps upwards. Pinning
+		it near the top on narrow screens means there is nothing left to scroll, so
+		the position it opens at is the position it stays at. Centred from `sm:` up,
+		where no keyboard is involved.
+	-->
+	<Dialog.Content
+		class="top-[calc(env(safe-area-inset-top)+1rem)] flex max-h-[calc(100dvh-env(safe-area-inset-top)-2rem)] max-w-md translate-y-0 flex-col sm:top-1/2 sm:max-h-[90vh] sm:-translate-y-1/2"
+	>
 		<Dialog.Header class="shrink-0">
 			<Dialog.Title>{mode === 'url' ? 'Add article' : 'Add text'}</Dialog.Title>
 			<Dialog.Description>
