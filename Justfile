@@ -161,7 +161,7 @@ android-run:
     cd frontend && npm run build && npx cap sync android && npx cap run android
 
 # Build, install and launch on a physically-connected iPhone without Xcode.
-# Signing team: IOS_DEV_TEAM_ID (.env) else the free Apple Development identity.
+# Signing team: IOS_DEV_TEAM_ID (.env) else auto-detected from the keychain.
 # Device: IOS_DEVICE_ID (.env) else the single connected device.
 deploy-ios: cap-sync-versioned
     #!/usr/bin/env bash
@@ -171,12 +171,59 @@ deploy-ios: cap-sync-versioned
     DERIVED="frontend/ios/DerivedData"
     BUNDLE_ID="ru.tinyops.deepreader"
 
+    # Team ID resolution. NB: the 10-char code in an identity's common name
+    # ("Apple Development: you@example.com (N264NVXPH7)") is the *certificate*
+    # id, not the team — signing with it fails as `No Account for Team "..."`.
+    # The Team ID is the certificate's OU, which is what we read here; the
+    # provisioning profile installed for this bundle id is used to pick the
+    # right OU when several signing certificates are present.
     TEAM="${IOS_DEV_TEAM_ID:-}"
     if [ -z "$TEAM" ]; then
-        TEAM=$(security find-identity -v -p codesigning \
-            | sed -n 's/.*Apple Development:.*(\([A-Z0-9]\{10\}\)).*/\1/p' | head -1)
+        TEAM=$(BUNDLE_ID="$BUNDLE_ID" python3 - <<'PY'
+    import glob, os, plistlib, re, subprocess
+
+    bundle_id = os.environ["BUNDLE_ID"]
+
+    def run(*cmd, stdin=None):
+        p = subprocess.run(cmd, input=stdin, capture_output=True)
+        return p.stdout if p.returncode == 0 else b""
+
+    # Team ID of every valid codesigning identity, in keychain order.
+    teams = []
+    listing = run("security", "find-identity", "-v", "-p", "codesigning").decode(errors="replace")
+    for name in re.findall(r'^\s*\d+\)\s+[0-9A-F]{40}\s+"(.+)"\s*$', listing, re.M):
+        pem = run("security", "find-certificate", "-c", name, "-p")
+        subject = run("openssl", "x509", "-noout", "-subject", stdin=pem).decode(errors="replace")
+        for ou in re.findall(r"OU\s*=\s*([A-Z0-9]{10})", subject):
+            if ou not in teams:
+                teams.append(ou)
+
+    if not teams:
+        raise SystemExit(0)
+
+    # Prefer the team whose provisioning profile already covers this bundle id.
+    for directory in ("~/Library/Developer/Xcode/UserData/Provisioning Profiles",
+                      "~/Library/MobileDevice/Provisioning Profiles"):
+        for path in sorted(glob.glob(os.path.expanduser(directory) + "/*.mobileprovision")):
+            try:
+                profile = plistlib.loads(run("security", "cms", "-D", "-i", path))
+            except Exception:
+                continue
+            app_id = profile.get("Entitlements", {}).get("application-identifier", "")
+            for team in teams:
+                if app_id == f"{team}.{bundle_id}":
+                    print(team)
+                    raise SystemExit(0)
+
+    print(teams[0])
+    PY
+        )
     fi
-    [ -n "$TEAM" ] || { echo "✗ No signing team. Set IOS_DEV_TEAM_ID in .env or sign in to Xcode." >&2; exit 1; }
+    if [ -z "$TEAM" ]; then
+        echo "✗ No signing team found. Sign in to Xcode (Settings → Accounts) so a" >&2
+        echo "  codesigning certificate exists, or set IOS_DEV_TEAM_ID in .env." >&2
+        exit 1
+    fi
 
     UDID="${IOS_DEVICE_ID:-}"
     if [ -z "$UDID" ]; then
@@ -186,6 +233,32 @@ deploy-ios: cap-sync-versioned
         rm -f "$JSON"
     fi
     [ -n "$UDID" ] || { echo "✗ No connected iPhone. Unlock+trust it, or set IOS_DEVICE_ID in .env." >&2; exit 1; }
+
+    # SwiftPM unpacks Capacitor's code-signed binary xcframeworks under
+    # SourcePackages/artifacts, and Xcode re-verifies their seal on every build.
+    # Any tool that rewrites a file inside one of them breaks that seal, and the
+    # build then fails with an opaque "a sealed resource is missing or invalid"
+    # (a stray `prettier --write` did exactly this before ios/ was ignored).
+    # Repair means deleting all of SourcePackages, not just artifacts/:
+    # workspace-state.json otherwise still claims the artifacts are installed,
+    # so SwiftPM never unpacks a fresh copy.
+    SPM="$DERIVED/SourcePackages"
+    if [ -d "$SPM/artifacts" ]; then
+        TAMPERED=""
+        while IFS= read -r FW; do
+            # Unsigned artifacts have no seal to verify — nothing to repair.
+            if codesign -dv "$FW" 2>&1 | grep -q "not signed at all"; then
+                continue
+            fi
+            if ! codesign --verify "$FW" >/dev/null 2>&1; then
+                TAMPERED="$TAMPERED ${FW##*/}"
+            fi
+        done < <(find "$SPM/artifacts" -maxdepth 4 -type d -name "*.xcframework")
+        if [ -n "$TAMPERED" ]; then
+            echo "▸ Broken xcframework signature:$TAMPERED — refetching SwiftPM packages"
+            rm -rf "$SPM"
+        fi
+    fi
 
     echo "▸ Building for team $TEAM, device $UDID"
     xcodebuild \
