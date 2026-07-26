@@ -79,13 +79,31 @@ launches via `xcrun devicectl`. Configure signing/device selection in `.env`
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `IOS_DEV_TEAM_ID` | auto-detected from `security find-identity -v -p codesigning` | Apple Developer Team ID used for code signing. |
+| `IOS_DEV_TEAM_ID` | auto-detected from the keychain (see below) | Apple Developer Team ID used for code signing. |
 | `IOS_DEVICE_ID` | the single connected device | UDID to target when multiple devices are connected. |
+
+Team ID auto-detection reads the **OU** field of the signing certificate's
+subject — that is where the Team ID lives. It is *not* the 10-character code in
+the certificate's name (`Apple Development: you@example.com (N264NVXPH7)`);
+that one identifies the certificate, and passing it as `DEVELOPMENT_TEAM` makes
+`xcodebuild` fail with `No Account for Team "…"` plus `No profiles for
+'ru.tinyops.deepreader' were found`. When the keychain holds signing
+certificates for several teams, the one whose installed provisioning profile
+already covers `ru.tinyops.deepreader` wins. Override with `IOS_DEV_TEAM_ID` if
+you need a specific team.
 
 On a free Apple Development profile, the app's provisioning expires after 7
 days — just re-run `just deploy-ios` to reinstall. On first launch on device,
 trust the developer certificate once under **Settings → General → VPN & Device
 Management**.
+
+`deploy-ios` also verifies the code signature of the Capacitor xcframeworks that
+SwiftPM unpacks into `frontend/ios/DerivedData/SourcePackages/artifacts`. If a
+tool has rewritten a file inside one of them the seal breaks and Xcode fails
+with `a sealed resource is missing or invalid`; the recipe then deletes
+`SourcePackages` so SwiftPM unpacks a pristine copy. Deleting only `artifacts/`
+is not enough — `workspace-state.json` keeps claiming they are installed.
+Formatters are kept out of these trees by `frontend/.prettierignore`.
 
 ### Android signing
 
