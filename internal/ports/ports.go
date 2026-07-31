@@ -338,6 +338,33 @@ type Store interface {
 	// into it.
 	SaveTokenLemmas(ctx context.Context, id string, tokens []model.Token, version int) error
 
+	// ReplacePublication publishes an article under p.Token, replacing any
+	// publication the article already had, and returns the superseded token
+	// (empty when there was none) so the caller can delete its page file.
+	ReplacePublication(ctx context.Context, p model.Publication) (previousToken string, err error)
+
+	// GetPublication returns the publication for token, or ErrNotFound. Expired
+	// publications are still returned — the caller decides how to answer them.
+	GetPublication(ctx context.Context, token string) (model.Publication, error)
+
+	// GetPublicationByArticle returns the article's publication, or ErrNotFound
+	// when the article is not published.
+	GetPublicationByArticle(ctx context.Context, articleID string) (model.Publication, error)
+
+	// DeletePublicationByArticle unpublishes an article and returns the token
+	// whose page file the caller must delete. Returns ErrNotFound when the
+	// article was not published.
+	DeletePublicationByArticle(ctx context.Context, articleID string) (token string, err error)
+
+	// PruneExpiredPublications deletes publications whose TTL elapsed at or
+	// before cutoff and returns their tokens, so the caller can remove the
+	// matching page files. Publications stored without an expiry are kept.
+	PruneExpiredPublications(ctx context.Context, cutoff time.Time) ([]string, error)
+
+	// ListPublicationTokens returns the tokens of all live publications, which
+	// the caller diffs against the files on disk to sweep orphans.
+	ListPublicationTokens(ctx context.Context) ([]string, error)
+
 	// RefundMarkdownUnits returns cost previously-reserved units to the current
 	// day's budget (e.g. when a markdown.new call ultimately failed and the work
 	// fell back to local extraction). It never drives the counter below zero.

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,19 @@ type Config struct {
 	// DatabasePath is the filesystem path to the SQLite file. Env:
 	// DATABASE_PATH (/data/deep-reader.db).
 	DatabasePath string
+	// PublicPagesDir is the directory the generated public article pages are
+	// written to, one <token>.html per publication. It must be on the same
+	// persistent volume as the database — a page whose file is gone answers 404
+	// even while its record is still live. Env: PUBLIC_PAGES_DIR
+	// (/data/public-pages).
+	PublicPagesDir string
+	// PublicBaseURL is the externally reachable origin (e.g.
+	// https://reader.example) used to build the absolute share link and the
+	// page's og:url. When empty the link is derived from the publishing
+	// request's own scheme and Host, which is correct for the documented
+	// reverse-proxy setup; set it explicitly if that header cannot be trusted.
+	// Env: PUBLIC_BASE_URL (empty).
+	PublicBaseURL string
 
 	// TrustProxy enables reading the client IP from the proxy header (default
 	// X-Forwarded-For) when the immediate peer is a trusted proxy. Required for
@@ -146,6 +160,11 @@ func Load() (*Config, error) {
 	cfg.HTTPPort = port
 
 	cfg.DatabasePath = envStr("DATABASE_PATH", "/data/deep-reader.db")
+	// Default the page directory next to the database rather than to a fixed
+	// /data/public-pages, so a dev run with DATABASE_PATH=./data/... keeps its
+	// published pages beside its database instead of writing to the root volume.
+	cfg.PublicPagesDir = envStr("PUBLIC_PAGES_DIR", filepath.Join(filepath.Dir(cfg.DatabasePath), "public-pages"))
+	cfg.PublicBaseURL = strings.TrimRight(envStr("PUBLIC_BASE_URL", ""), "/")
 
 	trustProxy, err := envBool("TRUST_PROXY", false)
 	if err != nil {

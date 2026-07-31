@@ -351,6 +351,28 @@ func (f *fakeStore) TryConsumeMarkdownUnits(_ context.Context, _, _ int) (bool, 
 }
 func (f *fakeStore) RefundMarkdownUnits(_ context.Context, _ int) error { return nil }
 
+func (f *fakeStore) ReplacePublication(context.Context, model.Publication) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStore) GetPublication(context.Context, string) (model.Publication, error) {
+	return model.Publication{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) GetPublicationByArticle(context.Context, string) (model.Publication, error) {
+	return model.Publication{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) DeletePublicationByArticle(context.Context, string) (string, error) {
+	return "", ports.ErrNotFound
+}
+
+func (f *fakeStore) PruneExpiredPublications(context.Context, time.Time) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) ListPublicationTokens(context.Context) ([]string, error) { return nil, nil }
+
 func (f *fakeStore) IsInitialized(_ context.Context) (bool, error)   { return true, nil }
 func (f *fakeStore) CreateUser(_ context.Context, _, _ string) error { return nil }
 func (f *fakeStore) GetUser(_ context.Context) (*model.User, error)  { return nil, ports.ErrNotFound }

@@ -176,6 +176,12 @@ export interface ArticleMeta {
 	 * the UI during processing.
 	 */
 	progress_stage?: string;
+	/**
+	 * Absolute link to the article's public page, present only while the article
+	 * is published and its link has not expired. The library card and the reader
+	 * show a globe affordance when it is set.
+	 */
+	public_url?: string;
 }
 
 /**
@@ -269,6 +275,12 @@ export interface Settings {
 	 * default.
 	 */
 	skip_summary: boolean;
+	/**
+	 * How long a newly published public page stays reachable, in hours. Read at
+	 * publish time and stamped into the link, so changing it never affects links
+	 * already shared. 0 means the link never expires.
+	 */
+	public_page_ttl_hours: number;
 	updated_at: string;
 }
 
@@ -290,8 +302,36 @@ export type SettingsPatch = Partial<
 		| 'vocab_assist'
 		| 'skip_summary'
 		| 'line_height'
+		| 'public_page_ttl_hours'
 	>
 >;
+
+// ---------------------------------------------------------------------------
+// Public pages — share an article's translated text under an unguessable link
+// with a limited lifetime (Settings > Public Pages).
+// ---------------------------------------------------------------------------
+
+/** A live share link for one article, as returned by the publish endpoints. */
+export interface Publication {
+	/** The unguessable path segment that grants access. */
+	token: string;
+	/** Absolute link to hand out. */
+	url: string;
+	article_id: string;
+	/** Page title, also used as og:title. */
+	title: string;
+	/** Page description, also used as og:description. */
+	description: string;
+	published_at: string;
+	/** RFC3339 expiry; absent when the link never expires. */
+	expires_at?: string;
+}
+
+/** Body of `POST /api/articles/:id/publish`. Empty fields fall back to the article's own. */
+export interface PublishRequest {
+	title: string;
+	description: string;
+}
 
 // ---------------------------------------------------------------------------
 // LLM provider profiles (Settings > LLM, backend-only)

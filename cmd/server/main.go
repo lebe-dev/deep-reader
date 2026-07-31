@@ -147,6 +147,11 @@ func run() error {
 
 	srv := api.New(cfg, st, ingestor, api.WithLogger(log))
 
+	// Reclaim disk from public pages whose TTL ran out (and from files orphaned
+	// when their article was deleted). Expiry is enforced on every request
+	// regardless, so this sweep is housekeeping, not enforcement.
+	go srv.RunPublicationSweeper(rootCtx)
+
 	// Serve in a goroutine so main can wait on the signal context.
 	serveErr := make(chan error, 1)
 	go func() {

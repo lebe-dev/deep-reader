@@ -50,6 +50,7 @@ internal/
   enrich/           LLM-driven CEFR-tuned enrichment
   llm/              OpenAI-compatible client, worker pool
   normalize/        text normalization
+  publish/          public article pages (HTML + Open Graph rendering, file store)
   tokenize/         sentence/word tokenization
   store/            SQLite persistence
   model/            domain types
@@ -138,6 +139,34 @@ readability until the next reset. The remaining daily budget is shown in the
 | `MARKDOWN_TIMEOUT` | `45s` | Timeout for a single conversion. |
 | `MARKDOWN_DAILY_LIMIT` | `500` | Request-unit budget per UTC day (`0` = unlimited). |
 | `MARKDOWN_COST_PER_ARTICLE` | `50` | Request units charged per article conversion. |
+
+## Public pages
+
+An enriched article can be published under an unguessable link
+(`/p/<token>`) that anyone can open without an account. The published page
+carries only the **sentence translations** — no tapping, no word overlay, no
+offline cache — plus the title, description and source attribution. Stretches
+the LLM never covered are carried over in the original language rather than
+dropped.
+
+The page is rendered **once, at publish time**, into a standalone HTML file with
+its Open Graph metadata inlined, so link previews work without any server-side
+rendering: serving a page is a TTL check plus a file read. Publishing again
+mints a new token and invalidates the previous link.
+
+Link lifetime is set in **Settings > Public Pages** (in hours; `0` means the
+link never expires) and is stamped into each link when it is created, so
+changing the setting never affects links already shared. Expired links answer
+404, and a sweeper removes their files hourly — along with pages orphaned by a
+deleted article.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PUBLIC_PAGES_DIR` | `public-pages` next to `DATABASE_PATH` | Where generated pages are stored. Must be on the persistent volume. |
+| `PUBLIC_BASE_URL` | empty | Externally reachable origin for share links and `og:url`. Empty derives it from the publishing request. |
+
+Endpoints: `POST|GET|DELETE /api/articles/:id/publish` (authenticated) and
+`GET /p/:token` (public).
 
 ## Error tracking (Sentry)
 

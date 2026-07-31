@@ -17,6 +17,7 @@ Sentence translation example:
 - **CEFR-tuned enrichment** — an LLM translates only the words/phrases likely to be unfamiliar at your level, leaving the rest of the text untouched.
 - **Translation levels** — words, phrases, sentences.
 - **Passive vocabulary capture** — every word or phrase you tap for a translation is collected automatically, matched by dictionary lemma so any inflection counts. The LLM then stops spending attention on words you already know, and the reader hints them from your own vocabulary instead, in every article where they appear. Browse them at `/words`.
+- **Publish a translation** — share any translated article under an unguessable link with a lifetime you set (Settings > Public Pages). The page is a standalone file with Open Graph metadata, so link previews work; once the link expires it answers 404.
 - **Offline-first reading** — articles are cached locally (PWA + IndexedDB); the reader renders from cache instantly and syncs in the background.
 - **Single-user, self-hosted** — one built-in account, created on first launch; no external auth provider required.
 - **iOS/Android apps** — the same SvelteKit frontend packaged with CapacitorJS for native offline reading on your own devices.

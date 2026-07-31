@@ -62,6 +62,13 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	if err != nil {
 		return s.serverError(c, "list article meta", err)
 	}
+	// The store knows which articles are published; only the HTTP layer knows
+	// the origin they are published under, so the link is assembled here.
+	for i := range metas {
+		if metas[i].PublicToken != "" {
+			metas[i].PublicURL = s.publicPageURL(c, metas[i].PublicToken)
+		}
+	}
 	progress, err := s.store.ListProgress(ctx, since)
 	if err != nil {
 		return s.serverError(c, "list progress", err)
@@ -211,11 +218,22 @@ func (s *Server) addArticle(c fiber.Ctx) error {
 func (s *Server) deleteArticle(c fiber.Ctx) error {
 	id := c.Params("id")
 
+	// Read the share token before the delete: the publication row goes with the
+	// article (ON DELETE CASCADE), and without the token its page file would be
+	// left for the sweeper to find.
+	pub, pubErr := s.store.GetPublicationByArticle(c.Context(), id)
+
 	if err := s.store.DeleteArticle(c.Context(), id); err != nil {
 		if errors.Is(err, ports.ErrNotFound) {
 			return sendError(c, fiber.StatusNotFound, "article not found")
 		}
 		return s.serverError(c, "delete article", err)
+	}
+
+	if pubErr == nil && s.pub != nil {
+		if err := s.pub.Remove(pub.Token); err != nil {
+			s.log.Warn("could not remove the page file of a deleted article", slog.Any("error", err))
+		}
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }

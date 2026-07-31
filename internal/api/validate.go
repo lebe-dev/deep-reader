@@ -58,6 +58,12 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.LineHeight != nil && !slices.Contains(model.LineHeights, *patch.LineHeight) {
 		return "line_height must be one of compact, normal, relaxed", false
 	}
+	// public_page_ttl_hours: 0 means "published links never expire"; any other
+	// value must fall within the supported range.
+	if patch.PublicPageTTLHours != nil && *patch.PublicPageTTLHours != 0 &&
+		(*patch.PublicPageTTLHours < model.MinPublicPageTTLHours || *patch.PublicPageTTLHours > model.MaxPublicPageTTLHours) {
+		return "public_page_ttl_hours must be 0 (no expiry) or between 1 and 8760", false
+	}
 	// vocab_assist and skip_summary are plain booleans: both values are legal,
 	// so there is nothing to reject.
 	return "", true

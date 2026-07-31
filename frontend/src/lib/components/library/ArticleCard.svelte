@@ -12,6 +12,7 @@
 	import FileTextIcon from '@lucide/svelte/icons/file-text';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import GlobeIcon from '@lucide/svelte/icons/globe';
 	import PinIcon from '@lucide/svelte/icons/pin';
 	import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
@@ -270,6 +271,23 @@
 	{/if}
 
 	<div class="text-muted-foreground mt-1.5 flex items-center gap-2 text-xs">
+		{#if article.public_url}
+			<!-- The article is published: the globe both signals that and opens the
+				 public page. target="_blank" is what the source-domain link above
+				 already uses — on the desktop it opens a tab, and in the Capacitor
+				 app it hands the URL to the system browser. -->
+			<a
+				href={article.public_url}
+				target="_blank"
+				rel="noopener noreferrer"
+				onclick={(e: MouseEvent) => e.stopPropagation()}
+				class="hover:text-foreground shrink-0 transition-colors"
+				title="Open the public page"
+				aria-label="Open the public page"
+			>
+				<GlobeIcon class="size-3.5" />
+			</a>
+		{/if}
 		{#if article.source_domain && safeSourceUrl}
 			<a
 				href={safeSourceUrl}

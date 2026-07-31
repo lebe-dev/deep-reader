@@ -19,6 +19,9 @@
 //	POST   /api/articles/:id/reenrich       {mode:full|topup} -> re-run enrichment
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
 //	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
+//	GET    /api/articles/:id/publish        current public-page link, 404 when none
+//	POST   /api/articles/:id/publish        {title,description} -> 201 {token,url,expires_at}
+//	DELETE /api/articles/:id/publish        revoke the public page -> 204
 //	PATCH  /api/settings                    partial settings update
 //	POST   /api/lookups                     {events} -> {accepted}; record word/phrase lookups
 //	POST   /api/vocab/delete                {entry_key} -> 204; soft-delete a vocabulary entry
@@ -28,6 +31,7 @@
 //	DELETE /api/llm-providers/:id           remove a profile
 //	POST   /api/llm-providers/:id/activate  make a profile the active connection
 //	GET    /api/stats                        library counters
+//	GET    /p/:token                        (no auth) published page, 404 once expired
 //	GET    /*                               embedded PWA (no auth, SPA fallback)
 //
 // Construct with New (which uses the embedded web.FS and slog.Default) and call
@@ -49,6 +53,7 @@ import (
 
 	"deep-reader/internal/config"
 	"deep-reader/internal/ports"
+	"deep-reader/internal/publish"
 	"deep-reader/web"
 )
 
@@ -61,6 +66,10 @@ type Server struct {
 	log        *slog.Logger
 	loginGuard *loginGuard
 	app        *fiber.App
+	// pub stores the generated public article pages. It is nil when the page
+	// directory could not be opened, which disables publishing but must not
+	// keep the rest of the service from starting.
+	pub *publish.Publisher
 
 	// ingestMax overrides the POST /api/articles per-minute limit. Zero means
 	// use the default; tests set a small value to trip the 429 deterministically.
@@ -106,6 +115,16 @@ func New(cfg *config.Config, st ports.Store, ing ports.Ingestor, opts ...Option)
 		log:        o.log,
 		loginGuard: newLoginGuard(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow, cfg.LoginLockoutDuration),
 	}
+
+	// Public pages are an optional capability: if their directory cannot be
+	// opened (read-only volume, bad path), publishing answers 503 while the
+	// reader itself keeps working.
+	if pub, err := publish.NewPublisher(cfg.PublicPagesDir); err != nil {
+		o.log.Error("public pages disabled", slog.Any("error", err), slog.String("dir", cfg.PublicPagesDir))
+	} else {
+		s.pub = pub
+	}
+
 	s.app = s.buildApp(o.siteFS)
 	return s
 }
@@ -182,6 +201,9 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Post("/articles/:id/reenrich", s.reEnrichArticle)
 	api.Put("/articles/:id/progress", s.putProgress)
 	api.Put("/articles/:id/pin", s.setPinned)
+	api.Get("/articles/:id/publish", s.getPublication)
+	api.Post("/articles/:id/publish", s.publishArticle)
+	api.Delete("/articles/:id/publish", s.unpublishArticle)
 
 	api.Patch("/settings", s.patchSettings)
 
@@ -194,6 +216,11 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Patch("/llm-providers/:id", s.updateLLMProvider)
 	api.Delete("/llm-providers/:id", s.deleteLLMProvider)
 	api.Post("/llm-providers/:id/activate", s.activateLLMProvider)
+
+	// Public article pages, no auth. Registered ahead of the static mount so the
+	// SPA fallback never swallows a share link, and behind its own path prefix
+	// so it cannot collide with a client route.
+	app.Get("/p/:token", s.servePublicPage)
 
 	// Embedded PWA at the origin root, no auth, SPA fallback. Registered last so
 	// it only handles paths not claimed by /healthz or /api.

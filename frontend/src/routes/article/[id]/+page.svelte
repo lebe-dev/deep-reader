@@ -80,6 +80,8 @@
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
 	import BotIcon from '@lucide/svelte/icons/bot';
+	import GlobeIcon from '@lucide/svelte/icons/globe';
+	import PublishDialog from '$lib/components/library/PublishDialog.svelte';
 
 	// ---------------------------------------------------------------------------
 	// Route param
@@ -115,6 +117,12 @@
 	let processingStage: string | undefined = $state();
 	let processingCoverage = $state(0);
 	const processingPercent = $derived(Math.round(processingCoverage * 100));
+
+	// Publishing is offered only for a translated article: there is nothing to
+	// put on a public page until enrichment has produced the sentence
+	// translations the page is built from.
+	const isEnriched = $derived((payload?.status ?? meta?.status) === 'enriched');
+	let publishOpen = $state(false);
 
 	// only allow http(s) source links to avoid javascript:/data: href injection
 	const safeSourceUrl = $derived(
@@ -707,6 +715,21 @@
 						<ExternalLinkIcon class="size-3" />
 					</a>
 				{/if}
+				{#if meta?.public_url}
+					<!-- Published: the globe opens the public page. target="_blank" is the
+						 same affordance the source link uses — a new tab on the desktop,
+						 the system browser inside the Capacitor app. -->
+					<a
+						href={meta.public_url}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="hover:text-foreground inline-flex items-center gap-1 transition-colors"
+						title="Open the public page"
+						aria-label="Open the public page"
+					>
+						<GlobeIcon class="size-3.5" />
+					</a>
+				{/if}
 				{#if coverage !== null}
 					<CoverageBadge {coverage} showLabel />
 				{/if}
@@ -751,6 +774,14 @@
 							<DropdownMenu.Item onSelect={handleResetProgress}>
 								<RotateCcwIcon class="size-4" />
 								Reset reading progress
+							</DropdownMenu.Item>
+						{/if}
+						{#if isEnriched}
+							<DropdownMenu.Separator />
+							<DropdownMenu.Label>Sharing</DropdownMenu.Label>
+							<DropdownMenu.Item onSelect={() => (publishOpen = true)}>
+								<GlobeIcon class="size-4" />
+								{meta?.public_url ? 'Public link' : 'Publish…'}
 							</DropdownMenu.Item>
 						{/if}
 					</DropdownMenu.Content>
@@ -856,3 +887,17 @@
 		</div>
 	</div>
 {/if}
+
+<!-- Publish / manage the article's public link. Mounted unconditionally so the
+	 dialog survives the menu closing; it loads the current link when opened. -->
+<PublishDialog
+	bind:open={publishOpen}
+	articleId={articleId ?? ''}
+	articleTitle={meta?.title ?? ''}
+	articleSummary={meta?.summary ?? payload?.summary ?? ''}
+	onChange={(publication) => {
+		// Reflect the change in the header immediately; publishing bumps the
+		// article's updated_at server-side, so the next delta sync persists it.
+		if (meta) meta = { ...meta, public_url: publication?.url };
+	}}
+/>

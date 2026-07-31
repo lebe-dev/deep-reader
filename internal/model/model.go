@@ -399,8 +399,14 @@ type Settings struct {
 	// worker goes straight to translating the chunks, saving one LLM call per
 	// article. The summary is also what gives each chunk its cross-article
 	// context and what the library card shows, so it is off by default.
-	SkipSummary bool      `json:"skip_summary"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	SkipSummary bool `json:"skip_summary"`
+	// PublicPageTTLHours is how long a newly published public page stays
+	// reachable, in hours. It is read at publish time and stamped into the
+	// publication row, so editing it never changes links already handed out.
+	// 0 means "no expiry"; any other value must be within
+	// [MinPublicPageTTLHours, MaxPublicPageTTLHours].
+	PublicPageTTLHours int       `json:"public_page_ttl_hours"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -421,6 +427,7 @@ type SettingsPatch struct {
 	LineHeight               *string `json:"line_height,omitempty"`
 	VocabAssist              *bool   `json:"vocab_assist,omitempty"`
 	SkipSummary              *bool   `json:"skip_summary,omitempty"`
+	PublicPageTTLHours       *int    `json:"public_page_ttl_hours,omitempty"`
 }
 
 // LLMProvider is a user-managed LLM connection profile (Settings > LLM,
@@ -562,6 +569,15 @@ type ArticleMeta struct {
 	// set by the enrichment worker. Empty for articles at rest (queued, enriched,
 	// or failed). The UI shows it during processing.
 	ProgressStage string `json:"progress_stage,omitempty"`
+	// PublicToken is the share token of the article's live publication, empty
+	// when it is not published (or its link already expired). It stays
+	// server-side: the API turns it into PublicURL, which is what the client
+	// can actually open.
+	PublicToken string `json:"-"`
+	// PublicURL is the absolute link to the article's public page, empty when it
+	// is not published. The library and the reader show a globe affordance when
+	// it is set.
+	PublicURL string `json:"public_url,omitempty"`
 }
 
 // ArticlePayload is the full enriched-article response from
@@ -869,6 +885,59 @@ type SaveLookupsRequest struct {
 // id or by position) are silently ignored, so Accepted may be below len(Events).
 type SaveLookupsResponse struct {
 	Accepted int `json:"accepted"`
+}
+
+// Public-page TTL bounds for Settings.PublicPageTTLHours. 0 is accepted
+// separately and means "no expiry"; a non-zero value must fall within these
+// bounds. The upper bound is one year — long enough for any sharing purpose,
+// short enough that a forgotten link does not live forever by accident.
+const (
+	MinPublicPageTTLHours = 1
+	MaxPublicPageTTLHours = 8760
+)
+
+// DefaultPublicPageTTLHours is the seeded value for Settings.PublicPageTTLHours
+// (three days). Must match the DEFAULT in migration 00024.
+const DefaultPublicPageTTLHours = 72
+
+// Accepted lengths for the publication metadata submitted with a publish
+// request. They bound what ends up in the page's <title> and og:description.
+const (
+	MaxPublicationTitleLen       = 300
+	MaxPublicationDescriptionLen = 1000
+)
+
+// Publication is a share link for one article: an unguessable token, the Open
+// Graph metadata stamped into the generated page, and the moment the link stops
+// working. The rendered page lives on disk as <token>.html; this record is the
+// gate that decides whether it may still be served.
+type Publication struct {
+	// Token is the URL path segment that grants access. It is the whole secret.
+	Token string `json:"token"`
+	// URL is the absolute public link, assembled by the API from the request
+	// origin. It is not persisted.
+	URL         string    `json:"url,omitempty"`
+	ArticleID   string    `json:"article_id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	PublishedAt time.Time `json:"published_at"`
+	// ExpiresAt is when the link stops working. Zero means it never expires
+	// (published while Settings.PublicPageTTLHours was 0).
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
+}
+
+// Expired reports whether the publication's TTL has elapsed as of now. A
+// publication with no expiry never expires.
+func (p Publication) Expired(now time.Time) bool {
+	return !p.ExpiresAt.IsZero() && !now.Before(p.ExpiresAt)
+}
+
+// PublishRequest is the POST /api/articles/:id/publish body. Both fields are
+// pre-filled client-side from the article (title, summary) and editable before
+// publishing; an empty field falls back to the article's own value.
+type PublishRequest struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
 }
 
 // DeleteVocabRequest is the POST /api/vocab/delete body. The key travels in the

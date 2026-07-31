@@ -25,6 +25,8 @@ import type {
 	LLMProviderView,
 	LLMProviderInput,
 	LookupEvent,
+	Publication,
+	PublishRequest,
 	SaveLookupsRequest,
 	SaveLookupsResponse
 } from './types';
@@ -318,6 +320,51 @@ export function pinArticle(id: string, pinned: boolean, signal?: AbortSignal): P
 	return request<void>(`/api/articles/${encodeURIComponent(id)}/pin`, {
 		method: 'PUT',
 		body: { pinned },
+		signal
+	});
+}
+
+/**
+ * `GET /api/articles/:id/publish` — the article's live share link.
+ *
+ * Resolves to `null` when the article is not published or its link already
+ * expired; both cases are a 404 the caller should not treat as an error.
+ */
+export async function getPublication(
+	id: string,
+	signal?: AbortSignal
+): Promise<Publication | null> {
+	try {
+		return await request<Publication>(`/api/articles/${encodeURIComponent(id)}/publish`, {
+			signal
+		});
+	} catch (err) {
+		if (err instanceof ApiError && err.status === 404) return null;
+		throw err;
+	}
+}
+
+/**
+ * `POST /api/articles/:id/publish` — publish the article's translated text
+ * under a fresh unguessable link. Re-publishing replaces the previous link.
+ * Empty `title` / `description` fall back to the article's own.
+ */
+export function publishArticle(
+	id: string,
+	body: PublishRequest,
+	signal?: AbortSignal
+): Promise<Publication> {
+	return request<Publication>(`/api/articles/${encodeURIComponent(id)}/publish`, {
+		method: 'POST',
+		body,
+		signal
+	});
+}
+
+/** `DELETE /api/articles/:id/publish` — revoke the share link immediately. */
+export function unpublishArticle(id: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/articles/${encodeURIComponent(id)}/publish`, {
+		method: 'DELETE',
 		signal
 	});
 }

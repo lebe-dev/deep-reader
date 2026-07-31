@@ -69,6 +69,13 @@ type fakeStore struct {
 	lastPinID      string
 	lastPinned     bool
 
+	// article backs GetArticle; nil means the library has no such article.
+	article *model.Article
+
+	// Publications (public pages), keyed by share token.
+	pubs                  map[string]model.Publication
+	replacePublicationErr error
+
 	// sessionErr, when set, makes SessionExists fail — simulating a DB outage so
 	// auth must surface a 5xx rather than masking it as a 401.
 	sessionErr error
@@ -171,7 +178,10 @@ func (f *fakeStore) ListArticleMeta(_ context.Context, since time.Time) ([]model
 }
 
 func (f *fakeStore) GetArticle(context.Context, string) (*model.Article, error) {
-	return nil, ports.ErrNotFound
+	if f.article == nil {
+		return nil, ports.ErrNotFound
+	}
+	return f.article, nil
 }
 
 func (f *fakeStore) GetArticlePayload(context.Context, string) (*model.ArticlePayload, error) {
@@ -242,6 +252,72 @@ func (f *fakeStore) TryConsumeMarkdownUnits(context.Context, int, int) (bool, in
 }
 
 func (f *fakeStore) RefundMarkdownUnits(context.Context, int) error { return nil }
+
+// ── Publications ──
+
+func (f *fakeStore) ReplacePublication(_ context.Context, p model.Publication) (string, error) {
+	if f.replacePublicationErr != nil {
+		return "", f.replacePublicationErr
+	}
+	previous := ""
+	for token, existing := range f.pubs {
+		if existing.ArticleID == p.ArticleID {
+			previous = token
+			delete(f.pubs, token)
+		}
+	}
+	if f.pubs == nil {
+		f.pubs = map[string]model.Publication{}
+	}
+	f.pubs[p.Token] = p
+	return previous, nil
+}
+
+func (f *fakeStore) GetPublication(_ context.Context, token string) (model.Publication, error) {
+	p, ok := f.pubs[token]
+	if !ok {
+		return model.Publication{}, ports.ErrNotFound
+	}
+	return p, nil
+}
+
+func (f *fakeStore) GetPublicationByArticle(_ context.Context, articleID string) (model.Publication, error) {
+	for _, p := range f.pubs {
+		if p.ArticleID == articleID {
+			return p, nil
+		}
+	}
+	return model.Publication{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) DeletePublicationByArticle(_ context.Context, articleID string) (string, error) {
+	for token, p := range f.pubs {
+		if p.ArticleID == articleID {
+			delete(f.pubs, token)
+			return token, nil
+		}
+	}
+	return "", ports.ErrNotFound
+}
+
+func (f *fakeStore) PruneExpiredPublications(_ context.Context, cutoff time.Time) ([]string, error) {
+	var pruned []string
+	for token, p := range f.pubs {
+		if p.Expired(cutoff) {
+			pruned = append(pruned, token)
+			delete(f.pubs, token)
+		}
+	}
+	return pruned, nil
+}
+
+func (f *fakeStore) ListPublicationTokens(context.Context) ([]string, error) {
+	tokens := make([]string, 0, len(f.pubs))
+	for token := range f.pubs {
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
+}
 
 func (f *fakeStore) IsInitialized(context.Context) (bool, error) {
 	if f.panicOnIsInitialized != "" {

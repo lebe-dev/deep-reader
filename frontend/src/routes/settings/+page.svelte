@@ -1,4 +1,4 @@
-<!-- Settings page — tab layout: Reading / Appearance / LLM / Device / Storage / Server.
+<!-- Settings page — tab layout: Reading / Appearance / LLM / Public Pages / Device / Storage / Server.
      Spec §8 (settings model), §9 (PATCH /api/settings, device setup), §10 (persist).
 -->
 <script lang="ts">
@@ -7,6 +7,7 @@
 	import AppearanceSettings from '$lib/components/settings/AppearanceSettings.svelte';
 	import LlmSettings from '$lib/components/settings/LlmSettings.svelte';
 	import LlmProvidersSettings from '$lib/components/settings/LlmProvidersSettings.svelte';
+	import PublicPagesSettings from '$lib/components/settings/PublicPagesSettings.svelte';
 	import DeviceSettings from '$lib/components/settings/DeviceSettings.svelte';
 	import StorageSettings from '$lib/components/settings/StorageSettings.svelte';
 	import ServerSettings from '$lib/components/settings/ServerSettings.svelte';
@@ -72,6 +73,7 @@
 				<Tabs.Trigger value="reading" class="shrink-0 sm:flex-1">Reading</Tabs.Trigger>
 				<Tabs.Trigger value="appearance" class="shrink-0 sm:flex-1">Appearance</Tabs.Trigger>
 				<Tabs.Trigger value="llm" class="shrink-0 sm:flex-1">LLM</Tabs.Trigger>
+				<Tabs.Trigger value="public" class="shrink-0 sm:flex-1">Public Pages</Tabs.Trigger>
 				<Tabs.Trigger value="device" class="shrink-0 sm:flex-1">Device</Tabs.Trigger>
 				<Tabs.Trigger value="storage" class="shrink-0 sm:flex-1">Storage</Tabs.Trigger>
 				<Tabs.Trigger value="server" class="shrink-0 sm:flex-1">Server</Tabs.Trigger>
@@ -103,6 +105,10 @@
 		<Tabs.Content value="llm" class="mt-4 space-y-4">
 			<LlmProvidersSettings />
 			<LlmSettings />
+		</Tabs.Content>
+
+		<Tabs.Content value="public" class="mt-4">
+			<PublicPagesSettings />
 		</Tabs.Content>
 
 		<Tabs.Content value="device" class="mt-4">

@@ -154,7 +154,7 @@ func parseTime(s string) (time.Time, error) {
 // GetSettings returns the singleton settings row. The row is guaranteed to
 // exist because the migration seeds it; if somehow absent, a default is returned.
 func (s *SQLite) GetSettings(ctx context.Context) (model.Settings, error) {
-	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, updated_at
+	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, public_page_ttl_hours, updated_at
                FROM settings WHERE id = 1`
 	row := s.db.QueryRowContext(ctx, q)
 	return scanSettings(row)
@@ -167,7 +167,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	defer s.wmu.Unlock()
 
 	// Read current values first.
-	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, updated_at
+	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, public_page_ttl_hours, updated_at
                   FROM settings WHERE id = 1`
 	row := s.write.QueryRowContext(ctx, selQ)
 	cur, err := scanSettings(row)
@@ -218,13 +218,16 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	if patch.SkipSummary != nil {
 		cur.SkipSummary = *patch.SkipSummary
 	}
+	if patch.PublicPageTTLHours != nil {
+		cur.PublicPageTTLHours = *patch.PublicPageTTLHours
+	}
 	cur.UpdatedAt = now()
 
 	const updQ = `UPDATE settings SET cefr_level=?, target_language=?, llm_model=?,
-                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, font_size=?, line_height=?, vocab_assist=?, skip_summary=?, updated_at=? WHERE id = 1`
+                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, font_size=?, line_height=?, vocab_assist=?, skip_summary=?, public_page_ttl_hours=?, updated_at=? WHERE id = 1`
 	if _, err := s.write.ExecContext(ctx, updQ,
 		cur.CEFRLevel, cur.TargetLanguage, cur.LLMModel,
-		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, cur.FontSize, cur.LineHeight, cur.VocabAssist, cur.SkipSummary, fmtTime(cur.UpdatedAt),
+		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, cur.FontSize, cur.LineHeight, cur.VocabAssist, cur.SkipSummary, cur.PublicPageTTLHours, fmtTime(cur.UpdatedAt),
 	); err != nil {
 		return model.Settings{}, fmt.Errorf("store: UpdateSettings write: %w", err)
 	}
@@ -243,7 +246,7 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 	var s model.Settings
 	var updatedAtStr string
 	if err := row.Scan(&s.CEFRLevel, &s.TargetLanguage, &s.LLMModel,
-		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &s.FontSize, &s.LineHeight, &s.VocabAssist, &s.SkipSummary, &updatedAtStr); err != nil {
+		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &s.FontSize, &s.LineHeight, &s.VocabAssist, &s.SkipSummary, &s.PublicPageTTLHours, &updatedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return defaults if somehow the singleton row is missing.
 			return model.Settings{
@@ -254,6 +257,7 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 				FontSize:                 model.DefaultFontSize,
 				LineHeight:               model.DefaultLineHeight,
 				VocabAssist:              true,
+				PublicPageTTLHours:       model.DefaultPublicPageTTLHours,
 			}, nil
 		}
 		return model.Settings{}, fmt.Errorf("store: scanSettings: %w", err)
@@ -337,15 +341,19 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		err  error
 	)
 	if since.IsZero() {
-		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, ''), progress_stage, llm_model
-                   FROM articles ORDER BY created_at DESC`
-		rows, err = s.db.QueryContext(ctx, q)
+		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
+                          json_array_length(a.tokens), a.enrichment_coverage, COALESCE(a.summary, ''), a.progress_stage, a.llm_model, COALESCE(p.token, '')
+                   FROM articles a LEFT JOIN publications p
+                          ON p.article_id = a.id AND (p.expires_at = '' OR p.expires_at > ?)
+                   ORDER BY a.created_at DESC`
+		rows, err = s.db.QueryContext(ctx, q, fmtTime(now()))
 	} else {
-		const q = `SELECT id, source_url, title, author, source_domain, status, pinned, created_at, enriched_at, enrichment_version,
-                          json_array_length(tokens), enrichment_coverage, COALESCE(summary, ''), progress_stage, llm_model
-                   FROM articles WHERE updated_at >= ? ORDER BY created_at DESC`
-		rows, err = s.db.QueryContext(ctx, q, fmtTime(since))
+		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
+                          json_array_length(a.tokens), a.enrichment_coverage, COALESCE(a.summary, ''), a.progress_stage, a.llm_model, COALESCE(p.token, '')
+                   FROM articles a LEFT JOIN publications p
+                          ON p.article_id = a.id AND (p.expires_at = '' OR p.expires_at > ?)
+                   WHERE a.updated_at >= ? ORDER BY a.created_at DESC`
+		rows, err = s.db.QueryContext(ctx, q, fmtTime(now()), fmtTime(since))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: ListArticleMeta: %w", err)
@@ -359,7 +367,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		var pinned int
 		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
 			&m.Status, &pinned, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
-			&m.EnrichmentCoverage, &m.Summary, &m.ProgressStage, &m.LLMModel); err != nil {
+			&m.EnrichmentCoverage, &m.Summary, &m.ProgressStage, &m.LLMModel, &m.PublicToken); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
 		}
 		m.Pinned = pinned == 1
