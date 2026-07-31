@@ -39,6 +39,7 @@
 		type SentenceMenuContent,
 		type SentenceSheetContent
 	} from '$lib/components/reader/reader-utils';
+	import { scrollBehavior } from '$lib/a11y';
 	import { captureError } from '$lib/sentry';
 	import { captureLookup, resetCaptureSession } from '$lib/vocab/capture';
 	import { refreshVocab, vocabIndex as currentVocabIndex } from '$lib/vocab/store.svelte';
@@ -439,7 +440,7 @@
 	}
 
 	function scrollToTop() {
-		window.scrollTo({ top: 0, behavior: 'smooth' });
+		window.scrollTo({ top: 0, behavior: scrollBehavior() });
 	}
 
 	// ---------------------------------------------------------------------------
@@ -587,10 +588,15 @@
 </svelte:head>
 
 <!-- Word/phrase popover -->
-<WordPopover content={wordContent} anchorEl={wordAnchor} onclose={closeWordPopover} />
+<WordPopover
+	content={wordContent}
+	anchorEl={wordAnchor}
+	lang={targetLang}
+	onclose={closeWordPopover}
+/>
 
 <!-- Sentence sheet -->
-<SentenceSheet content={sentenceContent} onclose={closeSentenceSheet} />
+<SentenceSheet content={sentenceContent} lang={targetLang} onclose={closeSentenceSheet} />
 
 <!-- Sentence long-press action menu -->
 <SentenceMenu
@@ -809,7 +815,11 @@
 						<span class="underline decoration-dotted decoration-1 underline-offset-3">Dotted</span>
 						= difficult word ·
 						<span class="underline decoration-solid decoration-1 underline-offset-3">Solid</span>
-						= phrase · Tap a word to translate · Long-press or right-click for sentence
+						= phrase · Tap a word to translate · Long-press or right-click for sentence · Keyboard:
+						<kbd class="font-sans">Tab</kbd>
+						into the text,
+						<kbd class="font-sans">←</kbd> <kbd class="font-sans">→</kbd> between words,
+						<kbd class="font-sans">Enter</kbd> to translate
 					</p>
 					<button
 						type="button"
@@ -864,7 +874,11 @@
 					{#each enrichment.glossary as item (item.term)}
 						<div class="flex flex-col gap-0.5">
 							<dt class="text-sm font-semibold">{item.term}</dt>
-							<dd class="text-muted-foreground text-sm leading-relaxed">{item.definition}</dd>
+							<!-- The definition is written in the target language; tagging it
+								 keeps a screen reader from reading it with an English voice. -->
+							<dd class="text-muted-foreground text-sm leading-relaxed" lang={targetLang}>
+								{item.definition}
+							</dd>
 						</div>
 					{/each}
 				</dl>

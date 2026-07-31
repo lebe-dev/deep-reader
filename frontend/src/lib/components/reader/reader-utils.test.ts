@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
 	buildDifficultWordMap,
+	buildInteractiveIndices,
 	buildPhraseMap,
 	buildRenderSegments,
 	normalizeEnrichment,
@@ -9,6 +10,7 @@ import {
 	findCoveringSentenceForRange,
 	findGlossaryItem,
 	resolveClickContent,
+	stepInteractiveIndex,
 	debounce
 } from './reader-utils';
 import type { Enrichment, GlossaryItem, Sentence, Token } from '$lib/types';
@@ -300,6 +302,69 @@ describe('resolveClickContent', () => {
 
 	it('returns null for a plain token with no enrichment', () => {
 		expect(resolveClickContent(0, tokens, text, difficultWordMap, phraseMap)).toBeNull();
+	});
+});
+
+describe('buildInteractiveIndices', () => {
+	const tokens = tokenize('the quick brown fox jumps over the lazy dog');
+
+	it('lists difficult words and vocabulary matches in reading order', () => {
+		const indices = buildInteractiveIndices(tokens, new Set([7]), new Map(), new Set([1, 3]));
+		expect(indices).toEqual([1, 3, 7]);
+	});
+
+	it('stops once per phrase rather than once per phrase token', () => {
+		const phraseMap = buildPhraseMap({
+			...emptyEnrichment,
+			phrases: [
+				{ start_index: 2, end_index: 4, type: 'idiom', text: 'brown fox jumps', translation: 'x' }
+			]
+		});
+		const indices = buildInteractiveIndices(tokens, new Set([6]), phraseMap, new Set());
+		expect(indices).toEqual([2, 6]);
+	});
+
+	it('does not emit a token twice when several annotations cover it', () => {
+		const phraseMap = buildPhraseMap({
+			...emptyEnrichment,
+			phrases: [
+				{ start_index: 1, end_index: 2, type: 'term', text: 'quick brown', translation: 'x' }
+			]
+		});
+		const indices = buildInteractiveIndices(tokens, new Set([1, 2]), phraseMap, new Set([2]));
+		expect(indices).toEqual([1]);
+	});
+
+	it('returns an empty list when nothing is annotated', () => {
+		expect(buildInteractiveIndices(tokens, new Set(), new Map(), new Set())).toEqual([]);
+	});
+});
+
+describe('stepInteractiveIndex', () => {
+	const indices = [2, 5, 9];
+
+	const cases: { name: string; current: number | null; dir: 1 | -1; want: number | null }[] = [
+		{ name: 'first entry when nothing is focused yet', current: null, dir: 1, want: 2 },
+		{ name: 'last entry when stepping back from nowhere', current: null, dir: -1, want: 9 },
+		{ name: 'the next entry', current: 2, dir: 1, want: 5 },
+		{ name: 'the previous entry', current: 9, dir: -1, want: 5 },
+		{ name: 'clamps at the end instead of wrapping', current: 9, dir: 1, want: 9 },
+		{ name: 'clamps at the start instead of wrapping', current: 2, dir: -1, want: 2 },
+		{ name: 'the nearest entry ahead of a non-interactive position', current: 6, dir: 1, want: 9 },
+		{ name: 'the nearest entry behind a non-interactive position', current: 6, dir: -1, want: 5 },
+		{ name: 'the first entry when the position precedes them all', current: 0, dir: 1, want: 2 },
+		{ name: 'the last entry when the position follows them all', current: 42, dir: -1, want: 9 }
+	];
+
+	for (const tc of cases) {
+		it(`returns ${tc.name}`, () => {
+			expect(stepInteractiveIndex(indices, tc.current, tc.dir)).toBe(tc.want);
+		});
+	}
+
+	it('returns null when there is nothing to step through', () => {
+		expect(stepInteractiveIndex([], null, 1)).toBeNull();
+		expect(stepInteractiveIndex([], 3, -1)).toBeNull();
 	});
 });
 

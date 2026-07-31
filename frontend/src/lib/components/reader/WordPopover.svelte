@@ -7,15 +7,21 @@
 	// element, which conflicts with our "click any span" interaction model.
 
 	import { cn } from '$lib/utils';
-	import type { PopoverContent } from './reader-utils';
+	import { WORD_POPOVER_ID, type PopoverContent } from './reader-utils';
 
 	interface Props {
 		content: PopoverContent | null;
 		anchorEl: HTMLElement | null;
+		/**
+		 * BCP 47 tag of the translation (the user's target language). Tagged on the
+		 * translated runs only: without it a screen reader reads Russian with an
+		 * English voice, which is not "accented" but unintelligible.
+		 */
+		lang: string;
 		onclose: () => void;
 	}
 
-	let { content, anchorEl, onclose }: Props = $props();
+	let { content, anchorEl, lang, onclose }: Props = $props();
 
 	// A tick bumped on scroll/resize so the position recomputes and the panel
 	// stays glued to its token. Without it, the panel keeps its initial fixed
@@ -85,6 +91,19 @@
 		return () => window.removeEventListener('pointerdown', onPointerDown, true);
 	});
 
+	// Escape closes the panel. Focus is left where it is: the keyboard reader is
+	// standing on the word the panel described and expects to carry on from there.
+	$effect(() => {
+		if (!content) return;
+		function onKeydown(e: KeyboardEvent) {
+			if (e.key !== 'Escape') return;
+			e.stopPropagation();
+			onclose();
+		}
+		window.addEventListener('keydown', onKeydown);
+		return () => window.removeEventListener('keydown', onKeydown);
+	});
+
 	const phraseTypeLabel: Record<string, string> = {
 		idiom: 'Idiom',
 		phrasal_verb: 'Phrasal verb',
@@ -100,6 +119,7 @@
 			'animate-in fade-in-0 zoom-in-95 duration-100'
 		)}
 		{style}
+		id={WORD_POPOVER_ID}
 		role="tooltip"
 		aria-live="polite"
 	>
@@ -118,7 +138,7 @@
 					{phraseTypeLabel[content.phraseType] ?? content.phraseType}
 				</span>
 				<p class="font-semibold leading-snug">{content.original}</p>
-				<p class="text-muted-foreground leading-relaxed">
+				<p class="text-muted-foreground leading-relaxed" {lang}>
 					{content.translationOrDefinition}
 				</p>
 				{#if content.fromVocab}
@@ -152,7 +172,7 @@
 				{#if content.lemma && content.lemma !== content.original}
 					<p class="text-muted-foreground text-xs italic">{content.lemma}</p>
 				{/if}
-				<p class="leading-relaxed">{content.translation}</p>
+				<p class="leading-relaxed" {lang}>{content.translation}</p>
 				{#if content.fromGlossary}
 					<span
 						class="self-start rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"

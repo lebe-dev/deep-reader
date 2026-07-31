@@ -104,6 +104,12 @@
 		setReaderFont(value as ReaderFont);
 	}
 
+	// Some fonts are picked for legibility rather than looks; say so under the
+	// picker so the choice is discoverable without trying every option.
+	const selectedFontNote = $derived(
+		READER_FONT_OPTIONS.find((o) => o.value === readerFont.value)?.note
+	);
+
 	function handleMinDifficultyChange(value: string | undefined) {
 		if (!value || !settings) return;
 		patchField({ min_difficulty_to_highlight: value as CefrLevel });
@@ -160,6 +166,9 @@
 				</Select.Root>
 				<p class="text-muted-foreground text-xs">
 					Font used in the article reader. Stored locally on this device.
+					{#if selectedFontNote}
+						<span class="block">{selectedFontNote}</span>
+					{/if}
 				</p>
 			</div>
 

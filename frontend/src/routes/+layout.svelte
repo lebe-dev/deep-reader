@@ -22,6 +22,7 @@
 	import { cn } from '$lib/utils';
 	import { READER_THEME_OPTIONS, resolveReaderTheme, applyReaderTheme } from '$lib/reader-theme';
 	import { readerFullscreen } from '$lib/reader-fullscreen.svelte';
+	import { scrollBehavior } from '$lib/a11y';
 	import { initSync } from '$lib/sync/store.svelte';
 	import { bootstrapPWA } from '$lib/pwa/bootstrap';
 	import { isNative } from '$lib/platform';
@@ -199,7 +200,22 @@
 	});
 
 	function scrollToTop() {
-		window.scrollTo({ top: 0, behavior: 'smooth' });
+		window.scrollTo({ top: 0, behavior: scrollBehavior() });
+	}
+
+	const MAIN_CONTENT_ID = 'main-content';
+
+	// Skip link: the first thing Tab reaches, so a keyboard or switch user can
+	// jump the header on every page instead of walking it again each navigation.
+	// Focus is moved explicitly — the browser's own hash behaviour is unreliable
+	// in an SPA, and scrolling without moving focus leaves the next Tab back at
+	// the top of the header.
+	function skipToContent(event: MouseEvent) {
+		event.preventDefault();
+		const target = document.getElementById(MAIN_CONTENT_ID);
+		if (!target) return;
+		target.focus();
+		target.scrollIntoView({ block: 'start', behavior: 'auto' });
 	}
 </script>
 
@@ -225,6 +241,7 @@
 		<div class="bg-background min-h-svh"></div>
 	{:else if showChrome}
 		<div class="bg-background text-foreground flex min-h-svh flex-col">
+			<a href="#{MAIN_CONTENT_ID}" onclick={skipToContent} class="skip-link">Skip to content</a>
 			{#if !readerFullscreen.active}
 				{#if !isNative()}
 					<UpdateBanner />
@@ -245,13 +262,14 @@
 
 						<Separator orientation="vertical" class="mx-1 h-6" />
 
-						<nav class="flex items-center gap-1">
+						<nav class="flex items-center gap-1" aria-label="Main">
 							{#each navItems as item (item.href)}
 								{@const Icon = item.icon}
 								<Button
 									href={item.href}
 									variant="ghost"
 									size="sm"
+									aria-current={isActive(item.href) ? 'page' : undefined}
 									class={cn(
 										'gap-2',
 										isActive(item.href) ? 'text-foreground bg-accent' : 'text-muted-foreground'
@@ -314,6 +332,7 @@
 								size="icon"
 								aria-label="Settings"
 								title="Settings"
+								aria-current={isActive('/settings') ? 'page' : undefined}
 								class={cn(isActive('/settings') ? 'text-foreground bg-accent' : '')}
 							>
 								<SettingsIcon class="size-4" />
@@ -323,9 +342,13 @@
 				</header>
 			{/if}
 
+			<!-- tabindex="-1" makes the skip link's target focusable without adding a
+				 tab stop of its own. -->
 			<main
+				id={MAIN_CONTENT_ID}
+				tabindex="-1"
 				class={cn(
-					'mx-auto w-full max-w-3xl flex-1 px-4',
+					'mx-auto w-full max-w-3xl flex-1 px-4 focus:outline-none',
 					readerFullscreen.active ? 'pt-[calc(env(safe-area-inset-top)+1rem)] pb-6' : 'py-6'
 				)}
 			>
@@ -359,6 +382,33 @@
 </svelte:boundary>
 
 <style>
+	/* Skip link. Written as plain CSS rather than `sr-only focus:not-sr-only`
+	   because those two utilities set `position` in opposite directions and which
+	   one wins depends on Tailwind's own output order — not something a skip link
+	   should be gambling on. Hidden by moving it out of the viewport, never with
+	   display:none, which would also take it out of the tab order. */
+	.skip-link {
+		position: fixed;
+		/* Clear of the notch on the native shells, where the header pads for it. */
+		top: max(0.5rem, env(safe-area-inset-top));
+		left: 0.5rem;
+		z-index: 60;
+		padding: 0.5rem 1rem;
+		border-radius: var(--radius-md);
+		background: var(--color-background);
+		color: var(--color-foreground);
+		font-size: 0.875rem;
+		font-weight: 500;
+		box-shadow: 0 2px 10px oklch(0 0 0 / 0.18);
+		transform: translateY(-250%);
+	}
+
+	.skip-link:focus {
+		transform: translateY(0);
+		outline: 2px solid var(--color-ring);
+		outline-offset: 2px;
+	}
+
 	.nav-bar {
 		animation: nav-slide 1.2s ease-in-out infinite;
 	}

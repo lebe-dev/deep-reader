@@ -8,6 +8,7 @@
 // Named exports only; no default export.
 
 import { browser } from '$app/environment';
+import { prefersReducedMotion } from '$lib/a11y';
 
 /** How far the reading is allowed to swing, in degrees. */
 const MAX_TILT_DEG = 30;
@@ -53,11 +54,6 @@ const DEG = Math.PI / 180;
 /** Whether the browser exposes the API at all (desktop Chrome does not). */
 function supported(): boolean {
 	return browser && typeof window !== 'undefined' && 'DeviceOrientationEvent' in window;
-}
-
-/** Whether the user asked for reduced motion. */
-function reducedMotion(): boolean {
-	return browser && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 /**
@@ -165,7 +161,7 @@ function requestOnFirstGesture(): void {
  * removed only once the last of them goes away.
  */
 export function startDeviceTilt(): () => void {
-	if (!supported() || reducedMotion()) {
+	if (!supported() || prefersReducedMotion()) {
 		deviceTilt.permission = 'unsupported';
 		return () => {};
 	}

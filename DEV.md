@@ -115,6 +115,40 @@ just test-frontend
 just coverage        # coverage.out + coverage.html
 ```
 
+## Accessibility
+
+The user-facing summary is in [README.md](README.md#accessibility); this is what
+you need to know before touching the code behind it.
+
+**The reader is a composite widget, not a page of links.** `TokenRenderer`
+exposes only *annotated* tokens (enrichment difficult word, enrichment phrase,
+vocabulary-overlay match) as `role="button"`, and gives exactly one of them
+`tabindex="0"` — a roving tabindex, moved by `←`/`→`. The set is built by
+`buildInteractiveIndices` in `reader-utils.ts`, which must stay in step with
+`resolveClickContent`: anything a click can open must be reachable from the
+keyboard, and nothing else may become a stop. One stop per phrase, not per token.
+
+**Translated text carries `lang`.** The document is `lang="en"`, so any run in
+the user's target language (`Settings.target_language`, a BCP 47 tag) needs its
+own `lang` — otherwise a screen reader pronounces Russian with an English voice,
+which is not an accent but noise. Sites: `WordPopover`, `SentenceSheet`, the
+reader's glossary, `WordRow`. The generated public page already does this
+(`publish.Page.Lang` / `SourceLang`). Article summaries are written in English
+and must NOT be tagged.
+
+**`--reader-accent`, not `--primary`, for accented text in the article.**
+`--primary` is tuned as a button fill behind white text and reaches only 3.4:1
+as ink on the dark background. `--reader-accent` tracks `--primary` in light and
+sepia and is overridden in `.dark`.
+
+**Motion.** `app.css` collapses animations and scroll behaviour under
+`prefers-reduced-motion`. That cannot reach a script that asks for
+`behavior: 'smooth'` explicitly, so JS scrolling goes through
+`scrollBehavior()` in `$lib/a11y.ts`.
+
+`svelte-check` enforces the compiler's a11y rules and `just lint` fails on them;
+a `svelte-ignore` needs a comment saying why the checker is wrong.
+
 ## Content extraction
 
 Article content is extracted before enrichment. By default Deep Reader uses

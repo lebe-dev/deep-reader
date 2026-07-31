@@ -23,6 +23,8 @@
 		pending: boolean;
 		/** Current search query, for match highlighting. */
 		query?: string;
+		/** BCP 47 tag of the stored translation, so assistive tech switches voice. */
+		lang: string;
 		/** True when the source article still exists locally. */
 		articleAvailable?: boolean;
 		expanded: boolean;
@@ -35,6 +37,7 @@
 		count,
 		pending,
 		query = '',
+		lang,
 		articleAvailable = false,
 		expanded,
 		onToggle,
@@ -105,7 +108,7 @@
 							class={seg.match ? 'bg-primary/20 rounded-[2px]' : ''}>{seg.text}</span
 						>{/each}
 				</span>
-				<span class="text-muted-foreground min-w-0 flex-1 truncate text-sm">
+				<span class="text-muted-foreground min-w-0 flex-1 truncate text-sm" {lang}>
 					{#each highlightSegments(entry.latest_translation, query) as seg, i (i)}<span
 							class={seg.match ? 'bg-primary/20 rounded-[2px]' : ''}>{seg.text}</span
 						>{/each}

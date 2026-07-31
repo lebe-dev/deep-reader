@@ -9,7 +9,7 @@
 	import { page } from '$app/state';
 	import { replaceState } from '$app/navigation';
 	import { liveQuery } from 'dexie';
-	import { db } from '$lib/db';
+	import { db, SYNC_STATE_ID } from '$lib/db';
 	import { toast } from 'svelte-sonner';
 	import { captureError } from '$lib/sentry';
 	import {
@@ -50,6 +50,9 @@
 
 	/** Ids of articles still present locally, so a dead link renders as text. */
 	let availableArticleIds = $state(new Set<string>());
+
+	/** BCP 47 tag of the stored translations; the seeded backend default is 'ru'. */
+	let targetLang = $state('ru');
 
 	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -139,6 +142,21 @@
 		});
 		return () => sub.unsubscribe();
 	});
+
+	// The language every stored translation on this page is written in, so the
+	// rows can tag it and a screen reader reads it with the right voice.
+	$effect(() => {
+		if (!browser) return;
+		const sub = liveQuery(() => db.sync_state.get(SYNC_STATE_ID)).subscribe({
+			next(state) {
+				if (state?.settings?.target_language) targetLang = state.settings.target_language;
+			},
+			error(err) {
+				captureError(err, { area: 'vocab', extra: { query: 'sync_state' } });
+			}
+		});
+		return () => sub.unsubscribe();
+	});
 </script>
 
 <svelte:head>
@@ -180,6 +198,7 @@
 					count={displayedCount(entry)}
 					pending={hasPendingLookups(entry)}
 					query={debouncedQuery}
+					lang={targetLang}
 					articleAvailable={availableArticleIds.has(entry.latest_article_id)}
 					expanded={expandedKey === entry.entry_key}
 					onToggle={() => (expandedKey = expandedKey === entry.entry_key ? null : entry.entry_key)}

@@ -292,6 +292,13 @@ export function findGlossaryItem(
 // Popover content builders
 // ---------------------------------------------------------------------------
 
+/**
+ * DOM id of the word/phrase panel. The token that opened it points at the panel
+ * with aria-describedby, which is what makes the translation part of the word
+ * for a screen reader rather than a floating announcement.
+ */
+export const WORD_POPOVER_ID = 'reader-word-popover';
+
 export interface WordPopoverContent {
 	kind: 'word';
 	/**
@@ -341,6 +348,12 @@ export interface SentenceMenuContent {
 	original: string;
 	/** Empty string when the enrichment has no translation for this sentence. */
 	translation: string;
+	/**
+	 * True when the menu was opened from the keyboard (Shift+F10 / the Menu key).
+	 * The menu then takes focus and gives it back on close; doing that after a
+	 * long-press would instead scroll a touch reader around for no reason.
+	 */
+	viaKeyboard?: boolean;
 }
 
 export type PopoverContent = WordPopoverContent | PhrasePopoverContent;
@@ -425,6 +438,79 @@ export function resolveClickContent(
 	}
 
 	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard navigation over the interactive tokens
+// ---------------------------------------------------------------------------
+//
+// Pointer users reach a translation by tapping the underlined word. Keyboard
+// users need the same reach, and making every one of an article's thousands of
+// tokens a tab stop is not it. The reader therefore treats its interactive
+// words as ONE composite widget with a roving tabindex: Tab enters the text
+// once, arrows move between the words that actually answer to activation.
+// These two helpers are the pure half of that behaviour.
+
+/**
+ * The ordered token indices a keyboard user steps through — every token that
+ * responds to activation: an enrichment difficult word, an enrichment phrase,
+ * or a vocabulary-overlay match. Mirrors {@link resolveClickContent}, which is
+ * what decides whether a click does anything at all.
+ *
+ * A multi-token phrase contributes only the FIRST of its tokens: stopping on
+ * each word of "spill the beans" would make one translation cost three key
+ * presses, while a click anywhere in the range already opens the same panel.
+ */
+export function buildInteractiveIndices(
+	tokens: Token[],
+	difficultSet: ReadonlySet<number>,
+	phraseMap: PhraseMap,
+	vocabSet: ReadonlySet<number>
+): number[] {
+	const indices: number[] = [];
+	const seenPhrases = new Set<Phrase>();
+
+	for (const token of tokens) {
+		const phrase = phraseMap.get(token.index);
+		if (phrase) {
+			// Emit at the first token that maps to this phrase rather than at
+			// phrase.start_index, so a phrase whose start token is missing from the
+			// stream (markdown span removal) stays reachable.
+			if (seenPhrases.has(phrase)) continue;
+			seenPhrases.add(phrase);
+			indices.push(token.index);
+			continue;
+		}
+		if (difficultSet.has(token.index) || vocabSet.has(token.index)) indices.push(token.index);
+	}
+
+	return indices;
+}
+
+/**
+ * The next interactive token index in `direction`, for arrow-key navigation.
+ *
+ * `current` need not itself be interactive (the caller may pass the reading
+ * position), in which case the nearest index on that side wins. Movement clamps
+ * at both ends instead of wrapping — silently jumping from the last word of an
+ * article back to the first reads as a bug, not as a feature.
+ */
+export function stepInteractiveIndex(
+	indices: number[],
+	current: number | null,
+	direction: 1 | -1
+): number | null {
+	if (indices.length === 0) return null;
+	if (current === null) return direction === 1 ? indices[0] : indices[indices.length - 1];
+
+	if (direction === 1) {
+		const next = indices.find((i) => i > current);
+		return next ?? indices[indices.length - 1];
+	}
+	for (let i = indices.length - 1; i >= 0; i--) {
+		if (indices[i] < current) return indices[i];
+	}
+	return indices[0];
 }
 
 // ---------------------------------------------------------------------------

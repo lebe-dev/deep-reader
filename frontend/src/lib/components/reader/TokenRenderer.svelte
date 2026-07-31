@@ -11,6 +11,16 @@
 	//   Right-click (desktop) → the same sentence action menu, the pointer-based
 	//                      counterpart of the touch long-press.
 	//
+	// Keyboard: the annotated words form ONE composite widget with a roving
+	// tabindex, so Tab enters the article text once instead of stopping on every
+	// word in it. Within the text:
+	//   ← / →             → previous / next annotated word.
+	//   Enter / Space     → the same panel a click opens.
+	//   Shift+F10, Menu   → the sentence action menu (the keyboard's right-click).
+	//   Escape            → close whatever is open, focus stays on the word.
+	// Only annotated words take part: a plain word is inert to a click too, so
+	// making it a stop would promise something the reader cannot deliver.
+	//
 	// Reading position: IntersectionObserver tracks furthest-seen word token;
 	// calls onProgress(tokenIndex) when it advances.
 
@@ -18,11 +28,14 @@
 	import type { Enrichment, Token } from '$lib/types';
 	import {
 		buildDifficultWordMap,
+		buildInteractiveIndices,
 		buildPhraseMap,
 		buildRenderSegments,
 		findCoveringSentence,
 		resolveClickContent,
 		sliceText,
+		stepInteractiveIndex,
+		WORD_POPOVER_ID,
 		type PopoverContent,
 		type SentenceMenuContent
 	} from './reader-utils';
@@ -84,6 +97,18 @@
 	const vocabSet = $derived(
 		buildOverlayIndices(vocabIndex, tokens, (i) => difficultSet.has(i) || phraseMap.has(i))
 	);
+
+	// Every token that answers to activation — the set resolveClickContent will
+	// return something for. These are the ones exposed as buttons; the rest stay
+	// plain text for pointer and assistive tech alike.
+	const clickableSet = $derived.by(() => {
+		const set = new Set<number>();
+		for (const token of tokens) {
+			const i = token.index;
+			if (difficultSet.has(i) || phraseMap.has(i) || vocabSet.has(i)) set.add(i);
+		}
+		return set;
+	});
 
 	// Static per-token class (difficult/phrase styling). Depends only on the
 	// enrichment maps, so it's computed once per article — NOT on every click.
@@ -147,11 +172,6 @@
 		return c;
 	}
 
-	/** Open the lightbox for a markdown/inline image. */
-	function openLightbox(seg: Extract<InlineSegment, { kind: 'image' }>) {
-		lightboxImage = { url: seg.url, alt: seg.alt };
-	}
-
 	// ---------------------------------------------------------------------------
 	// Highlight state
 	// ---------------------------------------------------------------------------
@@ -159,12 +179,46 @@
 	let highlightedPhraseRange: { start: number; end: number } | null = $state(null);
 	let highlightedWordIndex: number | null = $state(null);
 
+	// The token the open popover describes, so it can point at the panel with
+	// aria-describedby: a screen reader then reads the translation as part of the
+	// word instead of leaving it to an aria-live announcement the user may have
+	// already scrolled past.
+	let describedIndex: number | null = $state(null);
+
 	// Zoomed image shown in the full-screen lightbox (null = closed).
 	let lightboxImage: { url: string; alt: string } | null = $state(null);
 
 	function clearHighlight() {
 		highlightedPhraseRange = null;
 		highlightedWordIndex = null;
+		describedIndex = null;
+	}
+
+	// ---------------------------------------------------------------------------
+	// Keyboard navigation (roving tabindex)
+	// ---------------------------------------------------------------------------
+
+	/** The annotated words, in reading order, one stop per phrase. */
+	const interactiveIndices = $derived(
+		buildInteractiveIndices(tokens, difficultSet, phraseMap, vocabSet)
+	);
+
+	/** The word that currently owns the article's single tab stop. */
+	let activeIndex: number | null = $state(null);
+
+	// Before anything has been focused, the tab stop sits at the first annotated
+	// word at or after the restored reading position — tabbing into a
+	// half-finished article should not throw the reader back to its first page.
+	const rovingIndex = $derived(
+		activeIndex ??
+			stepInteractiveIndex(interactiveIndices, initialPosition > 0 ? initialPosition - 1 : null, 1)
+	);
+
+	function moveFocus(from: number, direction: 1 | -1) {
+		const next = stepInteractiveIndex(interactiveIndices, from, direction);
+		if (next === null || next === from) return;
+		activeIndex = next;
+		tokenEls.get(next)?.focus();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -257,14 +311,15 @@
 	// Sentence helpers
 	// ---------------------------------------------------------------------------
 
-	function showSentenceMenuForToken(tokenIndex: number, anchor: HTMLElement) {
+	function showSentenceMenuForToken(tokenIndex: number, anchor: HTMLElement, viaKeyboard = false) {
 		const sentence = findCoveringSentence(tokenIndex, enrichment.sentences);
 		if (!sentence) return;
 		onSentenceMenu(
 			{
 				kind: 'sentence-menu',
 				original: sliceText(tokens, sentence.start_index, sentence.end_index, originalText),
-				translation: sentence.translation
+				translation: sentence.translation,
+				viaKeyboard
 			},
 			anchor
 		);
@@ -274,16 +329,9 @@
 	// Click handler
 	// ---------------------------------------------------------------------------
 
-	function handleWordClick(event: MouseEvent | TouchEvent, tokenIndex: number) {
-		// Swallow the synthetic click that trails a long-press so it doesn't open
-		// the sentence sheet over the action menu.
-		if (longPressFired) {
-			longPressFired = false;
-			return;
-		}
-
-		const target = event.currentTarget as HTMLElement;
-
+	// Open the word/phrase panel for a token. Shared by pointer and keyboard
+	// activation so the two can never drift apart.
+	function openWordPanel(anchor: HTMLElement, tokenIndex: number) {
 		const result = resolveClickContent(
 			tokenIndex,
 			tokens,
@@ -308,8 +356,60 @@
 			highlightedWordIndex = tokenIndex;
 			highlightedPhraseRange = null;
 		}
+		describedIndex = tokenIndex;
 
-		onWordClick(result, target);
+		onWordClick(result, anchor);
+	}
+
+	function handleWordClick(event: MouseEvent | TouchEvent, tokenIndex: number) {
+		// Swallow the synthetic click that trails a long-press so it doesn't open
+		// the sentence sheet over the action menu.
+		if (longPressFired) {
+			longPressFired = false;
+			return;
+		}
+
+		// Keep the keyboard's tab stop where the pointer last worked, so switching
+		// between mouse and keyboard resumes in the same place.
+		activeIndex = tokenIndex;
+		openWordPanel(event.currentTarget as HTMLElement, tokenIndex);
+	}
+
+	function handleTokenKeydown(event: KeyboardEvent, tokenIndex: number) {
+		const anchor = event.currentTarget as HTMLElement;
+
+		switch (event.key) {
+			case 'Enter':
+			case ' ':
+				// Space would otherwise page down out from under the word.
+				event.preventDefault();
+				openWordPanel(anchor, tokenIndex);
+				return;
+			case 'ArrowRight':
+				event.preventDefault();
+				moveFocus(tokenIndex, 1);
+				return;
+			case 'ArrowLeft':
+				event.preventDefault();
+				moveFocus(tokenIndex, -1);
+				return;
+			// Up/Down are deliberately left alone: they scroll the article, which is
+			// what a reader parked on a word expects them to do.
+			case 'Escape':
+				clearHighlight();
+				onWordClick(null, null);
+				onSentenceMenu(null, null);
+				return;
+			case 'ContextMenu':
+				event.preventDefault();
+				showSentenceMenuForToken(tokenIndex, anchor, true);
+				return;
+			case 'F10':
+				if (!event.shiftKey) return;
+				event.preventDefault();
+				showSentenceMenuForToken(tokenIndex, anchor, true);
+				return;
+		}
 	}
 
 	// Touch: short tap = click, long press = sentence action menu.
@@ -365,27 +465,53 @@
 		const isHighlightedWord = highlightedWordIndex === index;
 
 		// Cheap string append in the hot path — no tailwind-merge per click.
-		return isHighlightedPhrase || isHighlightedWord
-			? `${base} bg-primary/15 text-primary rounded`
-			: base;
+		// token-active carries the accent as ink; see the note on --reader-accent.
+		return isHighlightedPhrase || isHighlightedWord ? `${base} token-active rounded` : base;
 	}
 </script>
 
-<!-- Interactive word token — shared by the plain and Markdown render paths. -->
+<!-- Interactive word token — shared by the plain and Markdown render paths.
+	 An annotated word is exposed as a button (it opens a panel, and that is what
+	 the underline promises); a plain word stays plain text, because it does
+	 nothing when activated. -->
 {#snippet wordSpan(index: number, text: string, extra: string)}
+	{@const clickable = clickableSet.has(index)}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<!-- a11y_no_noninteractive_tabindex: role and tabindex are set from the SAME
+		 `clickable` flag, so a token is never focusable without also being a
+		 button — the compiler just cannot see that through the expression. -->
+	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<span
 		use:track={index}
 		data-index={index}
 		class="{tokenClass(index)}{extra}"
+		role={clickable ? 'button' : undefined}
+		tabindex={clickable ? (index === rovingIndex ? 0 : -1) : undefined}
+		aria-describedby={index === describedIndex ? WORD_POPOVER_ID : undefined}
 		onclick={(e) => handleWordClick(e, index)}
+		onkeydown={clickable ? (e) => handleTokenKeydown(e, index) : undefined}
+		onfocus={clickable ? () => (activeIndex = index) : undefined}
 		oncontextmenu={(e) => handleContextMenu(e, index)}
 		ontouchstart={(e) => handleTouchStart(e, index)}
 		ontouchend={(e) => handleTouchEnd(e, index)}
 		ontouchmove={handleTouchMove}>{text}</span
 	>
+{/snippet}
+
+<!-- An article image, wrapped in a real button rather than given role="button":
+	 the wrapper is what makes zooming reachable by keyboard and by every screen
+	 reader, and the title names the control when the image has no alt text. -->
+{#snippet articleImage(url: string, alt: string)}
+	<button
+		type="button"
+		class="reader-image-button"
+		title="Open image full size"
+		onclick={() => (lightboxImage = { url, alt })}
+	>
+		<img class="reader-image" src={url} {alt} loading="lazy" />
+	</button>
 {/snippet}
 
 <!-- A run of Markdown inline segments (words keep their token interactivity). -->
@@ -394,15 +520,7 @@
 		{#if seg.kind === 'word'}
 			{@render wordSpan(seg.index, seg.text, marksClass(seg.marks))}
 		{:else if seg.kind === 'image'}
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-			<img
-				class="reader-image"
-				src={seg.url}
-				alt={seg.alt}
-				loading="lazy"
-				onclick={() => openLightbox(seg)}
-			/>
+			{@render articleImage(seg.url, seg.alt)}
 		{:else if seg.kind === 'link'}
 			<a
 				class="reader-link{marksClass(seg.marks)}"
@@ -419,7 +537,10 @@
 {/snippet}
 
 {#if isMarkdown}
-	<div class="reader-content reader-markdown" role="document">
+	<!-- No role="document" here: that role only means anything inside a
+		 role="application" subtree, and on a plain container some screen readers
+		 announce a nesting the reader does not have. -->
+	<div class="reader-content reader-markdown">
 		{#each blocks as block, bi (bi)}
 			{#if block.kind === 'heading'}
 				<svelte:element this={`h${block.level}`} class="reader-heading"
@@ -464,21 +585,12 @@
 		{/each}
 	</div>
 {:else}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="reader-content" role="document">
+	<div class="reader-content">
 		{#each segments as segment, i (i)}
 			{#if segment.kind === 'word'}
 				{@render wordSpan(segment.index, segment.text, '')}
 			{:else if segment.kind === 'image'}
-				<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-				<img
-					class="reader-image"
-					src={segment.url}
-					alt={segment.alt}
-					loading="lazy"
-					onclick={() => (lightboxImage = { url: segment.url, alt: segment.alt })}
-				/>
+				{@render articleImage(segment.url, segment.alt)}
 			{:else if segment.kind === 'link'}
 				<a class="reader-link" href={segment.url} target="_blank" rel="noopener noreferrer"
 					>{segment.text}</a
@@ -512,6 +624,23 @@
 		user-select: none;
 	}
 
+	/* The word whose panel is open. --reader-accent rather than --primary: the
+	   latter is tuned as a button fill and only reaches 3.4:1 as text on the dark
+	   background, under the 4.5:1 body text needs. */
+	:global(.token-active) {
+		background-color: color-mix(in oklab, var(--reader-accent) 15%, transparent);
+		color: var(--reader-accent);
+	}
+
+	/* Keyboard focus must be unmistakable inside a wall of text — an underline
+	   shift would read as just another enrichment marker. Mouse clicks do not
+	   trigger :focus-visible, so this never fires for pointer users. */
+	:global(.token:focus-visible) {
+		outline: 2px solid var(--reader-accent);
+		outline-offset: 2px;
+		border-radius: 3px;
+	}
+
 	@media (pointer: coarse) {
 		:global(.token) {
 			cursor: pointer;
@@ -519,18 +648,32 @@
 	}
 
 	/* Markdown images rendered inline in the token stream. */
+	.reader-image-button {
+		display: block;
+		width: 100%;
+		padding: 0;
+		border: 0;
+		background: none;
+		cursor: zoom-in;
+	}
+
+	.reader-image-button:focus-visible {
+		outline: 2px solid var(--reader-accent);
+		outline-offset: 3px;
+		border-radius: 0.6rem;
+	}
+
 	.reader-image {
 		display: block;
 		max-width: 100%;
 		height: auto;
 		margin: 1.25rem auto;
 		border-radius: 0.5rem;
-		cursor: zoom-in;
 	}
 
 	/* Markdown links rendered inline in the token stream. */
 	.reader-link {
-		color: var(--color-primary, #3b82f6);
+		color: var(--reader-accent, #3b82f6);
 		text-decoration: underline;
 		text-decoration-thickness: 1px;
 		text-underline-offset: 2px;

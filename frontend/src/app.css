@@ -11,6 +11,12 @@
 @import '@fontsource/merriweather/400.css';
 @import '@fontsource/merriweather/400-italic.css';
 @import '@fontsource/merriweather/700.css';
+/* Atkinson Hyperlegible — drawn by the Braille Institute to keep letterforms
+   apart for low-vision readers (the l/I/1 and O/0 confusions serif faces make
+   worst). Offered as a reader font, not used as the UI font. */
+@import '@fontsource/atkinson-hyperlegible/400.css';
+@import '@fontsource/atkinson-hyperlegible/400-italic.css';
+@import '@fontsource/atkinson-hyperlegible/700.css';
 
 @custom-variant dark (&:is(.dark *));
 @plugin '@tailwindcss/typography';
@@ -26,6 +32,12 @@
 	--popover-foreground: oklch(0.255 0.006 65);
 	--primary: oklch(50% 0.134 242.749);
 	--primary-foreground: oklch(1 0 0);
+	/* Accent used for accented TEXT inside the article (links, the tapped-word
+	   highlight). It tracks --primary wherever --primary already carries enough
+	   contrast against the page; the dark theme overrides it because there
+	   --primary is tuned as a button FILL behind white text and reaches only
+	   3.4:1 as ink, well under the 4.5:1 body text needs. */
+	--reader-accent: var(--primary);
 	--secondary: oklch(0.97 0 0);
 	--secondary-foreground: oklch(0.205 0 0);
 	--muted: oklch(0.97 0 0);
@@ -61,6 +73,8 @@
 	--popover-foreground: oklch(0.985 0 0);
 	--primary: oklch(50% 0.134 242.749);
 	--primary-foreground: oklch(1 0 0);
+	/* 6.9:1 on the dark background, against --primary's 3.4:1 — see :root. */
+	--reader-accent: oklch(0.68 0.12 242.749);
 	--secondary: oklch(0.269 0 0);
 	--secondary-foreground: oklch(0.985 0 0);
 	--muted: oklch(0.269 0 0);
@@ -183,6 +197,24 @@
 	textarea,
 	[contenteditable] {
 		user-select: text;
+	}
+}
+
+/* Motion: honour the OS-level "reduce motion" setting app-wide. Sliding
+   panels, the sweeping navigation bar and above all smooth scrolling are
+   documented vestibular triggers (nausea, dizziness, migraine); a user who
+   turned motion off system-wide has already told us so. Animations are
+   collapsed rather than removed so anything that relies on an `animationend`
+   still fires. The JS side of this lives in $lib/a11y.ts — a scrollTo() that
+   explicitly asks for `behavior: smooth` ignores the rule below. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
 	}
 }
 

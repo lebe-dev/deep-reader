@@ -26,6 +26,15 @@
 
 	const hasTranslation = $derived((content?.translation.trim().length ?? 0) > 0);
 
+	/** Set when the menu was opened from the keyboard — see SentenceMenuContent. */
+	const viaKeyboard = $derived(content?.viaKeyboard === true);
+
+	let menuEl = $state<HTMLElement | null>(null);
+
+	function menuItems(): HTMLButtonElement[] {
+		return Array.from(menuEl?.querySelectorAll('button') ?? []);
+	}
+
 	// Bumped on scroll/resize so the panel stays glued to its token. See WordPopover.
 	let reflowTick = $state(0);
 
@@ -80,6 +89,43 @@
 		return () => window.removeEventListener('pointerdown', onPointerDown, true);
 	});
 
+	// Keyboard menu behaviour, per the WAI-ARIA menu pattern: focus moves into the
+	// menu on open, arrows walk it, Escape closes it and hands focus back to the
+	// word it was opened from — a keyboard user who is dropped back at the top of
+	// the document has effectively lost their place in the article.
+	$effect(() => {
+		if (!content || !anchorEl) return;
+		const anchor = anchorEl;
+		const takesFocus = viaKeyboard;
+
+		if (takesFocus) queueMicrotask(() => menuItems()[0]?.focus());
+
+		function onKeydown(e: KeyboardEvent) {
+			if (e.key === 'Escape') {
+				e.stopPropagation();
+				onclose();
+				return;
+			}
+			if (!takesFocus) return;
+			if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+			const items = menuItems();
+			if (items.length === 0) return;
+			e.preventDefault();
+			const at = items.indexOf(document.activeElement as HTMLButtonElement);
+			const step = e.key === 'ArrowDown' ? 1 : -1;
+			const next = (at + step + items.length) % items.length;
+			items[next].focus();
+		}
+
+		window.addEventListener('keydown', onKeydown);
+		return () => {
+			window.removeEventListener('keydown', onKeydown);
+			// Only when we took focus in the first place: a long-press must not make
+			// the page jump back to the pressed word.
+			if (takesFocus) anchor.focus();
+		};
+	});
+
 	function handleCopy() {
 		if (content) oncopy(content.original);
 	}
@@ -96,13 +142,14 @@
 			'animate-in fade-in-0 zoom-in-95 duration-100'
 		)}
 		{style}
+		bind:this={menuEl}
 		role="menu"
 		aria-label="Sentence actions"
 	>
 		<button
 			type="button"
 			role="menuitem"
-			class="hover:bg-accent flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors"
+			class="hover:bg-accent focus-visible:bg-accent focus-visible:ring-ring flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
 			onclick={handleCopy}
 		>
 			<CopyIcon class="size-4 shrink-0" />
@@ -113,7 +160,7 @@
 			<button
 				type="button"
 				role="menuitem"
-				class="hover:bg-accent flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors"
+				class="hover:bg-accent focus-visible:bg-accent focus-visible:ring-ring flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
 				onclick={handleTranslate}
 			>
 				<LanguagesIcon class="size-4 shrink-0" />

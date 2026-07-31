@@ -8,10 +8,12 @@
 
 	interface Props {
 		content: SentenceSheetContent | null;
+		/** BCP 47 tag of the translation, so assistive tech switches voice. */
+		lang: string;
 		onclose: () => void;
 	}
 
-	let { content, onclose }: Props = $props();
+	let { content, lang, onclose }: Props = $props();
 
 	let open = $derived(content !== null);
 </script>
@@ -33,10 +35,11 @@
 			>
 				<blockquote
 					class="border-muted text-muted-foreground border-l-2 pl-4 text-sm leading-relaxed italic"
+					lang="en"
 				>
 					{content.original}
 				</blockquote>
-				<p class="text-sm leading-relaxed">{content.translation}</p>
+				<p class="text-sm leading-relaxed" {lang}>{content.translation}</p>
 			</div>
 		{/if}
 	</Sheet.Content>

@@ -19,8 +19,44 @@ Sentence translation example:
 - **Passive vocabulary capture** — every word or phrase you tap for a translation is collected automatically, matched by dictionary lemma so any inflection counts. The LLM then stops spending attention on words you already know, and the reader hints them from your own vocabulary instead, in every article where they appear. Browse them at `/words`.
 - **Publish a translation** — share any translated article under an unguessable link with a lifetime you set (Settings > Public Pages). The page is a standalone file with Open Graph metadata, so link previews work; once the link expires it answers 404.
 - **Offline-first reading** — articles are cached locally (PWA + IndexedDB); the reader renders from cache instantly and syncs in the background.
+- **Accessible reading** — the whole reader works from the keyboard, translations are language-tagged for screen readers, animation follows your OS "reduce motion" setting, and the font list includes Atkinson Hyperlegible for low vision. See [Accessibility](#accessibility).
 - **Single-user, self-hosted** — one built-in account, created on first launch; no external auth provider required.
 - **iOS/Android apps** — the same SvelteKit frontend packaged with CapacitorJS for native offline reading on your own devices.
+
+## Accessibility
+
+The reading surface is the product, so it is built to be usable without a mouse,
+without motion, and with a screen reader.
+
+**Keyboard.** `Tab` reaches a skip link, then the header, then the article text
+itself as a single stop — the reader's marked words behave as one composite
+widget rather than thousands of tab stops:
+
+| Key | In the article text |
+|---|---|
+| `←` / `→` | previous / next marked word |
+| `↑` / `↓` | scroll normally (deliberately not captured) |
+| `Enter` / `Space` | open the word or phrase translation |
+| `Shift+F10` or the Menu key | sentence actions (copy / translate) — the keyboard's right-click |
+| `Escape` | close the open panel, keeping your place in the text |
+
+Only marked words take part, exactly as with a click: a plain word does nothing
+when tapped, so it is not offered as a stop either.
+
+**Screen readers.** Marked words are exposed as buttons, so a screen reader can
+list and jump between them, and the open panel is linked to its word with
+`aria-describedby`. Every translated run — word, phrase, sentence, glossary
+definition, saved vocabulary — carries the `lang` of your target language, so it
+is read with the right voice instead of being spelled out in an English one.
+
+**Vision.** Reader font, size, line spacing and column width are all adjustable
+(Settings → Appearance / Reading), with light, sepia and dark themes.
+[Atkinson Hyperlegible](https://www.brailleinstitute.org/freefont/), designed by
+the Braille Institute for low-vision readers, is offered alongside the serif
+faces. Text in the article body meets WCAG AA contrast in all three themes.
+
+**Motion.** With "reduce motion" enabled in the OS, animations collapse and
+scroll jumps become instant.
 
 ## Quick start (Docker Compose)
 
