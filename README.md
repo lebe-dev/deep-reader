@@ -18,6 +18,7 @@ Sentence translation example:
 
 - **CEFR-tuned enrichment** — an LLM translates only the words/phrases likely to be unfamiliar at your level, leaving the rest of the text untouched.
 - **Translation levels** — words, phrases, sentences.
+- **Passive vocabulary capture** — every word or phrase you tap for a translation is collected automatically, matched by dictionary lemma so any inflection counts. The LLM then stops spending attention on words you already know, and the reader hints them from your own vocabulary instead, in every article where they appear. Browse them at `/words`.
 - **Offline-first reading** — articles are cached locally (PWA + IndexedDB); the reader renders from cache instantly and syncs in the background.
 - **Single-user, self-hosted** — one built-in account, created on first launch; no external auth provider required.
 - **iOS/Android apps** — the same SvelteKit frontend packaged with CapacitorJS for native offline reading on your own devices.
@@ -36,7 +37,12 @@ Open the app and follow the redirect to `/setup` to create your account (usernam
 - [DEV.md](DEV.md) — local development, production builds, configuration, testing.
 - [docs/MOBILE.md](docs/MOBILE.md) — building and deploying the iOS/Android apps.
 - [docs/nginx.md](docs/nginx.md) — reverse proxy and caching configuration.
+- [WORD-CACHE-ARCH.md](WORD-CACHE-ARCH.md) — design of the vocabulary capture / word cache.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Third-party components requiring separate attribution — notably the ODbL-licensed
+English lemmatization dictionary embedded for vocabulary matching — are listed in
+[THIRD-PARTY.md](THIRD-PARTY.md).
