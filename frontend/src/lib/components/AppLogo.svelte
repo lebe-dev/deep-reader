@@ -10,6 +10,7 @@
 
 	import { cn } from '$lib/utils';
 	import { deviceTilt, startDeviceTilt } from '$lib/device-tilt.svelte';
+	import { processing, watchProcessing } from '$lib/processing.svelte';
 
 	interface Props {
 		/** Tailwind size class for the square. */
@@ -38,15 +39,35 @@
 	// Bubbles: hand-placed rather than random so the mark renders identically
 	// everywhere (a logo that differs per reload is not a logo). The varied radii,
 	// durations and delays are what make the rising read as chaotic; the long
-	// cycles with a mostly-invisible phase are what make bubbles RARE — usually
-	// none, occasionally one or two.
+	// cycles with a mostly-invisible phase are what make bubbles RARE at rest —
+	// usually none, occasionally one or two.
+	//
+	// `extra` bubbles exist only for the busy state. They are always in the DOM
+	// and merely hidden at rest: swapping the array would remount every circle
+	// and restart the animations of the calm ones mid-flight.
 	const bubbles = [
-		{ cx: 7.5, r: 0.8, duration: 22.5, delay: 0 },
-		{ cx: 15.5, r: 0.6, duration: 28.5, delay: 7.8 },
-		{ cx: 11, r: 0.5, duration: 25.5, delay: 15.3 },
-		{ cx: 18.5, r: 0.75, duration: 33, delay: 22.2 },
-		{ cx: 5, r: 0.45, duration: 30, delay: 11.4 }
+		{ cx: 7.5, r: 0.8, duration: 22.5, delay: 0, extra: false },
+		{ cx: 15.5, r: 0.6, duration: 28.5, delay: 7.8, extra: false },
+		{ cx: 11, r: 0.5, duration: 25.5, delay: 15.3, extra: false },
+		{ cx: 18.5, r: 0.75, duration: 33, delay: 22.2, extra: false },
+		{ cx: 5, r: 0.45, duration: 30, delay: 11.4, extra: false },
+		{ cx: 3.5, r: 0.5, duration: 21, delay: 3.1, extra: true },
+		{ cx: 9.5, r: 0.65, duration: 24, delay: 9.6, extra: true },
+		{ cx: 13, r: 0.4, duration: 27, delay: 1.4, extra: true },
+		{ cx: 17, r: 0.55, duration: 19.5, delay: 13.9, extra: true },
+		{ cx: 20.5, r: 0.5, duration: 26, delay: 5.5, extra: true },
+		{ cx: 6.5, r: 0.35, duration: 23, delay: 17.2, extra: true },
+		{ cx: 12.5, r: 0.7, duration: 31.5, delay: 20.4, extra: true },
+		{ cx: 16, r: 0.4, duration: 28, delay: 6.7, extra: true },
+		{ cx: 21.5, r: 0.6, duration: 22, delay: 12.3, extra: true }
 	];
+
+	// While the pipeline is fetching or enriching anything, the water comes alive:
+	// many bubbles, streaming up fast. It is the one piece of ambient feedback
+	// that the backend is working even when the user is not on the library page.
+	const busy = $derived(processing.count > 0);
+
+	$effect(() => watchProcessing());
 </script>
 
 <span class={cn('inline-flex shrink-0', className)} aria-hidden="true">
@@ -63,7 +84,7 @@
 			<!-- The water — waves and bubbles together — tilts as one body. The
 				 letters are deliberately OUTSIDE this group: they are the mark's
 				 identity, not part of the liquid, so they must never move. -->
-			<g class="water" style="transform: rotate({-deviceTilt.roll}deg)">
+			<g class="water" class:busy style="transform: rotate({-deviceTilt.roll}deg)">
 				<!-- Back swell: slower and fainter, so the surface has depth rather
 					 than looking like a single sliding shape. -->
 				<path d={wavePath(SURFACE_Y + 0.5, 1.6)} class="fill-primary/60 wave wave-back" />
@@ -79,7 +100,8 @@
 						cy="22.5"
 						r={bubble.r}
 						class="bubble"
-						style="animation-duration: {bubble.duration}s; animation-delay: -{bubble.delay}s"
+						class:bubble-extra={bubble.extra}
+						style="--bubble-duration: {bubble.duration}s; --bubble-delay: -{bubble.delay}s"
 					/>
 				{/each}
 			</g>
@@ -151,9 +173,32 @@
 	.bubble {
 		fill: #fff;
 		animation-name: bubble-rise;
+		/* Durations live in a custom property so the busy state can scale them
+		   without the inline style (which would otherwise win) getting in the way. */
+		animation-duration: var(--bubble-duration);
+		animation-delay: var(--bubble-delay);
 		animation-timing-function: ease-in;
 		animation-iteration-count: infinite;
 		will-change: transform, opacity;
+	}
+
+	/* Present in the DOM at rest but not shown, so entering the busy state adds
+	   bubbles without remounting — and thus without restarting — the calm ones. */
+	.bubble-extra {
+		display: none;
+	}
+
+	.busy .bubble-extra {
+		display: block;
+	}
+
+	/* Busy: the rise fills the whole cycle instead of a 15% sliver, and the cycle
+	   itself is an eighth as long. Together that turns "one bubble now and then"
+	   into a steady stream without changing any per-bubble geometry. */
+	.busy .bubble {
+		animation-name: bubble-rise-busy;
+		animation-duration: calc(var(--bubble-duration) / 8);
+		animation-timing-function: linear;
 	}
 
 	/* A bubble is invisible for the first 85% of its cycle, so at any moment most
@@ -181,6 +226,28 @@
 			opacity: 0.45;
 		}
 		/* Fades out just under the surface rather than popping through it. */
+		100% {
+			transform: translate(0.2px, -16.5px);
+			opacity: 0;
+		}
+	}
+
+	@keyframes bubble-rise-busy {
+		0% {
+			transform: translate(0, 0);
+			opacity: 0;
+		}
+		12% {
+			opacity: 0.8;
+		}
+		50% {
+			transform: translate(0.9px, -8px);
+			opacity: 0.75;
+		}
+		85% {
+			transform: translate(-0.6px, -14px);
+			opacity: 0.5;
+		}
 		100% {
 			transform: translate(0.2px, -16.5px);
 			opacity: 0;
