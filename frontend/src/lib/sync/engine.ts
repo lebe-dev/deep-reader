@@ -561,8 +561,10 @@ export async function enqueueDelete(id: string): Promise<void> {
 /**
  * Enqueue a stage-aware retry and optimistically reset the local status to the
  * queue state for the failed stage: enrich_failed re-enriches from `fetched`
- * (content is kept), everything else re-fetches from `queued`. The authoritative
- * status is reconciled on the next sync.
+ * (content is kept), everything else re-fetches from `queued`. The server routes
+ * on whether the content is actually stored (which the local meta does not
+ * carry), so a fetch_failed article that already has content resolves to
+ * `fetched` there; the authoritative status is reconciled on the next sync.
  */
 export async function enqueueRetry(id: string): Promise<void> {
 	// Optimistic status update.

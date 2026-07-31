@@ -563,8 +563,13 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 
 	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
 
-	// Step 1: summary (best-effort — a summary failure must not block translation).
-	if strings.TrimSpace(a.Summary) == "" {
+	// Step 1: summary (best-effort — a summary failure must not block
+	// translation). Skipped entirely when the user turned the step off: the
+	// chunks then run without cross-chunk context and the article keeps no
+	// summary, saving one LLM call.
+	if settings.SkipSummary {
+		log.Info("enrich: summary step skipped (skip_summary is on)")
+	} else if strings.TrimSpace(a.Summary) == "" {
 		p.setStage(ctx, log, a.ID, stageSummarizing)
 		if summary, ok := p.runSummarize(ctx, log, a, settings); ok {
 			a.Summary = summary

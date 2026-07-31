@@ -235,3 +235,48 @@ func containsSentenceEnd(gap string) bool {
 	}
 	return false
 }
+
+// TestSkipSummarySkipsSummarizeStep verifies that Settings.SkipSummary drops the
+// summary step of the step-wise enrichment: no Summarize call is made and the
+// article is still translated and flipped to enriched.
+func TestSkipSummarySkipsSummarizeStep(t *testing.T) {
+	text := "one two three. four five six. seven eight nine."
+	tokens := tokenize.Tokenize(text)
+
+	article := &model.Article{
+		ID:           "art-skip-summary",
+		Title:        "No summary",
+		Status:       model.StatusFetched,
+		OriginalText: text,
+		Tokens:       tokens,
+	}
+	st := newFakeStore(article)
+	st.settings.SkipSummary = true
+
+	llm := &fakeLLM{
+		spanFunc: func(spans []model.Span) *model.Enrichment {
+			e := &model.Enrichment{}
+			for _, s := range spans {
+				e.Sentences = append(e.Sentences, model.Sentence{
+					StartIndex: s.Start, EndIndex: s.End, Translation: "перевод",
+				})
+			}
+			return e
+		},
+	}
+
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm, nil)
+
+	ok := runPool(t, pool, 5*time.Second, func() bool {
+		return st.status("art-skip-summary") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("art-skip-summary"))
+	}
+	if llm.summaryCalls != 0 {
+		t.Fatalf("expected no Summarize call with skip_summary on, got %d", llm.summaryCalls)
+	}
+	if _, saved := st.savedEnrichment("art-skip-summary"); !saved {
+		t.Fatal("expected enrichment to be saved without a summary")
+	}
+}

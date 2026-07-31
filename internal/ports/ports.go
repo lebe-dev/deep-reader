@@ -259,10 +259,19 @@ type Store interface {
 	ListProgress(ctx context.Context, since time.Time) ([]model.Progress, error)
 
 	// RetryArticle resets a failed article to the queue state for the stage that
-	// failed (fetch_failed → queued, enrich_failed → fetched) so the worker
-	// resumes from there, clearing error. Returns ErrNotFound if the article
-	// does not exist.
+	// still has to run so the worker resumes from there, clearing error. An
+	// article whose content is already stored goes back to fetched (re-enrich
+	// only, never re-downloading it); one without content goes back to queued.
+	// Returns ErrNotFound if the article does not exist.
 	RetryArticle(ctx context.Context, id string) error
+
+	// RequeueForVersion re-runs the pipeline for an existing article at a new
+	// enrichment version: it drops the stale enrichment, stamps
+	// enrichmentVersion, and queues the article at the earliest stage that still
+	// has to run — fetched when the content is already stored (no re-download),
+	// queued otherwise. It returns the resulting status. Returns ErrNotFound if
+	// the article does not exist.
+	RequeueForVersion(ctx context.Context, id string, enrichmentVersion int) (string, error)
 
 	// ReEnrich queues an already-enriched article for re-enrichment. mode
 	// model.ReEnrichModeFull resets status to fetched (re-translate the whole

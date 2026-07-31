@@ -23,6 +23,7 @@ type fakeStore struct {
 	articles map[string]*model.Article // keyed by url_hash
 	byID     map[string]*model.Article // keyed by id
 	retried  []string                  // ids passed to RetryArticle
+	requeued []string                  // ids passed to RequeueForVersion
 }
 
 func newFakeStore() *fakeStore {
@@ -62,6 +63,21 @@ func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	}
 	f.retried = append(f.retried, id)
 	return nil
+}
+
+func (f *fakeStore) RequeueForVersion(_ context.Context, id string, enrichmentVersion int) (string, error) {
+	a, ok := f.byID[id]
+	if !ok {
+		return "", ports.ErrNotFound
+	}
+	status := model.StatusQueued
+	if strings.TrimSpace(a.OriginalText) != "" {
+		status = model.StatusFetched
+	}
+	a.Status = status
+	a.EnrichmentVersion = enrichmentVersion
+	f.requeued = append(f.requeued, id)
+	return status, nil
 }
 
 func (f *fakeStore) ReEnrich(_ context.Context, id, mode string) error {
@@ -425,6 +441,111 @@ func TestAdd_DedupReturnExisting(t *testing.T) {
 	// Returned article must be the same (same id).
 	if first.ID != second.ID {
 		t.Errorf("dedup: ids differ: first=%q second=%q", first.ID, second.ID)
+	}
+}
+
+// A URL whose article was ingested at an older enrichment version is
+// re-processed in place — and the content it already downloaded is reused, so
+// the article resumes at the enrich stage rather than being re-fetched.
+func TestAdd_VersionMismatchReusesDownloadedContent(t *testing.T) {
+	st := newFakeStore()
+	wk := &fakeWorker{}
+	cfg := defaultCfg()
+	ing := ingest.New(cfg, st, wk, nil)
+
+	rawURL := "https://example.com/article"
+	first, err := ing.Add(context.Background(), rawURL)
+	if err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+
+	// Simulate a completed pipeline at an older enrichment version.
+	stored := st.byID[first.ID]
+	stored.OriginalText = "Already downloaded body"
+	stored.Status = model.StatusEnriched
+	stored.EnrichmentVersion = cfg.EnrichmentVersion - 1
+
+	wk.notified.Store(0)
+
+	second, err := ing.Add(context.Background(), rawURL)
+	if err != nil {
+		t.Fatalf("second Add: %v", err)
+	}
+
+	if second.ID != first.ID {
+		t.Errorf("ids differ: first=%q second=%q", first.ID, second.ID)
+	}
+	if second.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q (fetch stage must be skipped)", second.Status, model.StatusFetched)
+	}
+	if second.EnrichmentVersion != cfg.EnrichmentVersion {
+		t.Errorf("enrichment_version: got %d, want %d", second.EnrichmentVersion, cfg.EnrichmentVersion)
+	}
+	if len(st.requeued) != 1 || st.requeued[0] != first.ID {
+		t.Errorf("requeued: got %v, want [%s]", st.requeued, first.ID)
+	}
+	if st.byID[first.ID].OriginalText != "Already downloaded body" {
+		t.Error("stored content must be preserved for reuse")
+	}
+	if n := wk.notified.Load(); n != 1 {
+		t.Errorf("worker notified: got %d, want 1", n)
+	}
+}
+
+// Without stored content there is nothing to reuse, so the article restarts
+// from the fetch stage.
+func TestAdd_VersionMismatchWithoutContentRefetches(t *testing.T) {
+	st := newFakeStore()
+	cfg := defaultCfg()
+	ing := ingest.New(cfg, st, &fakeWorker{}, nil)
+
+	rawURL := "https://example.com/article"
+	first, err := ing.Add(context.Background(), rawURL)
+	if err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	st.byID[first.ID].Status = model.StatusFetchFailed
+	st.byID[first.ID].EnrichmentVersion = cfg.EnrichmentVersion - 1
+
+	second, err := ing.Add(context.Background(), rawURL)
+	if err != nil {
+		t.Fatalf("second Add: %v", err)
+	}
+	if second.Status != model.StatusQueued {
+		t.Errorf("status: got %q, want %q", second.Status, model.StatusQueued)
+	}
+}
+
+// A newly added article is pinned so it lands at the top of the library.
+func TestAdd_NewArticleIsPinned(t *testing.T) {
+	st := newFakeStore()
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{}, nil)
+
+	art, err := ing.Add(context.Background(), "https://example.com/pinned")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !art.Pinned {
+		t.Error("returned article must be pinned")
+	}
+	if stored := st.byID[art.ID]; !stored.Pinned {
+		t.Error("persisted article must be pinned")
+	}
+}
+
+func TestAddText_NewArticleIsPinned(t *testing.T) {
+	st := newFakeStore()
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{}, nil)
+
+	art, err := ing.AddText(context.Background(), "T", "", "Some pasted body text.")
+	if err != nil {
+		t.Fatalf("AddText: %v", err)
+	}
+	if !art.Pinned {
+		t.Error("returned article must be pinned")
+	}
+	if stored := st.byID[art.ID]; !stored.Pinned {
+		t.Error("persisted article must be pinned")
 	}
 }
 

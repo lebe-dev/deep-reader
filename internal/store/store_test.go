@@ -893,11 +893,15 @@ func TestRetryArticle_ClearsRawResponse(t *testing.T) {
 	}
 }
 
-func TestRetryArticle_FetchFailedGoesToQueued(t *testing.T) {
+// A fetch_failed article that never got its content restarts from the fetch
+// stage.
+func TestRetryArticle_FetchFailedWithoutContentGoesToQueued(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
 
 	a := makeArticle("https://example.com/retry-fetch")
+	a.OriginalText = ""
+	a.Tokens = nil
 	if err := s.CreateArticle(ctx, a); err != nil {
 		t.Fatalf("CreateArticle: %v", err)
 	}
@@ -915,6 +919,112 @@ func TestRetryArticle_FetchFailedGoesToQueued(t *testing.T) {
 	}
 	if got.Status != model.StatusQueued {
 		t.Errorf("status: got %q, want %q", got.Status, model.StatusQueued)
+	}
+}
+
+// An article whose content is already stored must never be re-downloaded: the
+// retry resumes at the enrich stage even when the fetch stage is the one that
+// failed.
+func TestRetryArticle_WithContentSkipsFetch(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/retry-keeps-content")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	if err := s.SetStatus(ctx, a.ID, model.StatusFetchFailed, "boom"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	if err := s.RetryArticle(ctx, a.ID); err != nil {
+		t.Fatalf("RetryArticle: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", got.Status, model.StatusFetched)
+	}
+	if got.OriginalText != a.OriginalText {
+		t.Errorf("content: got %q, want %q", got.OriginalText, a.OriginalText)
+	}
+}
+
+// ── RequeueForVersion ─────────────────────────────────────────────────────
+
+func TestRequeueForVersion_KeepsContentAndClearsEnrichment(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/requeue")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	enr := model.Enrichment{Sentences: []model.Sentence{{StartIndex: 0, EndIndex: 0, Translation: "Привет"}}}
+	if err := s.SaveEnrichment(ctx, a.ID, enr, time.Now().UTC(), "gpt-test"); err != nil {
+		t.Fatalf("SaveEnrichment: %v", err)
+	}
+
+	status, err := s.RequeueForVersion(ctx, a.ID, 7)
+	if err != nil {
+		t.Fatalf("RequeueForVersion: %v", err)
+	}
+	if status != model.StatusFetched {
+		t.Errorf("status: got %q, want %q", status, model.StatusFetched)
+	}
+
+	got, err := s.GetArticle(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.Status != model.StatusFetched {
+		t.Errorf("stored status: got %q, want %q", got.Status, model.StatusFetched)
+	}
+	if got.EnrichmentVersion != 7 {
+		t.Errorf("enrichment_version: got %d, want 7", got.EnrichmentVersion)
+	}
+	if got.OriginalText != a.OriginalText {
+		t.Errorf("content: got %q, want %q", got.OriginalText, a.OriginalText)
+	}
+
+	payload, err := s.GetArticlePayload(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticlePayload: %v", err)
+	}
+	if payload.Enrichment != nil {
+		t.Errorf("enrichment: got %+v, want nil", payload.Enrichment)
+	}
+}
+
+func TestRequeueForVersion_WithoutContentGoesToQueued(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://example.com/requeue-empty")
+	a.OriginalText = ""
+	a.Tokens = nil
+	a.Status = model.StatusFetchFailed
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+
+	status, err := s.RequeueForVersion(ctx, a.ID, 3)
+	if err != nil {
+		t.Fatalf("RequeueForVersion: %v", err)
+	}
+	if status != model.StatusQueued {
+		t.Errorf("status: got %q, want %q", status, model.StatusQueued)
+	}
+}
+
+func TestRequeueForVersion_NotFound(t *testing.T) {
+	s := openStore(t)
+
+	if _, err := s.RequeueForVersion(context.Background(), "no-such-id", 2); !isErr(err, ports.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 

@@ -15,6 +15,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Separator } from '$lib/components/ui/separator';
+	import { Switch } from '$lib/components/ui/switch';
 	import PromptEditor from '$lib/components/settings/PromptEditor.svelte';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
@@ -79,6 +80,11 @@
 		if (next === settings.chunk_tokens) return;
 		patchField({ chunk_tokens: next });
 	}
+
+	function handleSkipSummaryChange(checked: boolean) {
+		if (!settings) return;
+		patchField({ skip_summary: checked });
+	}
 </script>
 
 <Card.Root>
@@ -142,6 +148,26 @@
 					placeholder: <code>{'{{target_language}}'}</code>.
 				{/snippet}
 			</PromptEditor>
+
+			<Separator />
+
+			<!-- Skip the summary step entirely (off by default). -->
+			<div class="flex items-start justify-between gap-4">
+				<div class="grid gap-0.5">
+					<Label for="skip-summary-switch">Skip summary generation</Label>
+					<p class="text-muted-foreground text-xs">
+						Translate articles without generating a summary first. Saves one LLM call per article;
+						in exchange the chunks lose the shared context the summary gives them and the library
+						card shows no summary.
+					</p>
+				</div>
+				<Switch
+					id="skip-summary-switch"
+					checked={settings.skip_summary ?? false}
+					onCheckedChange={handleSkipSummaryChange}
+					aria-label="Skip summary generation"
+				/>
+			</div>
 
 			<Separator />
 

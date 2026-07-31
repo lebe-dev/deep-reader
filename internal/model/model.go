@@ -394,7 +394,12 @@ type Settings struct {
 	// They are one toggle on purpose — exclusion without the overlay would
 	// silently remove help for exactly the words the user struggled with.
 	// Capture and lemmatization are NOT gated, so re-enabling is instant.
-	VocabAssist bool      `json:"vocab_assist"`
+	VocabAssist bool `json:"vocab_assist"`
+	// SkipSummary turns off the summary step of the step-wise enrichment: the
+	// worker goes straight to translating the chunks, saving one LLM call per
+	// article. The summary is also what gives each chunk its cross-article
+	// context and what the library card shows, so it is off by default.
+	SkipSummary bool      `json:"skip_summary"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
@@ -415,6 +420,7 @@ type SettingsPatch struct {
 	FontSize                 *string `json:"font_size,omitempty"`
 	LineHeight               *string `json:"line_height,omitempty"`
 	VocabAssist              *bool   `json:"vocab_assist,omitempty"`
+	SkipSummary              *bool   `json:"skip_summary,omitempty"`
 }
 
 // LLMProvider is a user-managed LLM connection profile (Settings > LLM,

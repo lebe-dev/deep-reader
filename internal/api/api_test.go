@@ -221,6 +221,10 @@ func (f *fakeStore) ListProgress(context.Context, time.Time) ([]model.Progress, 
 }
 func (f *fakeStore) RetryArticle(context.Context, string) error { return f.retryErr }
 
+func (f *fakeStore) RequeueForVersion(context.Context, string, int) (string, error) {
+	return model.StatusFetched, nil
+}
+
 func (f *fakeStore) ReEnrich(context.Context, string, string) error { return f.reEnrichErr }
 
 func (f *fakeStore) SetPinned(_ context.Context, id string, pinned bool) error {

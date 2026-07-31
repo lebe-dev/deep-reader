@@ -58,7 +58,7 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.LineHeight != nil && !slices.Contains(model.LineHeights, *patch.LineHeight) {
 		return "line_height must be one of compact, normal, relaxed", false
 	}
-	// vocab_assist is a plain boolean: both values are legal, so there is
-	// nothing to reject.
+	// vocab_assist and skip_summary are plain booleans: both values are legal,
+	// so there is nothing to reject.
 	return "", true
 }

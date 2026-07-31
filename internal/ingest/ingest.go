@@ -88,13 +88,17 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 			)
 			return existing, nil
 		}
-		// Version mismatch — fall through and re-ingest.
-		slog.Info("ingest: enrichment version mismatch, re-ingesting",
+		// Version mismatch — re-run the pipeline on the existing record instead of
+		// inserting a second one (url_hash is unique). The content already
+		// downloaded is reused: only an article without stored content restarts
+		// from the fetch stage.
+		slog.Info("ingest: enrichment version mismatch, re-processing existing article",
 			"article_id", existing.ID,
 			"url_hash", hash,
 			"stored_version", existing.EnrichmentVersion,
 			"current_version", ing.cfg.EnrichmentVersion,
 		)
+		return ing.requeue(ctx, existing)
 	} else if !isNotFound(err) {
 		return nil, fmt.Errorf("ingest: dedup lookup: %w", err)
 	}
@@ -112,8 +116,11 @@ func (ing *Ingestor) Add(ctx context.Context, rawURL string) (*model.Article, er
 		SourceDomain:      hostOf(normalized),
 		Status:            model.StatusQueued,
 		EnrichmentVersion: ing.cfg.EnrichmentVersion,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		// A freshly added article is pinned so it sits at the top of the library
+		// while it is being processed; unpinning is a one-click user action.
+		Pinned:    true,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	if err := ing.store.CreateArticle(ctx, article); err != nil {
@@ -186,7 +193,8 @@ func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string)
 			slog.Info("ingest: returning cached text article (dedup hit)", "article_id", existing.ID, "url_hash", hash)
 			return existing, nil
 		}
-		slog.Info("ingest: enrichment version mismatch for text, re-ingesting", "article_id", existing.ID, "url_hash", hash)
+		slog.Info("ingest: enrichment version mismatch for text, re-processing existing article", "article_id", existing.ID, "url_hash", hash)
+		return ing.requeue(ctx, existing)
 	} else if !isNotFound(err) {
 		return nil, fmt.Errorf("ingest: dedup lookup: %w", err)
 	}
@@ -203,8 +211,10 @@ func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string)
 		ContentFormat:     markdown.DetectFormat(text),
 		Tokens:            lemma.Apply(ing.lem, tokenize.Tokenize(text)),
 		EnrichmentVersion: ing.cfg.EnrichmentVersion,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		// Same as [Ingestor.Add]: a newly added article starts pinned.
+		Pinned:    true,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	if err := ing.store.CreateArticle(ctx, article); err != nil {
@@ -224,6 +234,36 @@ func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string)
 	ing.worker.Notify()
 
 	return article, nil
+}
+
+// requeue re-runs the pipeline for an already-stored article whose enrichment
+// version no longer matches the configured one. The record is reused (its
+// url_hash is unique, so a second row is impossible) and, crucially, so is the
+// content it already downloaded: the store queues the article at status=fetched
+// when original_text is present, so only an article that never got its content
+// goes back through the fetch stage.
+func (ing *Ingestor) requeue(ctx context.Context, existing *model.Article) (*model.Article, error) {
+	status, err := ing.store.RequeueForVersion(ctx, existing.ID, ing.cfg.EnrichmentVersion)
+	if err != nil {
+		if isNotFound(err) {
+			// Deleted between the lookup and the requeue — nothing to resume.
+			return nil, err
+		}
+		return nil, fmt.Errorf("ingest: requeue existing article: %w", err)
+	}
+
+	existing.Status = status
+	existing.EnrichmentVersion = ing.cfg.EnrichmentVersion
+
+	slog.Info("ingest: existing article requeued",
+		"article_id", existing.ID,
+		"status", status,
+		"content_reused", status == model.StatusFetched,
+	)
+
+	ing.worker.Notify()
+
+	return existing, nil
 }
 
 // deriveTitle builds a short heading from the first non-empty line of text,

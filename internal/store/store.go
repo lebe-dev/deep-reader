@@ -154,7 +154,7 @@ func parseTime(s string) (time.Time, error) {
 // GetSettings returns the singleton settings row. The row is guaranteed to
 // exist because the migration seeds it; if somehow absent, a default is returned.
 func (s *SQLite) GetSettings(ctx context.Context) (model.Settings, error) {
-	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, updated_at
+	const q = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, updated_at
                FROM settings WHERE id = 1`
 	row := s.db.QueryRowContext(ctx, q)
 	return scanSettings(row)
@@ -167,7 +167,7 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	defer s.wmu.Unlock()
 
 	// Read current values first.
-	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, updated_at
+	const selQ = `SELECT cefr_level, target_language, llm_model, min_difficulty_to_highlight, markdown_warn_threshold, enrichment_prompt, summary_prompt, normalize_prompt, bot_wall_signatures, chunk_tokens, font_size, line_height, vocab_assist, skip_summary, updated_at
                   FROM settings WHERE id = 1`
 	row := s.write.QueryRowContext(ctx, selQ)
 	cur, err := scanSettings(row)
@@ -215,13 +215,16 @@ func (s *SQLite) UpdateSettings(ctx context.Context, patch model.SettingsPatch) 
 	if patch.VocabAssist != nil {
 		cur.VocabAssist = *patch.VocabAssist
 	}
+	if patch.SkipSummary != nil {
+		cur.SkipSummary = *patch.SkipSummary
+	}
 	cur.UpdatedAt = now()
 
 	const updQ = `UPDATE settings SET cefr_level=?, target_language=?, llm_model=?,
-                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, font_size=?, line_height=?, vocab_assist=?, updated_at=? WHERE id = 1`
+                  min_difficulty_to_highlight=?, markdown_warn_threshold=?, enrichment_prompt=?, summary_prompt=?, normalize_prompt=?, bot_wall_signatures=?, chunk_tokens=?, font_size=?, line_height=?, vocab_assist=?, skip_summary=?, updated_at=? WHERE id = 1`
 	if _, err := s.write.ExecContext(ctx, updQ,
 		cur.CEFRLevel, cur.TargetLanguage, cur.LLMModel,
-		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, cur.FontSize, cur.LineHeight, cur.VocabAssist, fmtTime(cur.UpdatedAt),
+		cur.MinDifficultyToHighlight, cur.MarkdownWarnThreshold, cur.EnrichmentPrompt, cur.SummaryPrompt, cur.NormalizePrompt, cur.BotWallSignatures, cur.ChunkTokens, cur.FontSize, cur.LineHeight, cur.VocabAssist, cur.SkipSummary, fmtTime(cur.UpdatedAt),
 	); err != nil {
 		return model.Settings{}, fmt.Errorf("store: UpdateSettings write: %w", err)
 	}
@@ -240,7 +243,7 @@ func scanSettings(row *sql.Row) (model.Settings, error) {
 	var s model.Settings
 	var updatedAtStr string
 	if err := row.Scan(&s.CEFRLevel, &s.TargetLanguage, &s.LLMModel,
-		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &s.FontSize, &s.LineHeight, &s.VocabAssist, &updatedAtStr); err != nil {
+		&s.MinDifficultyToHighlight, &s.MarkdownWarnThreshold, &s.EnrichmentPrompt, &s.SummaryPrompt, &s.NormalizePrompt, &s.BotWallSignatures, &s.ChunkTokens, &s.FontSize, &s.LineHeight, &s.VocabAssist, &s.SkipSummary, &updatedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return defaults if somehow the singleton row is missing.
 			return model.Settings{
@@ -276,15 +279,20 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
+	pinned := 0
+	if a.Pinned {
+		pinned = 1
+	}
+
 	const q = `INSERT INTO articles
                (id, source_url, url_hash, title, author, source_domain, lang,
                 original_text, content_format, tokens, status, enrichment_version, error,
-                created_at, enriched_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+                pinned, created_at, enriched_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err = s.write.ExecContext(ctx, q,
 		a.ID, a.SourceURL, a.URLHash, a.Title, a.Author, a.SourceDomain, a.Lang,
 		a.OriginalText, contentFormatOrDefault(a.ContentFormat), string(tokJSON), a.Status, a.EnrichmentVersion, a.Error,
-		fmtTime(a.CreatedAt), fmtTime(a.EnrichedAt), fmtTime(a.UpdatedAt),
+		pinned, fmtTime(a.CreatedAt), fmtTime(a.EnrichedAt), fmtTime(a.UpdatedAt),
 	)
 	if err != nil {
 		if isSQLiteUnique(err) {
@@ -749,21 +757,21 @@ func (s *SQLite) SaveSummary(ctx context.Context, id, summary string) error {
 }
 
 // RetryArticle resets a failed article to the queue state for the stage that
-// failed, clearing the error and bumping updated_at: a fetch_failed article
-// goes back to queued (re-fetch), an enrich_failed article goes back to fetched
-// (re-enrich only — its content is preserved). For any other (non-terminal-fail)
-// status it is a no-op reset to a sensible queue state so a manual retry is
-// always safe. Returns [ports.ErrNotFound] if the article does not exist.
+// failed, clearing the error and bumping updated_at. The routing is driven by
+// whether the content was already downloaded, not by the status: an article
+// with a non-empty original_text goes back to fetched (re-enrich only — the
+// fetch stage is skipped so a retry never re-downloads content that is already
+// stored), everything else goes back to queued (re-fetch). For a
+// non-terminal-fail status it is a safe reset to a sensible queue state so a
+// manual retry is always allowed. Returns [ports.ErrNotFound] if the article
+// does not exist.
 func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
-	// Route to the right queue state based on the current status. enrich_failed
-	// (and the in-flight enriching) keep the fetched content; everything else
-	// restarts from fetch.
 	const q = `UPDATE articles
 	           SET status = CASE
-	                   WHEN status IN ('enrich_failed','enriching','fetched','enriched') THEN 'fetched'
+	                   WHEN TRIM(COALESCE(original_text, '')) <> '' THEN 'fetched'
 	                   ELSE 'queued'
 	               END,
 	               error = '',
@@ -782,6 +790,57 @@ func (s *SQLite) RetryArticle(ctx context.Context, id string) error {
 	}
 	slog.Debug("store: article queued for retry", "article_id", id)
 	return nil
+}
+
+// RequeueForVersion re-runs the pipeline for an existing article at a new
+// enrichment version: it drops the stale enrichment, stamps enrichmentVersion,
+// and queues the article at the earliest stage that still has to run. The fetch
+// stage is skipped when the content was already downloaded (non-empty
+// original_text → status=fetched); only an article without content restarts
+// from queued. It returns the resulting status. Returns [ports.ErrNotFound] if
+// the article does not exist.
+func (s *SQLite) RequeueForVersion(ctx context.Context, id string, enrichmentVersion int) (string, error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	tx, err := s.write.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("store: RequeueForVersion begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var originalText string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(original_text, '') FROM articles WHERE id = ?`, id).Scan(&originalText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ports.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: RequeueForVersion read: %w", err)
+	}
+
+	status := model.StatusQueued
+	if strings.TrimSpace(originalText) != "" {
+		status = model.StatusFetched
+	}
+
+	const updArticle = `UPDATE articles
+	                    SET status=?, enrichment_version=?, error='', raw_llm_response='',
+	                        enriched_at='', enrichment_coverage=0, progress_stage='', updated_at=?
+	                    WHERE id=?`
+	if _, err := tx.ExecContext(ctx, updArticle, status, enrichmentVersion, fmtTime(now()), id); err != nil {
+		return "", fmt.Errorf("store: RequeueForVersion update article: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM enrichments WHERE article_id=?`, id); err != nil {
+		return "", fmt.Errorf("store: RequeueForVersion delete enrichment: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: RequeueForVersion commit: %w", err)
+	}
+	slog.Debug("store: article requeued for new enrichment version",
+		"article_id", id, "status", status, "enrichment_version", enrichmentVersion)
+	return status, nil
 }
 
 // ReEnrich queues an already-enriched article for re-enrichment. For

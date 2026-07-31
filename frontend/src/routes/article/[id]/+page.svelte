@@ -393,6 +393,14 @@
 		try {
 			await enqueueSetRead(articleId, next);
 			progress = await db.progress.get(articleId);
+			// Marking as read resets the stored position to the start, so bring the
+			// view back to the top too — otherwise the reader stays parked mid-article
+			// on a piece it just declared finished (and the scroll debounce would
+			// write that position straight back).
+			if (next) {
+				cancelPendingProgress();
+				scrollToTop();
+			}
 			toast(next ? 'Marked as read.' : 'Marked as unread.');
 		} catch {
 			toast.error('Failed to update read status.');

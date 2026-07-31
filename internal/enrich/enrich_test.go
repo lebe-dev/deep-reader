@@ -286,6 +286,22 @@ func (f *fakeStore) ListProgress(_ context.Context, _ time.Time) ([]model.Progre
 	return nil, nil
 }
 
+func (f *fakeStore) RequeueForVersion(_ context.Context, id string, enrichmentVersion int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.articles[id]
+	if !ok {
+		return "", ports.ErrNotFound
+	}
+	status := model.StatusQueued
+	if a.OriginalText != "" {
+		status = model.StatusFetched
+	}
+	a.Status = status
+	a.EnrichmentVersion = enrichmentVersion
+	return status, nil
+}
+
 func (f *fakeStore) RetryArticle(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

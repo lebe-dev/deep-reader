@@ -262,6 +262,13 @@ export interface Settings {
 	 * user struggled with. Capture keeps running either way.
 	 */
 	vocab_assist: boolean;
+	/**
+	 * Skip the summary step of the enrichment: the article is translated without
+	 * first asking the LLM for a summary, saving one call per article at the cost
+	 * of the cross-chunk context and of the library card's summary. Off by
+	 * default.
+	 */
+	skip_summary: boolean;
 	updated_at: string;
 }
 
@@ -281,6 +288,7 @@ export type SettingsPatch = Partial<
 		| 'chunk_tokens'
 		| 'font_size'
 		| 'vocab_assist'
+		| 'skip_summary'
 		| 'line_height'
 	>
 >;
