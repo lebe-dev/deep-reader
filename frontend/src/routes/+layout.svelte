@@ -10,9 +10,10 @@
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import LibraryIcon from '@lucide/svelte/icons/library';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
+	import BookMarkedIcon from '@lucide/svelte/icons/book-marked';
+	import AppLogo from '$lib/components/AppLogo.svelte';
 	import SunIcon from '@lucide/svelte/icons/sun';
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import CoffeeIcon from '@lucide/svelte/icons/coffee';
@@ -107,9 +108,12 @@
 		}
 	});
 
+	// The content destinations, labelled. Settings is NOT here: it is a rarely
+	// visited, icon-only control, so it lives with the other trailing icon
+	// buttons (theme, scroll-to-top) rather than among the labelled links.
 	const navItems = [
 		{ href: '/', label: 'Library', icon: LibraryIcon },
-		{ href: '/settings', label: 'Settings', icon: SettingsIcon }
+		{ href: '/words', label: 'Words', icon: BookMarkedIcon }
 	];
 
 	function isActive(href: string): boolean {
@@ -233,10 +237,10 @@
 					)}
 				>
 					<div class="mx-auto flex h-14 w-full max-w-3xl items-center gap-2 px-4">
-						<a href="/" class="mr-2 flex items-center gap-2 font-semibold">
-							<BookOpenIcon class="size-5" />
-							<span class="hidden sm:inline">Deep Reader</span>
-							<span class="sm:hidden">DR</span>
+						<!-- The mark carries the identity on its own; the wordmark that
+							 used to sit beside it is gone at every width. -->
+						<a href="/" class="mr-2 flex items-center" aria-label="Deep Reader">
+							<AppLogo class="size-6" />
 						</a>
 
 						<Separator orientation="vertical" class="mx-1 h-6" />
@@ -304,6 +308,16 @@
 									{/each}
 								</DropdownMenu.Content>
 							</DropdownMenu.Root>
+							<Button
+								href="/settings"
+								variant="ghost"
+								size="icon"
+								aria-label="Settings"
+								title="Settings"
+								class={cn(isActive('/settings') ? 'text-foreground bg-accent' : '')}
+							>
+								<SettingsIcon class="size-4" />
+							</Button>
 						</div>
 					</div>
 				</header>

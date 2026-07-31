@@ -3,6 +3,8 @@ module deep-reader
 go 1.26
 
 require (
+	github.com/aaaton/golem/v4 v4.0.2
+	github.com/aaaton/golem/v4/dicts/en v1.0.1
 	github.com/getsentry/sentry-go v0.46.2
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/gofiber/fiber/v3 v3.3.0

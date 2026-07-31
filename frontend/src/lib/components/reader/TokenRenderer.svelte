@@ -27,6 +27,7 @@
 		type SentenceMenuContent
 	} from './reader-utils';
 	import { buildMarkdownBlocks, type InlineMark, type InlineSegment } from './markdown-blocks';
+	import { buildOverlayIndices, emptyVocabIndex, type VocabIndex } from '$lib/vocab/overlay';
 	import ImageLightbox from './ImageLightbox.svelte';
 	import { cn } from '$lib/utils';
 
@@ -42,6 +43,13 @@
 		initialPosition?: number;
 		/** Called with the furthest-seen token index as the user scrolls (debounce externally). */
 		onProgress: (tokenIndex: number) => void;
+		/**
+		 * The user's collected vocabulary, as a prebuilt matcher index. Words in
+		 * it are hinted from the local dictionary in place of the annotations the
+		 * LLM no longer produces (WORD-CACHE-ARCH.md §10). Defaults to an empty
+		 * index, which renders exactly as before this feature existed.
+		 */
+		vocabIndex?: VocabIndex;
 		/** Called when word/phrase popover content changes. */
 		onWordClick: (content: PopoverContent | null, anchor: HTMLElement | null) => void;
 		/** Called on long-press to open the in-place sentence action menu. */
@@ -54,6 +62,7 @@
 		enrichment,
 		format,
 		initialPosition = 0,
+		vocabIndex = emptyVocabIndex(),
 		onProgress,
 		onWordClick,
 		onSentenceMenu
@@ -69,6 +78,13 @@
 	// rather than re-reading enrichment.difficult_words (which may be null).
 	const difficultSet = $derived(new Set(difficultWordMap.keys()));
 
+	// Tokens the vocabulary overlay decorates: known words and phrases the
+	// enrichment did NOT annotate. Built once per (article, vocabulary) pair,
+	// never per click.
+	const vocabSet = $derived(
+		buildOverlayIndices(vocabIndex, tokens, (i) => difficultSet.has(i) || phraseMap.has(i))
+	);
+
 	// Static per-token class (difficult/phrase styling). Depends only on the
 	// enrichment maps, so it's computed once per article — NOT on every click.
 	// Highlight styling is appended cheaply in tokenClass(); previously every
@@ -78,6 +94,7 @@
 		for (const token of tokens) {
 			const isDifficult = difficultSet.has(token.index);
 			const isPhrase = phraseMap.has(token.index);
+			const isVocab = vocabSet.has(token.index);
 			map.set(
 				token.index,
 				cn(
@@ -89,7 +106,15 @@
 						'underline decoration-dotted decoration-foreground/30 decoration-1 underline-offset-4',
 					isPhrase &&
 						!isDifficult &&
-						'underline decoration-solid decoration-foreground/25 decoration-1 underline-offset-4'
+						'underline decoration-solid decoration-foreground/25 decoration-1 underline-offset-4',
+					// The overlay marks what the LLM no longer marks, plus every
+					// inflected repeat, so density rises. One step quieter than a
+					// difficult word is what keeps a page of collected vocabulary
+					// from reading as a page of underlines (§10.3).
+					isVocab &&
+						!isDifficult &&
+						!isPhrase &&
+						'underline decoration-dotted decoration-foreground/20 decoration-1 underline-offset-4'
 				)
 			);
 		}
@@ -264,7 +289,8 @@
 			tokens,
 			originalText,
 			difficultWordMap,
-			phraseMap
+			phraseMap,
+			vocabIndex
 		);
 
 		// Plain words (no difficult-word / phrase enrichment) are inert on click —

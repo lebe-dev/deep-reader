@@ -154,7 +154,7 @@ func TestEnrich_RequestShape(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich returned error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestEnrich_DecodesEnrichment(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	enrichment, usage, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	enrichment, usage, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestEnrich_AuthHeader(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 
 	if gotAuth != "Bearer test-key" {
 		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer test-key")
@@ -291,7 +291,7 @@ func TestEnrich_Non2xxReturnsAPIError(t *testing.T) {
 			defer srv.Close()
 
 			client := llm.New(testConfig(srv.URL))
-			_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+			_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -334,7 +334,7 @@ func TestEnrich_DecodeErrorCarriesRaw(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -366,7 +366,7 @@ func TestEnrich_DecodeErrorCarriesBodyOnEnvelope(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	var decErr *llm.DecodeError
 	if !errors.As(err, &decErr) {
 		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
@@ -393,7 +393,7 @@ func TestEnrich_ContextCancellation(t *testing.T) {
 	defer cancel()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(ctx, testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(ctx, testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
@@ -420,7 +420,7 @@ func TestEnrich_SettingsModelOverride(t *testing.T) {
 	settings.LLMModel = "gpt-4o"
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), settings, 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), settings, ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestEnrich_NoEnvFallbackWhenResolverPresent(t *testing.T) {
 	// testConfig wires the env-derived base URL/key/model to the fake server.
 	// With a resolver present but no active profile, none of it must be used.
 	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(noProviderResolver{}))
-	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1); err == nil {
+	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1}); err == nil {
 		t.Fatal("expected an error when no active profile is configured, got nil")
 	}
 	if hits != 0 {
@@ -495,7 +495,7 @@ func captureModelWithProvider(t *testing.T, settings model.Settings, providerMod
 
 	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, Model: providerModel}}
 	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(resolver))
-	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, 1); err != nil {
+	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, ports.EnrichOptions{EnrichmentVersion: 1}); err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
 	return capturedModel
@@ -559,7 +559,7 @@ func TestEnrich_PromptContainsTokens(t *testing.T) {
 
 	client := llm.New(testConfig(srv.URL))
 	settings := testSettings()
-	_, _, err := client.Enrich(context.Background(), testArticle(), settings, 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), settings, ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -681,7 +681,7 @@ func TestEnrich_FallbackToJSONObject(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	enrichment, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	enrichment, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestEnrich_FallbackOn404NoEndpoints(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	enrichment, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	enrichment, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -761,7 +761,7 @@ func TestEnrich_ForceJSONObjectSkipsSchema(t *testing.T) {
 
 	resolver := fakeResolver{provider: model.LLMProvider{BaseURL: srv.URL, Model: "m", ForceJSONObject: true}}
 	client := llm.New(testConfig(srv.URL), llm.WithProviderResolver(resolver))
-	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1); err != nil {
+	if _, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1}); err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
 	if callCount != 1 {
@@ -796,7 +796,7 @@ func TestEnrich_UsageZeroWhenAbsent(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, usage, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, usage, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
@@ -837,8 +837,8 @@ func TestEnrich_EnrichmentVersionInPrompt(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), 1)
-	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), 2)
+	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
+	_, _, _ = client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 2})
 
 	if capturedPrompts[0] == capturedPrompts[1] {
 		t.Error("system prompts for version 1 and version 2 are identical; expected them to differ")
@@ -871,7 +871,7 @@ func captureSystemPrompt(t *testing.T, settings model.Settings, version int) str
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, version); err != nil {
+	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, ports.EnrichOptions{EnrichmentVersion: version}); err != nil {
 		t.Fatalf("Enrich: %v", err)
 	}
 	return systemPrompt
@@ -945,7 +945,7 @@ func TestEnrichSpans_RestrictsToRanges(t *testing.T) {
 
 	client := llm.New(testConfig(srv.URL))
 	spans := []model.Span{{Start: 1, End: 3}}
-	enr, _, err := client.EnrichSpans(context.Background(), testArticle(), testSettings(), 1, spans)
+	enr, _, err := client.EnrichSpans(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1}, spans)
 	if err != nil {
 		t.Fatalf("EnrichSpans: %v", err)
 	}
@@ -989,7 +989,7 @@ func TestEnrich_EmptyBodyIsRetryable(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	var decErr *llm.DecodeError
 	if !errors.As(err, &decErr) {
 		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
@@ -1021,7 +1021,7 @@ func TestEnrich_EmptyCompletionIsRetryable(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	var decErr *llm.DecodeError
 	if !errors.As(err, &decErr) {
 		t.Fatalf("expected *llm.DecodeError, got %T: %v", err, err)
@@ -1051,7 +1051,7 @@ func TestEnrich_OversizedBodyIsTransient(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	var decErr *llm.DecodeError
 	if !errors.As(err, &decErr) {
 		t.Fatalf("expected *llm.DecodeError for an oversized body, got %T: %v", err, err)
@@ -1092,7 +1092,7 @@ func TestEnrich_FallbackBothLegsFailJoinsErrors(t *testing.T) {
 	defer srv.Close()
 
 	client := llm.New(testConfig(srv.URL))
-	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), 1)
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
 	if err == nil {
 		t.Fatal("expected an error when both legs fail, got nil")
 	}
@@ -1560,4 +1560,109 @@ func TestSummarize_MalformedContentIsNonTransient(t *testing.T) {
 	if decErr.RawResponse() != bad {
 		t.Errorf("RawResponse() = %q, want %q", decErr.RawResponse(), bad)
 	}
+}
+
+// ── Known-word injection (WORD-CACHE-ARCH.md §9.2) ────────────────────────────
+
+func TestSystemPromptCarriesKnownWordsInTheDefaultTemplate(t *testing.T) {
+	prompt := captureSystemPromptOpts(t, testSettings(), ports.EnrichOptions{
+		EnrichmentVersion: 1,
+		KnownTerms:        []string{"resilient", "ubiquitous"},
+	})
+
+	if !strings.Contains(prompt, "resilient, ubiquitous") {
+		t.Errorf("known terms missing from the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Do NOT include them in difficult_words") {
+		t.Errorf("skip instruction missing:\n%s", prompt)
+	}
+	// The instruction must be substituted in place, not appended twice.
+	if strings.Count(prompt, "The reader already knows the following words") != 1 {
+		t.Errorf("instruction appears more than once:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptDropsTheKnownWordsLineWhenThereAreNone(t *testing.T) {
+	prompt := captureSystemPromptOpts(t, testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
+
+	if strings.Contains(prompt, "The reader already knows") {
+		t.Errorf("an empty known-word list left a dangling instruction:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "{{known_words}}") {
+		t.Errorf("placeholder left unsubstituted:\n%s", prompt)
+	}
+}
+
+func TestCustomPromptWithoutPlaceholderStillGetsTheInstruction(t *testing.T) {
+	// Prompts customised before this feature existed have no {{known_words}}.
+	// Requiring the placeholder would have silently broken them.
+	settings := testSettings()
+	settings.EnrichmentPrompt = "Annotate the article. Return JSON."
+
+	prompt := captureSystemPromptOpts(t, settings, ports.EnrichOptions{
+		EnrichmentVersion: 1,
+		KnownTerms:        []string{"resilient"},
+	})
+
+	if !strings.HasPrefix(prompt, "Annotate the article. Return JSON.") {
+		t.Errorf("custom template was not preserved:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "resilient") {
+		t.Errorf("known terms missing from a custom prompt:\n%s", prompt)
+	}
+}
+
+func TestCustomPromptWithPlaceholderSubstitutesInPlace(t *testing.T) {
+	settings := testSettings()
+	settings.EnrichmentPrompt = "Skip these: {{known_words}}. Return JSON."
+
+	prompt := captureSystemPromptOpts(t, settings, ports.EnrichOptions{
+		EnrichmentVersion: 1,
+		KnownTerms:        []string{"resilient", "mitigate"},
+	})
+
+	if prompt != "Skip these: resilient, mitigate. Return JSON." {
+		t.Errorf("placeholder substitution wrong:\n%q", prompt)
+	}
+}
+
+func TestCustomPromptWithNoKnownTermsGetsNothingAppended(t *testing.T) {
+	settings := testSettings()
+	settings.EnrichmentPrompt = "Annotate the article. Return JSON."
+
+	prompt := captureSystemPromptOpts(t, settings, ports.EnrichOptions{EnrichmentVersion: 1})
+
+	if prompt != "Annotate the article. Return JSON." {
+		t.Errorf("something was appended to a custom prompt with no known terms:\n%q", prompt)
+	}
+}
+
+// captureSystemPromptOpts runs one Enrich against a recording stub server and
+// returns the system message it received.
+func captureSystemPromptOpts(t *testing.T, settings model.Settings, opts ports.EnrichOptions) string {
+	t.Helper()
+	var system string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "system" {
+				system = m.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"difficult_words\":[],\"phrases\":[],\"sentences\":[],\"glossary\":[]}"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	if _, _, err := client.Enrich(context.Background(), testArticle(), settings, opts); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	return system
 }

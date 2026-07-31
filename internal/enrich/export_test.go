@@ -39,10 +39,26 @@ func ExpandSpansToSentences(text string, tokens []model.Token, spans []model.Spa
 	return expandSpansToSentences(text, tokens, spans)
 }
 
-// SanitizeEnrichment exposes the unexported sanitizeEnrichment for unit tests.
+// SanitizeEnrichment exposes the unexported sanitizeEnrichment for unit tests,
+// with an empty vocabulary (nothing is filtered as already-known).
 func SanitizeEnrichment(e model.Enrichment, tokens []model.Token) model.Enrichment {
-	return sanitizeEnrichment(e, tokens, slog.Default())
+	return sanitizeEnrichment(e, tokens, knownFilter{}, slog.Default())
 }
+
+// SanitizeEnrichmentKnowing is SanitizeEnrichment with the user's collected
+// vocabulary in force, for testing the §9.3 post-filter.
+func SanitizeEnrichmentKnowing(e model.Enrichment, tokens []model.Token, entries []model.VocabEntry, targetLang string) model.Enrichment {
+	filter := knownFilter{known: buildKnownVocabulary(entries), targetLang: targetLang}
+	return sanitizeEnrichment(e, tokens, filter, slog.Default())
+}
+
+// NarrowKnownTerms exposes the prompt-narrowing step for unit tests.
+func NarrowKnownTerms(entries []model.VocabEntry, targetLang string, tokens []model.Token) []string {
+	return buildKnownVocabulary(entries).narrowForTokens(targetLang, tokens)
+}
+
+// MaxKnownTermsInPrompt exposes the per-request known-term cap.
+const MaxKnownTermsInPrompt = maxKnownTermsInPrompt
 
 // DetectBotWall exposes the unexported detectBotWall for unit tests.
 func DetectBotWall(result *ports.ExtractResult, signatures []string) string {

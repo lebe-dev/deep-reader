@@ -121,6 +121,21 @@
 				<p class="text-muted-foreground leading-relaxed">
 					{content.translationOrDefinition}
 				</p>
+				{#if content.fromVocab}
+					<!-- Marks the translation as the user's own, captured elsewhere,
+						 rather than the model's reading of THIS article (§10.4). -->
+					<span
+						class="bg-secondary text-secondary-foreground self-start rounded px-1.5 py-0.5 text-[10px] font-medium"
+					>
+						my words
+					</span>
+					{#if content.seenCount}
+						<p class="text-muted-foreground text-xs">
+							looked up {content.seenCount}
+							{content.seenCount === 1 ? 'time' : 'times'} before
+						</p>
+					{/if}
+				{/if}
 			</div>
 		{:else}
 			<div class="flex flex-col gap-2">
@@ -144,6 +159,19 @@
 					>
 						glossary
 					</span>
+				{/if}
+				{#if content.fromVocab}
+					<span
+						class="bg-secondary text-secondary-foreground self-start rounded px-1.5 py-0.5 text-[10px] font-medium"
+					>
+						my words
+					</span>
+					{#if content.seenCount}
+						<p class="text-muted-foreground text-xs">
+							looked up {content.seenCount}
+							{content.seenCount === 1 ? 'time' : 'times'} before
+						</p>
+					{/if}
 				{/if}
 			</div>
 		{/if}

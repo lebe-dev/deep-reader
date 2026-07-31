@@ -145,7 +145,7 @@ func TestStepwiseEnrichmentChunks(t *testing.T) {
 
 	cfg := testCfg(1, 1)
 	cfg.LLMChunkTokens = 4 // force several chunks for the ~18-token article
-	pool := enrich.NewPool(cfg, st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(cfg, st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 5*time.Second, func() bool {
 		return st.status("art-chunk") == model.StatusEnriched
@@ -214,7 +214,7 @@ func TestChunkTokensSettingOverridesConfig(t *testing.T) {
 	}
 
 	cfg := testCfg(1, 1) // cfg.LLMChunkTokens = 500
-	pool := enrich.NewPool(cfg, st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(cfg, st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 5*time.Second, func() bool {
 		return st.status("art-chunktokens") == model.StatusEnriched

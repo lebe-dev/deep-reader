@@ -71,6 +71,13 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	if err != nil {
 		return s.serverError(c, "markdown budget", err)
 	}
+	// The vocabulary rides this delta rather than owning a second sync loop.
+	// Tombstones are included: a removal must never be inferred from absence
+	// (WORD-CACHE-ARCH.md §7.2).
+	vocabulary, err := s.store.ListVocab(ctx, since)
+	if err != nil {
+		return s.serverError(c, "list vocab", err)
+	}
 
 	return c.JSON(model.ConfigResponse{
 		Auth:           model.AuthStatus{Initialized: true, Authenticated: true},
@@ -78,6 +85,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 		Articles:       metas,
 		Progress:       progress,
 		MarkdownBudget: budget,
+		Vocab:          vocabulary,
 		ServerInfo:     serverInfoFromConfig(s.cfg),
 		Sentry:         sentryConfigFromConfig(s.cfg),
 		ServerTime:     time.Now().UTC(),

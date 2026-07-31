@@ -149,7 +149,7 @@ func TestTopUpFillsGap(t *testing.T) {
 			Sentences:      []model.Sentence{sentence(3, 5)},
 		},
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status(id) == model.StatusEnriched
@@ -189,7 +189,7 @@ func TestTopUpNoGaps(t *testing.T) {
 	}
 
 	llm := &fakeLLM{}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status(id) == model.StatusEnriched

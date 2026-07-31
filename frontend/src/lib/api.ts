@@ -23,7 +23,10 @@ import type {
 	Settings,
 	SettingsPatch,
 	LLMProviderView,
-	LLMProviderInput
+	LLMProviderInput,
+	LookupEvent,
+	SaveLookupsRequest,
+	SaveLookupsResponse
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -322,6 +325,46 @@ export function pinArticle(id: string, pinned: boolean, signal?: AbortSignal): P
 /** `PATCH /api/settings` — update user settings (partial). */
 export function patchSettings(partial: SettingsPatch, signal?: AbortSignal): Promise<Settings> {
 	return request<Settings>('/api/settings', { method: 'PATCH', body: partial, signal });
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary — the word cache (WORD-CACHE-ARCH.md §7.1). The read side is the
+// /api/config delta; only the writes need their own calls.
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /api/lookups` — record a batch of translation lookups.
+ *
+ * Fully idempotent server-side (a repeated event id, or a repeat of the same
+ * article/kind/position, is ignored), so the caller may retry a batch freely.
+ * The returned `accepted` count is useful in tests and ignored by the sync
+ * engine.
+ */
+export async function saveLookups(
+	events: LookupEvent[],
+	signal?: AbortSignal
+): Promise<SaveLookupsResponse> {
+	const body: SaveLookupsRequest = { events };
+	const res = await request<SaveLookupsResponse>('/api/lookups', {
+		method: 'POST',
+		body,
+		signal
+	});
+	return res ?? { accepted: 0 };
+}
+
+/**
+ * `POST /api/vocab/delete` — soft-delete one vocabulary entry.
+ *
+ * The key travels in the body because it contains spaces and punctuation
+ * (phrases). Deleting an unknown key is a no-op, so this is safe to retry.
+ */
+export function deleteVocabEntry(entryKey: string, signal?: AbortSignal): Promise<void> {
+	return request<void>('/api/vocab/delete', {
+		method: 'POST',
+		body: { entry_key: entryKey },
+		signal
+	});
 }
 
 // ---------------------------------------------------------------------------

@@ -74,6 +74,13 @@ export interface Token {
 	start: number;
 	/** End byte offset (exclusive) in the UTF-8 encoded original text. */
 	end: number;
+	/**
+	 * Dictionary form of `text`, computed server-side in the fetch stage
+	 * (WORD-CACHE-ARCH.md §4). It is OMITTED when it equals the lowercased
+	 * `text` — the common case — so never read it raw: use `lemmaOf(token)`,
+	 * which applies the `lemma ?? lower(text)` fallback the encoding requires.
+	 */
+	lemma?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +254,14 @@ export interface Settings {
 	font_size: FontSize;
 	/** Reader line-spacing preset. Controls only the article-reader presentation. */
 	line_height: LineHeight;
+	/**
+	 * Use the collected vocabulary while reading (WORD-CACHE-ARCH.md §14): the
+	 * LLM skips words already looked up, and the reader hints them from the
+	 * local dictionary instead. One toggle for both halves on purpose — the
+	 * exclusion without the overlay would remove help for exactly the words the
+	 * user struggled with. Capture keeps running either way.
+	 */
+	vocab_assist: boolean;
 	updated_at: string;
 }
 
@@ -265,6 +280,7 @@ export type SettingsPatch = Partial<
 		| 'bot_wall_signatures'
 		| 'chunk_tokens'
 		| 'font_size'
+		| 'vocab_assist'
 		| 'line_height'
 	>
 >;
@@ -405,6 +421,13 @@ export interface ConfigResponse {
 	progress: Progress[];
 	/** markdown.new daily request-unit budget. */
 	markdown_budget: MarkdownBudget;
+	/**
+	 * Vocabulary aggregate rows changed at or after the cursor, tombstones
+	 * included (`deleted_at` set). Unlike `articles`, absence from this list
+	 * NEVER means deletion — removals travel as explicit tombstones
+	 * (WORD-CACHE-ARCH.md §7.2).
+	 */
+	vocab?: VocabEntry[];
 	/** Non-secret server deployment configuration. */
 	server_info: ServerInfo;
 	/** Browser Sentry config; `dsn` empty when frontend reporting is disabled. */
@@ -449,4 +472,94 @@ export interface ProgressUpdate {
 	position: number;
 	is_read: boolean;
 	updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary — the word cache (WORD-CACHE-ARCH.md §3)
+// ---------------------------------------------------------------------------
+
+/** What a lookup recorded: a single word, or a multi-token phrase. */
+export type LookupKind = 'word' | 'phrase';
+
+/**
+ * One recorded translation lookup: the user tapped a word or phrase in the
+ * reader and saw its translation. Events are append-only and deduplicated
+ * server-side by `(article_id, kind, span_start)` — one event per distinct
+ * position — so re-tapping the same word never inflates the counter.
+ */
+export interface LookupEvent {
+	/** Client-generated uuid; makes a retried delivery a no-op. */
+	id: string;
+	/** `kind:target_lang:normalized-lemma` — see `buildEntryKey`. */
+	entry_key: string;
+	kind: LookupKind;
+	article_id: string;
+	/** Denormalized snapshot: the vocabulary outlives the article. */
+	article_title: string;
+	/** Token index of the word, or the first token of the phrase. */
+	span_start: number;
+	/** Last token of the phrase; equal to `span_start` for a word. */
+	span_end: number;
+	/** Exact text as it appeared in the article. */
+	surface: string;
+	/** Resolved dictionary form the entry key was built from. */
+	lemma: string;
+	/** Translation exactly as shown in the popover. */
+	translation: string;
+	cefr_level?: string;
+	phrase_type?: string;
+	/** Covering sentence, truncated. Empty when no sentence covers the token. */
+	context: string;
+	/** Client clock, RFC3339. */
+	occurred_at: string;
+}
+
+/**
+ * The aggregate of every `LookupEvent` sharing an `entry_key` — the row the
+ * /words screen renders and the reader overlay matches against. It is derived
+ * server-side state; the local copy mirrors it (plus optimistic rows for taps
+ * that have not been flushed yet).
+ */
+export interface VocabEntry {
+	entry_key: string;
+	kind: LookupKind;
+	/** Display form: the lemma for a word, the verbatim text for a phrase. */
+	lemma: string;
+	target_lang: string;
+	/**
+	 * Normalized inflections actually observed, most recent first (capped).
+	 * Matching is by lemma; these are the out-of-vocabulary fallback and the
+	 * "встречалось как" display (§3.4).
+	 */
+	surface_forms: string[];
+	/** Distinct positions this entry was looked up at. */
+	count: number;
+	first_seen: string;
+	last_seen: string;
+	latest_translation: string;
+	latest_cefr_level?: string;
+	latest_phrase_type?: string;
+	latest_context: string;
+	latest_article_id: string;
+	latest_article_title: string;
+	/** Tombstone. Present and non-empty means the entry was deleted. */
+	deleted_at?: string;
+	/** Server clock — the delta-sync cursor field. */
+	updated_at: string;
+}
+
+/** `POST /api/lookups` request body. */
+export interface SaveLookupsRequest {
+	events: LookupEvent[];
+}
+
+/** `POST /api/lookups` response. */
+export interface SaveLookupsResponse {
+	/** Events that actually landed; duplicates are ignored, so this may be less. */
+	accepted: number;
+}
+
+/** `POST /api/vocab/delete` request body. */
+export interface DeleteVocabRequest {
+	entry_key: string;
 }

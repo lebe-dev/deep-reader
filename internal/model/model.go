@@ -220,6 +220,11 @@ type Token struct {
 	Text  string `json:"text"`
 	Start int    `json:"start"`
 	End   int    `json:"end"`
+	// Lemma is the dictionary form of Text, produced by the lemmatizer in the
+	// fetch stage (see WORD-CACHE-ARCH.md §4). It is OMITTED when it equals the
+	// lowercased Text — the common case — so adding it costs little payload.
+	// Consumers must therefore read it as `Lemma or lower(Text)`, never raw.
+	Lemma string `json:"lemma,omitempty"`
 }
 
 // Article is the full server-side record: metadata, the extracted original
@@ -271,6 +276,12 @@ type Enrichment struct {
 // translating it. An empty Source means the translation came straight from the
 // model.
 const TranslationSourceGlossary = "glossary"
+
+// TranslationSourceVocab marks a DifficultWord whose translation came from the
+// user's own collected vocabulary rather than from the model. It sits alongside
+// TranslationSourceGlossary; the reader badges it as such (WORD-CACHE-ARCH.md
+// §10.3).
+const TranslationSourceVocab = "vocab"
 
 // DifficultWord is a single token that is above the user's CEFR level, with its
 // contextual translation. TokenIndex references Article.Tokens.
@@ -376,8 +387,15 @@ type Settings struct {
 	FontSize string `json:"font_size"`
 	// LineHeight is the reader line-spacing preset (LineHeight* constants). It
 	// controls only presentation in the article reader and syncs across devices.
-	LineHeight string    `json:"line_height"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	LineHeight string `json:"line_height"`
+	// VocabAssist governs the word cache's two reading-time behaviours together
+	// (WORD-CACHE-ARCH.md §14): the LLM skips words the user has already looked
+	// up, and the reader hints those words from the local dictionary instead.
+	// They are one toggle on purpose — exclusion without the overlay would
+	// silently remove help for exactly the words the user struggled with.
+	// Capture and lemmatization are NOT gated, so re-enabling is instant.
+	VocabAssist bool      `json:"vocab_assist"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // SettingsPatch is a partial update of Settings for PATCH /api/settings. Nil
@@ -396,6 +414,7 @@ type SettingsPatch struct {
 	ChunkTokens              *int    `json:"chunk_tokens,omitempty"`
 	FontSize                 *string `json:"font_size,omitempty"`
 	LineHeight               *string `json:"line_height,omitempty"`
+	VocabAssist              *bool   `json:"vocab_assist,omitempty"`
 }
 
 // LLMProvider is a user-managed LLM connection profile (Settings > LLM,
@@ -673,7 +692,12 @@ type ConfigResponse struct {
 	Articles       []ArticleMeta  `json:"articles"`
 	Progress       []Progress     `json:"progress"`
 	MarkdownBudget MarkdownBudget `json:"markdown_budget"`
-	ServerInfo     ServerInfo     `json:"server_info"`
+	// Vocab carries the vocabulary aggregate rows changed at or after the sync
+	// cursor, tombstones included (DeletedAt set). Unlike Articles, absence from
+	// the response NEVER means deletion — removals travel as explicit tombstones
+	// (WORD-CACHE-ARCH.md §7.2).
+	Vocab      []VocabEntry `json:"vocab"`
+	ServerInfo ServerInfo   `json:"server_info"`
 	// Sentry carries the non-secret browser Sentry configuration. It is present
 	// even for unauthenticated callers so error reporting works on the /login and
 	// /setup pages; DSN is empty when frontend reporting is disabled.
@@ -760,4 +784,91 @@ type AddArticleResponse struct {
 // (ReEnrichModeTopup).
 type ReEnrichRequest struct {
 	Mode string `json:"mode"`
+}
+
+// ── Vocabulary (word cache) ───────────────────────────────────────────────────
+//
+// See WORD-CACHE-ARCH.md: every word or phrase the reader taps for a translation
+// is recorded. The event log is the truth; VocabEntry is the derived aggregate
+// the UI and the reader overlay read.
+
+// Lookup kinds.
+const (
+	LookupKindWord   = "word"
+	LookupKindPhrase = "phrase"
+)
+
+// LookupEvent is one recorded translation lookup: the user tapped a word or
+// phrase in the reader and saw its translation. Events are append-only and
+// deduplicated by (ArticleID, Kind, SpanStart) — one event per distinct
+// position — so re-tapping the same word never inflates the counter.
+type LookupEvent struct {
+	ID           string    `json:"id"`
+	EntryKey     string    `json:"entry_key"`
+	Kind         string    `json:"kind"`
+	ArticleID    string    `json:"article_id"`
+	ArticleTitle string    `json:"article_title"`
+	SpanStart    int       `json:"span_start"`
+	SpanEnd      int       `json:"span_end"`
+	Surface      string    `json:"surface"`
+	Lemma        string    `json:"lemma"`
+	Translation  string    `json:"translation"`
+	CEFRLevel    string    `json:"cefr_level,omitempty"`
+	PhraseType   string    `json:"phrase_type,omitempty"`
+	Context      string    `json:"context"`
+	OccurredAt   time.Time `json:"occurred_at"`
+}
+
+// VocabEntry is the aggregate of every LookupEvent sharing an EntryKey — the row
+// the /words screen renders and the reader overlay matches against. It is
+// derived state: the store recomputes it from lookup_events whenever events
+// land. DeletedAt is a tombstone (the entry rides the delta sync so other
+// devices learn about the removal).
+type VocabEntry struct {
+	EntryKey   string `json:"entry_key"`
+	Kind       string `json:"kind"`
+	Lemma      string `json:"lemma"`
+	TargetLang string `json:"target_lang"`
+	// SurfaceForms are the normalized inflections observed for this entry, most
+	// recent first (capped at MaxSurfaceForms). Matching is by lemma; these are
+	// the out-of-vocabulary fallback and the "seen as" display.
+	SurfaceForms       []string  `json:"surface_forms"`
+	Count              int       `json:"count"`
+	FirstSeen          time.Time `json:"first_seen"`
+	LastSeen           time.Time `json:"last_seen"`
+	LatestTranslation  string    `json:"latest_translation"`
+	LatestCEFRLevel    string    `json:"latest_cefr_level,omitempty"`
+	LatestPhraseType   string    `json:"latest_phrase_type,omitempty"`
+	LatestContext      string    `json:"latest_context"`
+	LatestArticleID    string    `json:"latest_article_id"`
+	LatestArticleTitle string    `json:"latest_article_title"`
+	DeletedAt          time.Time `json:"deleted_at,omitzero"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// MaxSurfaceForms caps how many observed inflections an aggregate retains, most
+// recent first. It bounds the row size that rides the /api/config delta.
+const MaxSurfaceForms = 10
+
+// MaxLookupBatch is the largest number of events POST /api/lookups accepts in
+// one request. Larger batches are rejected rather than truncated.
+const MaxLookupBatch = 200
+
+// SaveLookupsRequest is the POST /api/lookups body.
+type SaveLookupsRequest struct {
+	Events []LookupEvent `json:"events"`
+}
+
+// SaveLookupsResponse reports how many events actually landed — duplicates (by
+// id or by position) are silently ignored, so Accepted may be below len(Events).
+type SaveLookupsResponse struct {
+	Accepted int `json:"accepted"`
+}
+
+// DeleteVocabRequest is the POST /api/vocab/delete body. The key travels in the
+// body rather than the path because it contains spaces and arbitrary
+// punctuation (phrases), which percent-encoding into a path segment would turn
+// into a needless escaping-bug surface.
+type DeleteVocabRequest struct {
+	EntryKey string `json:"entry_key"`
 }

@@ -40,6 +40,9 @@
 		type SentenceSheetContent
 	} from '$lib/components/reader/reader-utils';
 	import { captureError } from '$lib/sentry';
+	import { captureLookup, resetCaptureSession } from '$lib/vocab/capture';
+	import { refreshVocab, vocabIndex as currentVocabIndex } from '$lib/vocab/store.svelte';
+	import { emptyVocabIndex } from '$lib/vocab/overlay';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
 	import { readerWidth, getReaderWidthRem } from '$lib/reader-width.svelte';
 	import { readerMarks } from '$lib/reader-marks.svelte';
@@ -95,6 +98,13 @@
 	// The mode of an in-flight re-enrichment, for the processing-state copy.
 	let reEnrichMode: ReEnrichMode | undefined = $state();
 
+	// Vocabulary (word cache). vocabAssist gates the reader overlay; capture runs
+	// regardless so the vocabulary keeps accumulating and re-enabling is instant
+	// (WORD-CACHE-ARCH.md §14).
+	let vocabAssist = $state(true);
+	let targetLang = $state('ru');
+	let vocabVersion = $state(0);
+
 	let meta: ArticleMeta | undefined = $state();
 	let payload: ArticlePayload | undefined = $state();
 	let progress: Progress | undefined = $state();
@@ -119,6 +129,14 @@
 	// Enrichment completeness for the header indicator. The payload is the
 	// authoritative source on this page (meta may be absent on a cold network load).
 	const coverage = $derived(payload?.enrichment_coverage ?? null);
+
+	// The overlay matcher. vocabVersion is read so a fresh capture rebuilds it;
+	// with vocab_assist off it is empty and the reader renders exactly as it did
+	// before this feature existed.
+	const readerVocabIndex = $derived.by(() => {
+		void vocabVersion;
+		return vocabAssist ? currentVocabIndex() : emptyVocabIndex();
+	});
 
 	// Model that produced the enrichment, shown in the header so the reader can
 	// tell which model they're reading. Empty until enriched.
@@ -417,6 +435,26 @@
 		if (content !== null) {
 			sentenceContent = null;
 			closeSentenceMenu();
+
+			// Record the lookup. Fire-and-forget on purpose: a capture failure must
+			// never break the popover the user is looking at. Taps on overlay words
+			// are captured too — re-encountering a known word is exactly the signal
+			// the count measures.
+			if (payload && currentId) {
+				void captureLookup({
+					articleId: currentId,
+					articleTitle: meta?.title ?? '',
+					content,
+					tokens: payload.tokens,
+					originalText: payload.original_text,
+					enrichment,
+					targetLang
+				}).then((event) => {
+					// Refresh the shared snapshot so the word's other occurrences in
+					// this article light up at once.
+					if (event) void refreshVocab().then(() => vocabVersion++);
+				});
+			}
 		}
 		wordContent = content;
 		wordAnchor = anchor;
@@ -492,6 +530,10 @@
 		currentId = id;
 		stopPolling();
 		reEnrichMode = undefined;
+		// Per-page capture dedup: the same position in a NEW article is a new
+		// occurrence, so the set must not leak across articles.
+		resetCaptureSession();
+		void refreshVocab().then(() => vocabVersion++);
 		loadArticle(id).catch(console.error);
 	});
 
@@ -502,6 +544,11 @@
 			next(state) {
 				if (state?.settings?.font_size) fontSize = state.settings.font_size;
 				if (state?.settings?.line_height) lineHeight = state.settings.line_height;
+				// vocab_assist gates the overlay AND the LLM exclusion together; a
+				// server that predates the field sends undefined, which reads as
+				// the documented default (on).
+				vocabAssist = state?.settings?.vocab_assist ?? true;
+				if (state?.settings?.target_language) targetLang = state.settings.target_language;
 			},
 			error(err) {
 				console.error('[reader] sync_state liveQuery error', err);
@@ -763,6 +810,7 @@
 				{enrichment}
 				format={payload.content_format}
 				initialPosition={progress?.position ?? 0}
+				vocabIndex={readerVocabIndex}
 				onProgress={handleProgress}
 				onWordClick={handleWordClick}
 				onSentenceMenu={handleSentenceMenu}

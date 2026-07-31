@@ -23,6 +23,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeStore struct {
+	// knownVocab is what ListKnownVocab returns: the user's collected
+	// vocabulary that narrows the prompt and drives the post-filter (§9).
+	knownVocab    []model.VocabEntry
+	knownVocabErr error
+
 	mu       sync.Mutex
 	articles map[string]*model.Article
 	// enrichments stores the last enrichment saved per article.
@@ -493,14 +498,18 @@ type fakeLLM struct {
 	// spanFunc, when set, computes the EnrichSpans result from the requested
 	// spans (used by the step-wise multi-chunk test).
 	spanFunc func([]model.Span) *model.Enrichment
+	// lastOpts records the options of the most recent call, so tests can assert
+	// what known-term list the prompt carried (WORD-CACHE-ARCH.md §9.2).
+	lastOpts ports.EnrichOptions
 }
 
-func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Settings, _ int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Settings, opts ports.EnrichOptions, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callCount++
 	f.spanCalls++
 	f.lastSpans = spans
+	f.lastOpts = opts
 	if f.onEnrich != nil {
 		f.onEnrich()
 	}
@@ -524,10 +533,11 @@ func (f *fakeLLM) spanCallCount() int {
 	return f.spanCalls
 }
 
-func (f *fakeLLM) Enrich(_ context.Context, _ *model.Article, _ model.Settings, _ int) (*model.Enrichment, ports.Usage, error) {
+func (f *fakeLLM) Enrich(_ context.Context, _ *model.Article, _ model.Settings, opts ports.EnrichOptions) (*model.Enrichment, ports.Usage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callCount++
+	f.lastOpts = opts
 	if f.onEnrich != nil {
 		f.onEnrich()
 	}
@@ -715,7 +725,7 @@ func TestSuccess(t *testing.T) {
 	llm := &fakeLLM{
 		result: goodEnrichment(5),
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-1") == model.StatusEnriched
@@ -743,7 +753,7 @@ func TestProgressStagesReported(t *testing.T) {
 	article := makeArticle("article-stages", 5)
 	st := newFakeStore(article)
 	llm := &fakeLLM{result: goodEnrichment(5)}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-stages") == model.StatusEnriched
@@ -796,7 +806,7 @@ func TestTransientErrorRetriesThenSucceeds(t *testing.T) {
 		failErr: &fakeError{msg: "rate limit", retryable: true},
 		result:  goodEnrichment(3),
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-2") == model.StatusEnriched
@@ -819,7 +829,7 @@ func TestPermanentErrorMarksFailed(t *testing.T) {
 		failN:   100, // always fail
 		failErr: &fakeError{msg: "bad request", retryable: false},
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-3") == model.StatusEnrichFailed
@@ -847,7 +857,7 @@ func TestDecodeErrorPersistsRawResponse(t *testing.T) {
 		failN:   100,
 		failErr: &llm.DecodeError{Raw: raw, Err: errors.New("llm: unmarshal enrichment content: unexpected end of JSON input")},
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, client)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, client, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-raw") == model.StatusEnrichFailed
@@ -872,7 +882,7 @@ func TestExhaustedRetriesMarksFailed(t *testing.T) {
 		failErr: &fakeError{msg: "server error", retryable: true},
 		result:  goodEnrichment(3),
 	}
-	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, maxRetries), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-4") == model.StatusEnrichFailed
@@ -909,7 +919,7 @@ func TestInvalidIndicesDropped(t *testing.T) {
 			},
 		},
 	}
-	pool := enrich.NewPool(testCfg(1, 2), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 2), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-5") == model.StatusEnriched
@@ -943,7 +953,7 @@ func TestPhraseBoundsDropped(t *testing.T) {
 			},
 		},
 	}
-	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-6") == model.StatusEnriched
@@ -972,7 +982,7 @@ func TestSentenceBoundsDropped(t *testing.T) {
 			},
 		},
 	}
-	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-7") == model.StatusEnriched
@@ -1006,7 +1016,7 @@ func TestPhraseTextMismatchDropped(t *testing.T) {
 			},
 		},
 	}
-	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 1), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 10*time.Second, func() bool {
 		return st.status("article-phrasetext") == model.StatusEnriched
@@ -1033,7 +1043,7 @@ func TestArticleDeletedDuringEnrichment(t *testing.T) {
 		// SaveEnrichment hits a missing parent row (FK / not found).
 		onEnrich: func() { _ = st.DeleteArticle(context.Background(), "article-deleted") },
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return llm.calls() >= 1 && !st.exists("article-deleted")
@@ -1067,7 +1077,7 @@ func TestNotifyWakesWorker(t *testing.T) {
 	// Start with an empty store.
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, &fakeExtractor{}, llm, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1108,7 +1118,7 @@ func TestNotifyWakesWorker(t *testing.T) {
 func TestContextCancellationStopsWorkers(t *testing.T) {
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(2, 3), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(2, 3), st, &fakeExtractor{}, llm, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -1131,7 +1141,7 @@ func TestContextCancellationStopsWorkers(t *testing.T) {
 func TestNotifyIsNonBlocking(t *testing.T) {
 	st := newFakeStore()
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 0), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 0), st, &fakeExtractor{}, llm, nil)
 
 	// Should not block even with many calls.
 	done := make(chan struct{})
@@ -1353,7 +1363,7 @@ func TestFetchThenEnrich(t *testing.T) {
 	st := newFakeStore(queuedArticle("article-fetch", "https://example.com/a"))
 	ex := &fakeExtractor{}
 	llm := &fakeLLM{result: goodEnrichmentNoPhrase(2)}
-	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-fetch") == model.StatusEnriched
@@ -1384,7 +1394,7 @@ func TestFetchDecodesHTMLEntities(t *testing.T) {
 		Lang:         "en",
 	}}
 	llm := &fakeLLM{result: &model.Enrichment{}}
-	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-entities") == model.StatusEnriched
@@ -1417,7 +1427,7 @@ func TestFetchNormalizesBeforeTokenizing(t *testing.T) {
 		// Simulate the model returning only the article sentence.
 		normalizeFunc: func(string) string { return cleaned },
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-normalize") == model.StatusEnriched
@@ -1450,7 +1460,7 @@ func TestFetchNormalizeFailureKeepsOriginal(t *testing.T) {
 		result:       &model.Enrichment{},
 		normalizeErr: &fakeError{msg: "normalize boom", retryable: false},
 	}
-	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-normfail") == model.StatusEnriched
@@ -1469,7 +1479,7 @@ func TestFetchFailedMarksFetchFailed(t *testing.T) {
 	st := newFakeStore(queuedArticle("article-badfetch", "https://example.com/a"))
 	ex := &fakeExtractor{err: &fakeError{msg: "blocked host", retryable: false}}
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-badfetch") == model.StatusFetchFailed
@@ -1498,7 +1508,7 @@ func TestFetchContextCanceledNotMarkedFailed(t *testing.T) {
 	st := newFakeStore(queuedArticle("article-fetchcancel", "https://example.com/a"))
 	ex := &fakeExtractor{err: context.Canceled}
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm, nil)
 
 	// Wait until the worker has run the extract at least once, then assert it
 	// never recorded a failed status.
@@ -1537,7 +1547,7 @@ func TestTopUpContextCanceledNotMarkedFailed(t *testing.T) {
 		failN:   100, // always fail
 		failErr: context.Canceled,
 	}
-	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, &fakeExtractor{}, llm, nil)
 
 	runPool(t, pool, 2*time.Second, func() bool {
 		return llm.spanCallCount() >= 1
@@ -1647,7 +1657,7 @@ func TestBotWallMarksBlocked(t *testing.T) {
 		Lang:         "en",
 	}}
 	llm := &fakeLLM{result: goodEnrichment(2)}
-	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 5), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-captcha") == model.StatusBlocked
@@ -1685,7 +1695,7 @@ func TestRecoversInflightStatuses(t *testing.T) {
 	// world" vs. canned "word word"), so a single phrase text could not match
 	// both. Phrase text validation is covered by TestPhraseTextMismatchDropped.
 	llm := &fakeLLM{result: goodEnrichmentNoPhrase(2)}
-	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm)
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
 
 	ok := runPool(t, pool, 3*time.Second, func() bool {
 		return st.status("article-stuck-fetch") == model.StatusEnriched &&
@@ -1695,4 +1705,34 @@ func TestRecoversInflightStatuses(t *testing.T) {
 		t.Fatalf("expected both stuck articles enriched, got fetch=%q enrich=%q",
 			st.status("article-stuck-fetch"), st.status("article-stuck-enrich"))
 	}
+}
+
+// ── Vocabulary (word cache) stubs ─────────────────────────────────────────────
+
+func (f *fakeStore) SaveLookups(_ context.Context, _ []model.LookupEvent) (int, error) {
+	return 0, nil
+}
+func (f *fakeStore) ListVocab(_ context.Context, _ time.Time) ([]model.VocabEntry, error) {
+	return nil, nil
+}
+func (f *fakeStore) DeleteVocabEntry(_ context.Context, _ string) error  { return nil }
+func (f *fakeStore) PruneVocabTombstones(_ context.Context) (int, error) { return 0, nil }
+func (f *fakeStore) ListArticlesForLemmaBackfill(_ context.Context, _, _ int) ([]model.Article, error) {
+	return nil, nil
+}
+func (f *fakeStore) SaveTokenLemmas(_ context.Context, _ string, _ []model.Token, _ int) error {
+	return nil
+}
+
+// ListKnownVocab returns the live aggregates the enrichment narrowing and
+// post-filter consume; tests set knownVocab to steer them.
+func (f *fakeStore) ListKnownVocab(_ context.Context) ([]model.VocabEntry, error) {
+	return f.knownVocab, f.knownVocabErr
+}
+
+// lastEnrichOptions returns the options passed to the most recent LLM call.
+func (f *fakeLLM) lastEnrichOptions() ports.EnrichOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastOpts
 }

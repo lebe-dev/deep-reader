@@ -13,6 +13,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Separator } from '$lib/components/ui/separator';
+	import { Switch } from '$lib/components/ui/switch';
 	import PromptEditor from '$lib/components/settings/PromptEditor.svelte';
 	import { db, getSyncState, SYNC_STATE_ID } from '$lib/db';
 	import { enqueueSettings } from '$lib/sync/engine';
@@ -74,7 +75,11 @@
 
 	type PatchableField = Pick<
 		Settings,
-		'cefr_level' | 'min_difficulty_to_highlight' | 'markdown_warn_threshold' | 'bot_wall_signatures'
+		| 'cefr_level'
+		| 'min_difficulty_to_highlight'
+		| 'markdown_warn_threshold'
+		| 'bot_wall_signatures'
+		| 'vocab_assist'
 	>;
 
 	async function patchField(patch: Partial<PatchableField>) {
@@ -102,6 +107,11 @@
 	function handleMinDifficultyChange(value: string | undefined) {
 		if (!value || !settings) return;
 		patchField({ min_difficulty_to_highlight: value as CefrLevel });
+	}
+
+	function handleVocabAssistChange(checked: boolean) {
+		if (!settings) return;
+		patchField({ vocab_assist: checked });
 	}
 
 	function handleWarnThresholdChange(raw: string) {
@@ -195,6 +205,26 @@
 				<p class="text-muted-foreground text-xs">
 					Usually your CEFR level + 1. Words at or below this level are shown without markup.
 				</p>
+			</div>
+
+			<!-- Use my vocabulary (WORD-CACHE-ARCH.md §14). One toggle governs the
+				 LLM exclusion AND the reader overlay together, on purpose:
+				 exclusion without the overlay would silently remove help for
+				 exactly the words the user has struggled with. -->
+			<div class="flex items-start justify-between gap-4">
+				<div class="grid gap-0.5">
+					<Label for="vocab-assist-switch">Use my vocabulary</Label>
+					<p class="text-muted-foreground text-xs">
+						The LLM skips words you have already looked up; the reader hints them from your own
+						vocabulary instead.
+					</p>
+				</div>
+				<Switch
+					id="vocab-assist-switch"
+					checked={settings.vocab_assist ?? true}
+					onCheckedChange={handleVocabAssistChange}
+					aria-label="Use my vocabulary"
+				/>
 			</div>
 
 			<!-- markdown.new low-budget warning threshold -->

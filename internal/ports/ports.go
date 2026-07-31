@@ -43,21 +43,29 @@
 //
 // Ingestion (package internal/ingest):
 //
-//	func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker) *ingest.Ingestor
+//	func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker, lem ports.Lemmatizer) *ingest.Ingestor
 //	    // *ingest.Ingestor implements ports.Ingestor.
 //	    // Add: normalize + dedup by URL hash, persist as queued, then
 //	    // worker.Notify(). Retry: store.RetryArticle(id) then worker.Notify().
 //
 // Enrichment worker (package internal/enrich):
 //
-//	func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient) *enrich.Pool
+//	func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient, lem ports.Lemmatizer) *enrich.Pool
 //	    // *enrich.Pool implements ports.EnrichmentWorker.
 //	    // Start(ctx) launches cfg.LLMMaxConcurrent workers that drain
 //	    // store.ListWork; Notify() wakes them. Per article it runs the fetch
-//	    // stage (ex.Extract → tokenize → store.SaveContent) then the enrich
+//	    // stage (ex.Extract → tokenize → lemmatize → store.SaveContent) then the enrich
 //	    // stage (client.Enrich → store.SaveEnrichment). On terminal failure it
 //	    // SetStatus(fetch_failed|enrich_failed, err). Retries with backoff up to
 //	    // cfg.LLMMaxRetries.
+//
+// Lemmatizer (package internal/lemma):
+//
+//	func New() (*lemma.Lemmatizer, error)
+//	    // *lemma.Lemmatizer implements ports.Lemmatizer.
+//	    // Wraps golem v4 + its embedded English dictionary (pure Go, no cgo).
+//	    // Loads the dictionary once; safe for concurrent use afterwards.
+//	    // Also provide: RunBackfill(ctx, store, log) for the startup repair pass.
 //
 // Tokenizer (package internal/tokenize):
 //
@@ -281,27 +289,87 @@ type Store interface {
 	// (unchanged when allowed is false).
 	TryConsumeMarkdownUnits(ctx context.Context, cost, dailyLimit int) (allowed bool, usedAfter int, err error)
 
+	// SaveLookups records translation-lookup events and recomputes the affected
+	// vocabulary aggregates in one transaction. It is idempotent: an event whose
+	// id — or whose (ArticleID, Kind, SpanStart) position — is already stored is
+	// ignored. It returns how many events actually landed. Recording an event for
+	// a previously deleted entry revives it (clears the tombstone).
+	SaveLookups(ctx context.Context, events []model.LookupEvent) (accepted int, err error)
+
+	// ListVocab returns vocabulary aggregates updated at or after `since`,
+	// tombstones included so clients can apply deletions. Pass the zero time for
+	// everything.
+	ListVocab(ctx context.Context, since time.Time) ([]model.VocabEntry, error)
+
+	// ListKnownVocab returns the live (non-tombstoned) aggregates used to steer
+	// enrichment: the terms the LLM should skip and the reader should hint from
+	// the dictionary. Kept separate from ListVocab so callers never filter
+	// tombstones.
+	ListKnownVocab(ctx context.Context) ([]model.VocabEntry, error)
+
+	// DeleteVocabEntry soft-deletes the aggregate for entryKey by stamping
+	// DeletedAt and bumping UpdatedAt, so the removal rides the next delta sync.
+	// The underlying lookup_events are retained (the aggregate is rebuildable and
+	// a later lookup revives the entry). It is a no-op for an unknown key.
+	DeleteVocabEntry(ctx context.Context, entryKey string) error
+
+	// PruneVocabTombstones deletes soft-deleted vocabulary entries older than the
+	// retention window and reports how many rows it removed. It runs at startup.
+	PruneVocabTombstones(ctx context.Context) (int, error)
+
+	// ListArticlesForLemmaBackfill returns up to `limit` articles whose tokens
+	// were annotated by an older lemmatizer generation (lemma_version < version),
+	// oldest first, for the startup backfill in WORD-CACHE-ARCH.md §4.5.
+	ListArticlesForLemmaBackfill(ctx context.Context, version, limit int) ([]model.Article, error)
+
+	// SaveTokenLemmas overwrites an article's stored tokens with `tokens` and
+	// stamps lemma_version, bumping UpdatedAt so clients re-fetch the payload.
+	// `tokens` MUST be the existing slice with Lemma filled in — same length,
+	// same indices, same offsets — because every enrichment reference indexes
+	// into it.
+	SaveTokenLemmas(ctx context.Context, id string, tokens []model.Token, version int) error
+
 	// RefundMarkdownUnits returns cost previously-reserved units to the current
 	// day's budget (e.g. when a markdown.new call ultimately failed and the work
 	// fell back to local extraction). It never drives the counter below zero.
 	RefundMarkdownUnits(ctx context.Context, cost int) error
 }
 
+// Lemmatizer maps an inflected English word form to its dictionary lemma. It
+// returns the input unchanged (lowercased) when the form is unknown, so callers
+// never have to special-case a miss. Implementations must be safe for
+// concurrent use — the enrichment pool calls it from every worker.
+//
+// It is what makes the collected vocabulary behave like vocabulary rather than
+// like a list of strings: see WORD-CACHE-ARCH.md §4.
+//
+// Concrete constructor: lemma.New() (*lemma.Lemmatizer, error).
+type Lemmatizer interface {
+	// Lemma returns the dictionary form of word, lowercased.
+	Lemma(word string) string
+
+	// Annotate fills Token.Lemma in place and returns the same slice, leaving
+	// the field empty whenever the lemma equals the lowercased text. It never
+	// re-tokenizes: token count, indices and byte offsets are preserved exactly,
+	// because every enrichment reference indexes into this slice.
+	Annotate(tokens []model.Token) []model.Token
+}
+
 // LLMClient is the boundary to the OpenAI-compatible provider. Concrete
 // constructor: llm.New(cfg) *llm.Client.
 type LLMClient interface {
 	// Enrich performs a single enrichment call for the given article at the
-	// supplied settings and enrichment version, returning the validated
-	// enrichment payload and provider usage. It performs one attempt; retry and
-	// backoff are the caller's (enrich.Pool's) responsibility.
-	Enrich(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int) (*model.Enrichment, Usage, error)
+	// supplied settings and options, returning the validated enrichment payload
+	// and provider usage. It performs one attempt; retry and backoff are the
+	// caller's (enrich.Pool's) responsibility.
+	Enrich(ctx context.Context, a *model.Article, settings model.Settings, opts EnrichOptions) (*model.Enrichment, Usage, error)
 
 	// EnrichSpans performs a single incremental ("top up") enrichment call: it
 	// annotates only the supplied token spans (the ranges left uncovered by the
 	// current sentence translations), leaving the rest of the article untouched.
 	// The caller merges the returned partial enrichment into the existing one.
 	// Like Enrich, it performs exactly one attempt.
-	EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, Usage, error)
+	EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, opts EnrichOptions, spans []model.Span) (*model.Enrichment, Usage, error)
 
 	// Summarize produces a short abstract of the article in the user's target
 	// language. It is the first step of the step-wise enrichment; the resulting
@@ -328,6 +396,23 @@ type LLMClient interface {
 // its env-derived defaults.
 type LLMProviderResolver interface {
 	GetActiveLLMProvider(ctx context.Context) (model.LLMProvider, error)
+}
+
+// EnrichOptions carries the per-request enrichment parameters that are not part
+// of Settings. It replaced a bare enrichmentVersion int so that future
+// per-request steering needs no further contract break.
+type EnrichOptions struct {
+	// EnrichmentVersion is substituted into the prompt template so prompt
+	// changes can be traced by version number.
+	EnrichmentVersion int
+	// KnownTerms are the user's already-collected lemmas that the model is told
+	// to skip (WORD-CACHE-ARCH.md §9). The caller has ALREADY narrowed it to
+	// terms occurring in the tokens being sent, and capped it — the client must
+	// not re-filter. It is empty when vocabulary-aware enrichment is off.
+	//
+	// It is a hint only: the authoritative filter is the Go post-filter in
+	// enrich.sanitizeEnrichment, which runs on whatever the model answers.
+	KnownTerms []string
 }
 
 // Usage is the provider token-accounting for a single LLM call, logged for cost
@@ -376,7 +461,7 @@ type ContentUpdate struct {
 }
 
 // Ingestor orchestrates the ingestion pipeline. Concrete constructor:
-// ingest.New(cfg, store, worker) *ingest.Ingestor.
+// ingest.New(cfg, store, worker, lemmatizer) *ingest.Ingestor.
 type Ingestor interface {
 	// Add ingests rawURL: normalize, dedup, persist as queued, notify the
 	// worker. Fetch and enrichment happen asynchronously in the worker. On a
@@ -402,7 +487,7 @@ type Ingestor interface {
 }
 
 // EnrichmentWorker is the async enrichment worker pool. Concrete constructor:
-// enrich.NewPool(cfg, store, llm) *enrich.Pool.
+// enrich.NewPool(cfg, store, extractor, llm, lemmatizer) *enrich.Pool.
 type EnrichmentWorker interface {
 	// Start launches the worker pool and blocks until ctx is cancelled (run it
 	// in its own goroutine). It drains pending articles and reacts to Notify.

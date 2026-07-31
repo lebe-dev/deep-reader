@@ -2,6 +2,7 @@
 // Named exports only (project convention).
 
 import type { DifficultWord, Enrichment, GlossaryItem, Phrase, Sentence, Token } from '$lib/types';
+import { emptyVocabIndex, matchPhraseAt, matchWord, type VocabIndex } from '$lib/vocab/overlay';
 
 // ---------------------------------------------------------------------------
 // Enrichment normalisation
@@ -293,12 +294,22 @@ export function findGlossaryItem(
 
 export interface WordPopoverContent {
 	kind: 'word';
+	/**
+	 * Token index of the tapped word — the occurrence identity capture needs
+	 * (WORD-CACHE-ARCH.md §5.1). Without it the caller cannot say WHERE the
+	 * lookup happened, and the one-occurrence-per-position rule collapses.
+	 */
+	tokenIndex: number;
 	original: string;
 	translation: string;
 	lemma: string;
 	cefrLevel: string;
 	/** True when the translation was recovered from the glossary. */
 	fromGlossary: boolean;
+	/** True when this content came from the vocabulary overlay (§10). */
+	fromVocab?: boolean;
+	/** Times the user has looked this entry up before (overlay only). */
+	seenCount?: number;
 }
 
 export interface PhrasePopoverContent {
@@ -309,6 +320,10 @@ export interface PhrasePopoverContent {
 	/** token range for highlighting */
 	startIndex: number;
 	endIndex: number;
+	/** True when this content came from the vocabulary overlay (§10). */
+	fromVocab?: boolean;
+	/** Times the user has looked this entry up before (overlay only). */
+	seenCount?: number;
 }
 
 export interface SentenceSheetContent {
@@ -339,8 +354,14 @@ export function resolveClickContent(
 	tokens: Token[],
 	originalText: string,
 	difficultWordMap: DifficultWordMap,
-	phraseMap: PhraseMap
+	phraseMap: PhraseMap,
+	vocabIndex: VocabIndex = emptyVocabIndex()
 ): PopoverContent | null {
+	// Resolution order (WORD-CACHE-ARCH.md §10.1):
+	//   phrase (enrichment) > difficult word (enrichment) > vocab phrase > vocab word
+	// Enrichment always wins because its translation is contextual to THIS
+	// article, whereas a vocabulary translation was captured somewhere else.
+
 	// Phrase takes priority.
 	const phrase = phraseMap.get(tokenIndex);
 	if (phrase) {
@@ -360,11 +381,46 @@ export function resolveClickContent(
 		const token = tokens[tokenIndex];
 		return {
 			kind: 'word',
+			tokenIndex,
 			original: token?.text ?? '',
 			translation: dw.translation,
 			lemma: dw.lemma,
 			cefrLevel: dw.cefr_level,
 			fromGlossary: dw.source === 'glossary'
+		};
+	}
+
+	// The vocabulary overlay: words and phrases the LLM no longer annotates
+	// because the user has already looked them up.
+	const vocabPhrase = matchPhraseAt(vocabIndex, tokens, tokenIndex);
+	if (vocabPhrase) {
+		return {
+			kind: 'phrase',
+			original: sliceText(tokens, vocabPhrase.startIndex, vocabPhrase.endIndex, originalText),
+			phraseType: vocabPhrase.entry.latest_phrase_type ?? '',
+			translationOrDefinition: vocabPhrase.entry.latest_translation,
+			startIndex: vocabPhrase.startIndex,
+			endIndex: vocabPhrase.endIndex,
+			fromVocab: true,
+			seenCount: vocabPhrase.entry.count
+		};
+	}
+
+	const token = tokens[tokenIndex];
+	const vocabWord = token ? matchWord(vocabIndex, token) : undefined;
+	if (vocabWord) {
+		return {
+			kind: 'word',
+			tokenIndex,
+			original: token?.text ?? '',
+			translation: vocabWord.latest_translation,
+			// Show the stored lemma so a matched inflection is explained; the
+			// reader already mutes it when it differs from the surface form.
+			lemma: vocabWord.lemma,
+			cefrLevel: vocabWord.latest_cefr_level ?? '',
+			fromGlossary: false,
+			fromVocab: true,
+			seenCount: vocabWord.count
 		};
 	}
 

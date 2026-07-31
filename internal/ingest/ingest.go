@@ -25,6 +25,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"deep-reader/internal/config"
+	"deep-reader/internal/lemma"
 	"deep-reader/internal/markdown"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
@@ -36,14 +37,19 @@ type Ingestor struct {
 	cfg    *config.Config
 	store  ports.Store
 	worker ports.EnrichmentWorker
+	// lem annotates the pasted text's tokens with dictionary lemmas, exactly as
+	// the fetch stage does for extracted articles (WORD-CACHE-ARCH.md §4.3). A
+	// nil lemmatizer disables annotation.
+	lem ports.Lemmatizer
 }
 
 // New constructs an Ingestor. All arguments are required and must be non-nil.
-func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker) *Ingestor {
+func New(cfg *config.Config, st ports.Store, worker ports.EnrichmentWorker, lem ports.Lemmatizer) *Ingestor {
 	return &Ingestor{
 		cfg:    cfg,
 		store:  st,
 		worker: worker,
+		lem:    lem,
 	}
 }
 
@@ -195,7 +201,7 @@ func (ing *Ingestor) AddText(ctx context.Context, title, sourceURL, text string)
 		Status:            model.StatusFetched,
 		OriginalText:      text,
 		ContentFormat:     markdown.DetectFormat(text),
-		Tokens:            tokenize.Tokenize(text),
+		Tokens:            lemma.Apply(ing.lem, tokenize.Tokenize(text)),
 		EnrichmentVersion: ing.cfg.EnrichmentVersion,
 		CreatedAt:         now,
 		UpdatedAt:         now,

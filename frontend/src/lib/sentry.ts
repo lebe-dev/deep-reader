@@ -31,7 +31,8 @@ export type SentryArea =
 	| 'bootstrap'
 	| 'auth'
 	| 'ui'
-	| 'kv';
+	| 'kv'
+	| 'vocab';
 
 /**
  * The event type `beforeSend` receives, derived straight from the installed

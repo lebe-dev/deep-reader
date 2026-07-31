@@ -21,6 +21,7 @@ import (
 	"deep-reader/internal/enrich"
 	"deep-reader/internal/extract"
 	"deep-reader/internal/ingest"
+	"deep-reader/internal/lemma"
 	"deep-reader/internal/llm"
 	"deep-reader/internal/markdown"
 	"deep-reader/internal/obs"
@@ -112,8 +113,32 @@ func run() error {
 		)
 	}
 
-	pool := enrich.NewPool(cfg, st, extractor, llmClient)
-	ingestor := ingest.New(cfg, st, pool)
+	// The lemmatizer annotates tokens with dictionary lemmas in the fetch stage,
+	// which is what lets the vocabulary cache match a collected word in any
+	// inflection (WORD-CACHE-ARCH.md §4). Loading its dictionary is the only
+	// failure mode; it is not worth aborting the server over, so a failure logs
+	// and leaves the pipeline running without lemmas.
+	var lemmatizer ports.Lemmatizer
+	if lem, lerr := lemma.New(); lerr != nil {
+		log.Error("lemmatizer unavailable, tokens will carry no lemmas", slog.Any("error", lerr))
+	} else {
+		lemmatizer = lem
+		// Articles ingested before this feature have lemma-less tokens. Repair
+		// them in the background: batched, rate-limited and resumable, so it
+		// never starves the enrichment workers (WORD-CACHE-ARCH.md §4.5).
+		go lem.RunBackfill(rootCtx, st, log)
+	}
+
+	// Drop vocabulary tombstones past their retention window (§11.3). Best
+	// effort: a failure here must not keep the server from starting.
+	if pruned, perr := st.PruneVocabTombstones(rootCtx); perr != nil {
+		log.Warn("vocabulary tombstone prune failed", slog.Any("error", perr))
+	} else if pruned > 0 {
+		log.Info("vocabulary tombstones pruned", slog.Int("count", pruned))
+	}
+
+	pool := enrich.NewPool(cfg, st, extractor, llmClient, lemmatizer)
+	ingestor := ingest.New(cfg, st, pool, lemmatizer)
 	log.Debug("components initialised: llm client, extractor, enrichment pool, ingestor")
 
 	// Start the worker pool in its own goroutine; it blocks until rootCtx is

@@ -9,7 +9,7 @@
 // `$lib/auth/store.svelte` — plus `$lib/sentry` to assert telemetry.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ArticleMeta, ArticlePayload, Progress, Settings } from '$lib/types';
+import type { ArticleMeta, ArticlePayload, Progress, Settings, VocabEntry } from '$lib/types';
 import type { OutboxEntry, OutboxKind, SyncState } from '$lib/db';
 
 // ---------------------------------------------------------------------------
@@ -67,6 +67,7 @@ const h = vi.hoisted(() => {
 		progress: new FakeTable<Progress>('article_id'),
 		outbox: new FakeTable<OutboxEntry>('id'),
 		sync_state: new FakeTable<SyncState>('id'),
+		vocab_entries: new FakeTable<VocabEntry>('entry_key'),
 		outboxSeq: 0
 	};
 
@@ -76,6 +77,7 @@ const h = vi.hoisted(() => {
 		state.progress = new FakeTable<Progress>('article_id');
 		state.outbox = new FakeTable<OutboxEntry>('id');
 		state.sync_state = new FakeTable<SyncState>('id');
+		state.vocab_entries = new FakeTable<VocabEntry>('entry_key');
 		state.outboxSeq = 0;
 	}
 
@@ -95,6 +97,9 @@ const h = vi.hoisted(() => {
 		},
 		get sync_state() {
 			return state.sync_state;
+		},
+		get vocab_entries() {
+			return state.vocab_entries;
 		},
 		// transaction(mode, tables, fn) — run fn immediately (no real isolation).
 		transaction: async (_mode: string, _tables: unknown, fn: () => Promise<void>) => fn()
@@ -133,6 +138,7 @@ let articles_payload: (typeof state)['articles_payload'];
 let progress: (typeof state)['progress'];
 let outbox: (typeof state)['outbox'];
 let sync_state: (typeof state)['sync_state'];
+let vocab_entries: (typeof state)['vocab_entries'];
 
 vi.mock('$lib/db', () => ({
 	db: h.db,
@@ -178,6 +184,8 @@ const m = vi.hoisted(() => {
 		apiPinArticle: vi.fn(),
 		putProgress: vi.fn(),
 		patchSettings: vi.fn(),
+		saveLookups: vi.fn(),
+		deleteVocabEntry: vi.fn(),
 		clearSession: vi.fn(),
 		captureError: vi.fn(),
 		addSyncBreadcrumb: vi.fn()
@@ -197,6 +205,8 @@ const {
 	apiPinArticle,
 	putProgress,
 	patchSettings,
+	saveLookups,
+	deleteVocabEntry,
 	clearSession,
 	captureError,
 	addSyncBreadcrumb
@@ -214,7 +224,9 @@ vi.mock('$lib/api', () => ({
 	reEnrichArticle: m.apiReEnrichArticle,
 	pinArticle: m.apiPinArticle,
 	putProgress: m.putProgress,
-	patchSettings: m.patchSettings
+	patchSettings: m.patchSettings,
+	saveLookups: m.saveLookups,
+	deleteVocabEntry: m.deleteVocabEntry
 }));
 
 vi.mock('$lib/auth/store.svelte', () => ({ clearSession: m.clearSession }));
@@ -294,6 +306,7 @@ beforeEach(() => {
 	progress = state.progress;
 	outbox = state.outbox;
 	sync_state = state.sync_state;
+	vocab_entries = state.vocab_entries;
 	vi.clearAllMocks();
 	// Re-prime default resolved values cleared by clearAllMocks.
 	apiAddArticle.mockResolvedValue({ id: 'x', status: 'queued' });
@@ -878,5 +891,181 @@ describe('enqueue helpers — online trigger', () => {
 
 		expect(apiAddArticle).toHaveBeenCalledWith('https://example.com');
 		expect(getConfig).toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Vocabulary — the word cache (WORD-CACHE-ARCH.md §7)
+// ---------------------------------------------------------------------------
+
+/** A live vocabulary aggregate as the server would send it. */
+function vocabEntry(over: Partial<VocabEntry> = {}): VocabEntry {
+	return {
+		entry_key: 'word:ru:resilient',
+		kind: 'word',
+		lemma: 'resilient',
+		target_lang: 'ru',
+		surface_forms: ['resilient'],
+		count: 3,
+		first_seen: '2026-06-01T00:00:00Z',
+		last_seen: '2026-06-10T00:00:00Z',
+		latest_translation: 'устойчивый',
+		latest_context: 'proved remarkably resilient',
+		latest_article_id: 'a1',
+		latest_article_title: 'The Economist',
+		updated_at: '2026-06-10T12:00:00Z',
+		...over
+	};
+}
+
+/** A queued lookup outbox entry. */
+function lookupEntry(id: number, entryKey = 'word:ru:resilient', span = id): OutboxEntry {
+	return {
+		id,
+		kind: 'lookup',
+		payload: {
+			id: `evt-${id}`,
+			entry_key: entryKey,
+			kind: 'word',
+			article_id: 'a1',
+			article_title: 'T',
+			span_start: span,
+			span_end: span,
+			surface: 'resilient',
+			lemma: 'resilient',
+			translation: 'устойчивый',
+			context: '',
+			occurred_at: '2026-06-10T12:00:00Z'
+		},
+		created_at: '2026-06-10T12:00:00Z'
+	} as OutboxEntry;
+}
+
+describe('pull — vocabulary delta', () => {
+	it('upserts live entries from the delta', async () => {
+		getConfig.mockResolvedValue(configResponse({ vocab: [vocabEntry()] }));
+		await pull();
+		const row = await vocab_entries.get('word:ru:resilient');
+		expect(row?.count).toBe(3);
+	});
+
+	it('applies tombstones by removing the local row', async () => {
+		await vocab_entries.put(vocabEntry());
+		getConfig.mockResolvedValue(
+			configResponse({ vocab: [vocabEntry({ deleted_at: '2026-06-11T00:00:00Z' })] })
+		);
+		await pull();
+		expect(await vocab_entries.get('word:ru:resilient')).toBeUndefined();
+	});
+
+	it('never infers a deletion from absence, even on a full sync', async () => {
+		// Unlike articles, an entry missing from the response means "unchanged".
+		// Coupling the two would silently wipe the vocabulary on every delta.
+		await vocab_entries.put(vocabEntry());
+		getConfig.mockResolvedValue(configResponse({ vocab: [] })); // full sync: no cursor
+		await pull();
+		expect(await vocab_entries.get('word:ru:resilient')).toBeDefined();
+	});
+
+	it('treats a row re-sent at the inclusive cursor boundary as a no-op', async () => {
+		await vocab_entries.put(vocabEntry());
+		getConfig.mockResolvedValue(configResponse({ vocab: [vocabEntry({ count: 4 })] }));
+		await pull();
+		const rows = await vocab_entries.toArray();
+		expect(rows).toHaveLength(1);
+		expect(rows[0].count).toBe(4);
+	});
+
+	it('tolerates a null vocab field (Go marshals empty slices as null)', async () => {
+		getConfig.mockResolvedValue(configResponse({ vocab: null }));
+		await expect(pull()).resolves.toBeUndefined();
+	});
+});
+
+describe('flushOutbox — lookups', () => {
+	it('sends queued lookups as one batch and clears them', async () => {
+		await outbox.put(lookupEntry(1));
+		await outbox.put(lookupEntry(2));
+		saveLookups.mockResolvedValue({ accepted: 2 });
+
+		await flushOutbox();
+
+		expect(saveLookups).toHaveBeenCalledTimes(1);
+		expect(saveLookups.mock.calls[0][0]).toHaveLength(2);
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('chunks a batch larger than the server maximum', async () => {
+		for (let i = 1; i <= 250; i++) await outbox.put(lookupEntry(i));
+		saveLookups.mockResolvedValue({ accepted: 200 });
+
+		await flushOutbox();
+
+		expect(saveLookups).toHaveBeenCalledTimes(2);
+		expect(saveLookups.mock.calls[0][0]).toHaveLength(200);
+		expect(saveLookups.mock.calls[1][0]).toHaveLength(50);
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('keeps lookups queued when offline and does not touch other kinds', async () => {
+		await outbox.put(lookupEntry(1));
+		await outbox.put({
+			id: 2,
+			kind: 'pin',
+			payload: { id: 'a1', pinned: true },
+			created_at: 'x'
+		} as OutboxEntry);
+		saveLookups.mockRejectedValue(new OfflineError());
+
+		await flushOutbox();
+
+		// The whole drain stops: nothing was sent, nothing was dropped.
+		expect(apiPinArticle).not.toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(2);
+	});
+
+	it('drops a permanently rejected batch rather than wedging the outbox', async () => {
+		await outbox.put(lookupEntry(1));
+		await outbox.put({
+			id: 2,
+			kind: 'pin',
+			payload: { id: 'a1', pinned: true },
+			created_at: 'x'
+		} as OutboxEntry);
+		saveLookups.mockRejectedValue(new ApiError(400, 'bad event'));
+		apiPinArticle.mockResolvedValue(undefined);
+
+		await flushOutbox();
+
+		expect(captureError).toHaveBeenCalled();
+		// The pin behind it still went out — a stuck lookup must not block
+		// progress/pin writes.
+		expect(apiPinArticle).toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('clears the session and stops on 401', async () => {
+		await outbox.put(lookupEntry(1));
+		saveLookups.mockRejectedValue(new ApiError(401, ''));
+
+		await flushOutbox();
+
+		expect(clearSession).toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(1);
+	});
+
+	it('dispatches a vocab_delete through the normal FIFO loop', async () => {
+		await outbox.put({
+			id: 1,
+			kind: 'vocab_delete',
+			payload: { entry_key: 'word:ru:resilient' },
+			created_at: 'x'
+		} as OutboxEntry);
+		deleteVocabEntry.mockResolvedValue(undefined);
+
+		await flushOutbox();
+
+		expect(deleteVocabEntry).toHaveBeenCalledWith('word:ru:resilient');
+		expect(await outbox.toArray()).toHaveLength(0);
 	});
 });

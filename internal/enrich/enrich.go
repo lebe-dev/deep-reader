@@ -4,7 +4,7 @@
 // validate → SaveEnrichment), and records per-stage failures so the UI can show
 // which stage failed and offer a stage-aware retry.
 //
-// Constructor: NewPool(cfg, store, ex, llm) *Pool — satisfies
+// Constructor: NewPool(cfg, store, ex, llm, lem) *Pool — satisfies
 // ports.EnrichmentWorker.
 package enrich
 
@@ -18,14 +18,15 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/getsentry/sentry-go"
 
 	"deep-reader/internal/config"
+	"deep-reader/internal/lemma"
 	"deep-reader/internal/model"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/tokenize"
+	"deep-reader/internal/vocab"
 )
 
 const (
@@ -66,21 +67,27 @@ func stageTranslating(done, total int) string {
 // articles awaiting work. Construct it with NewPool; run Start in its own
 // goroutine.
 type Pool struct {
-	cfg    *config.Config
-	store  ports.Store
-	ex     ports.Extractor
-	llm    ports.LLMClient
+	cfg   *config.Config
+	store ports.Store
+	ex    ports.Extractor
+	llm   ports.LLMClient
+	// lem annotates freshly tokenized text with dictionary lemmas so the
+	// vocabulary cache can key on lemmas (WORD-CACHE-ARCH.md §4.3). A nil
+	// lemmatizer disables annotation; tokens then carry no Lemma and consumers
+	// fall back to the lowercased text, as the field's contract requires.
+	lem    ports.Lemmatizer
 	notify chan struct{}
 }
 
 // NewPool creates a new Pool. It satisfies ports.EnrichmentWorker via *Pool.
 // Start(ctx) must be called to launch the workers.
-func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient) *Pool {
+func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient, lem ports.Lemmatizer) *Pool {
 	return &Pool{
 		cfg:    cfg,
 		store:  st,
 		ex:     ex,
 		llm:    client,
+		lem:    lem,
 		notify: make(chan struct{}, 1),
 	}
 }
@@ -294,6 +301,14 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 	p.setStatus(ctx, log, a.ID, model.StatusEnriching, "")
 	p.setStage(ctx, log, a.ID, stageFillingGaps)
 
+	// Identical vocabulary filtering to the full path: a top-up must not
+	// re-introduce words the full pass deliberately skipped.
+	known := p.loadKnownVocabulary(ctx, settings, log)
+	opts := ports.EnrichOptions{
+		EnrichmentVersion: p.cfg.EnrichmentVersion,
+		KnownTerms:        known.narrowForTokens(settings.TargetLanguage, tokensInSpans(tokens, spans)),
+	}
+
 	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -304,7 +319,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 			return
 		}
 
-		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, spans)
+		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, opts, spans)
 		if err != nil {
 			// Graceful shutdown: a cancelled context is not a real enrich failure.
 			// Bail out before logging ERROR / persisting enrich_failed / firing
@@ -328,7 +343,7 @@ func (p *Pool) runTopUp(ctx context.Context, log *slog.Logger, a *model.Article)
 		// Drop individually-invalid additions instead of failing the whole pass
 		// (mirrors the per-chunk path): a malformed entry costs only itself, and
 		// any still-uncovered span surfaces again on the next top-up.
-		clean := sanitizeEnrichment(*addition, tokens, log)
+		clean := sanitizeEnrichment(*addition, tokens, knownFilter{known: known, targetLang: settings.TargetLanguage}, log)
 		if dropped := droppedCount(*addition, clean); dropped > 0 {
 			log.Warn("enrich: topup dropped invalid annotations", "dropped", dropped)
 		}
@@ -479,7 +494,7 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		// failure leaves the original text in place.
 		p.setStage(ctx, log, a.ID, stageNormalizing)
 		text = p.runNormalize(ctx, log, title, text, settings)
-		tokens := tokenize.Tokenize(text)
+		tokens := lemma.Apply(p.lem, tokenize.Tokenize(text))
 
 		update := ports.ContentUpdate{
 			SourceURL:    result.CanonicalURL,
@@ -556,6 +571,11 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 		}
 	}
 
+	// The user's collected vocabulary, loaded once per article rather than per
+	// chunk: it narrows each prompt and drives the authoritative post-filter
+	// (WORD-CACHE-ARCH.md §9). Empty when vocab_assist is off.
+	known := p.loadKnownVocabulary(ctx, settings, log)
+
 	// Resume support: load any enrichment a prior (interrupted or partially
 	// failed) run already persisted so covered chunks are skipped.
 	running := p.loadExistingEnrichment(ctx, log, a.ID)
@@ -602,7 +622,7 @@ func (p *Pool) runEnrich(ctx context.Context, log *slog.Logger, a *model.Article
 			continue // already annotated by a prior run
 		}
 
-		merged, chunkModel, err := p.enrichChunk(ctx, log, a, settings, running, span, ci, total)
+		merged, chunkModel, err := p.enrichChunk(ctx, log, a, settings, known, running, span, ci, total)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -744,7 +764,14 @@ func (p *Pool) runNormalize(ctx context.Context, log *slog.Logger, title, text s
 // it together with the model name that produced the chunk. It returns
 // errArticleDeleted if the article vanished, ctx.Err() on cancellation, or the
 // last error after exhausting retries.
-func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings, existing model.Enrichment, span model.Span, idx, total int) (model.Enrichment, string, error) {
+func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Article, settings model.Settings, known knownVocabulary, existing model.Enrichment, span model.Span, idx, total int) (model.Enrichment, string, error) {
+	// Narrow the known-term list to the tokens this chunk actually sends: a
+	// whole-vocabulary list would cost more prompt than the annotations it saves.
+	opts := ports.EnrichOptions{
+		EnrichmentVersion: p.cfg.EnrichmentVersion,
+		KnownTerms:        known.narrowForTokens(settings.TargetLanguage, tokensInSpan(a.Tokens, span)),
+	}
+
 	maxRetries := p.cfg.LLMMaxRetries
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -755,7 +782,7 @@ func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Artic
 			return model.Enrichment{}, "", ctx.Err()
 		}
 
-		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, p.cfg.EnrichmentVersion, []model.Span{span})
+		addition, usage, err := p.llm.EnrichSpans(ctx, a, settings, opts, []model.Span{span})
 		if err != nil {
 			lastErr = err
 			if isRetryable(err) {
@@ -772,7 +799,7 @@ func (p *Pool) enrichChunk(ctx context.Context, log *slog.Logger, a *model.Artic
 		// Drop any individually-invalid annotation instead of failing the whole
 		// chunk: a single empty translation or drifted phrase costs only that one
 		// entry, and whatever stays uncovered is picked up by a later top-up pass.
-		clean := sanitizeEnrichment(*addition, a.Tokens, log)
+		clean := sanitizeEnrichment(*addition, a.Tokens, knownFilter{known: known, targetLang: settings.TargetLanguage}, log)
 		if dropped := droppedCount(*addition, clean); dropped > 0 {
 			log.Warn("enrich: chunk dropped invalid annotations", "chunk", idx+1, "of", total, "dropped", dropped)
 		}
@@ -917,7 +944,7 @@ func (p *Pool) setFailed(ctx context.Context, a *model.Article, status string, e
 // against over-wide / drifted phrase ranges; see model.Phrase.Text). Glossary
 // items are not validated, so they pass through unchanged. The input is never
 // mutated.
-func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, log *slog.Logger) model.Enrichment {
+func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, known knownFilter, log *slog.Logger) model.Enrichment {
 	tokenCount := len(tokens)
 
 	var words []model.DifficultWord
@@ -931,6 +958,17 @@ func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, log *slog.Logg
 		// The model sometimes echoes the source word back instead of translating
 		// it. Such a "translation" is useless: recover from the glossary if it
 		// explains this term, otherwise drop the entry rather than persist noise.
+		// Vocabulary post-filter. The key is derived from the TOKEN's lemma, not
+		// from dw.Lemma: the model's lemma is a free-text guess, while the
+		// token's lemma is exactly what the vocabulary was keyed on, so only the
+		// latter matches reliably. This is the authoritative half of §9 — it
+		// works even against a model that ignores the prompt instruction.
+		if known.knowsWord(tokens[dw.TokenIndex]) {
+			log.Debug("enrich: dropped already-known word", "token_index", dw.TokenIndex,
+				"word", tokens[dw.TokenIndex].Text, "reason", "in user vocabulary")
+			continue
+		}
+
 		source := tokens[dw.TokenIndex].Text
 		if translationEchoesSource(source, dw.Translation) {
 			def := glossaryDefinitionFor(source, dw.Lemma, e.Glossary)
@@ -961,6 +999,11 @@ func sanitizeEnrichment(e model.Enrichment, tokens []model.Token, log *slog.Logg
 		}
 		want := normalizePhraseText(joinTokenText(tokens, ph.StartIndex, ph.EndIndex))
 		if normalizePhraseText(ph.Text) != want {
+			continue
+		}
+		if known.knowsPhrase(tokens, ph.StartIndex, ph.EndIndex) {
+			log.Debug("enrich: dropped already-known phrase", "phrase", ph.Text,
+				"reason", "in user vocabulary")
 			continue
 		}
 		phrases = append(phrases, ph)
@@ -1143,20 +1186,7 @@ func joinTokenText(tokens []model.Token, start, end int) string {
 // the model's echoed text and the tokenized source, so only the actual word
 // sequence has to agree.
 func normalizePhraseText(s string) string {
-	var b strings.Builder
-	pendingSpace := false
-	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsNumber(r) {
-			if pendingSpace && b.Len() > 0 {
-				b.WriteByte(' ')
-			}
-			b.WriteRune(r)
-			pendingSpace = false
-			continue
-		}
-		pendingSpace = true
-	}
-	return b.String()
+	return vocab.Normalize(s)
 }
 
 // translationEchoesSource reports whether translation is just the source text

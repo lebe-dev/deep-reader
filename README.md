@@ -12,8 +12,6 @@ Sentence translation example:
 
 ![Sentence translation assistance screenshot](screenshot3.png)
 
-
-
 ## Features
 
 - **CEFR-tuned enrichment** — an LLM translates only the words/phrases likely to be unfamiliar at your level, leaving the rest of the text untouched.

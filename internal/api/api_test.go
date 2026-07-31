@@ -39,6 +39,15 @@ const (
 // fakeStore is an in-memory ports.Store for handler tests. Each field lets a
 // test stub the behaviour of one method; unset behaviours return zero values.
 type fakeStore struct {
+	// Vocabulary (word cache) recording — see WORD-CACHE-ARCH.md §7.
+	savedLookups     []model.LookupEvent
+	saveLookupsErr   error
+	vocab            []model.VocabEntry
+	vocabErr         error
+	vocabSince       time.Time
+	deletedVocabKeys []string
+	deleteVocabErr   error
+
 	settings       model.Settings
 	updateSettings func(model.SettingsPatch) (model.Settings, error)
 	metas          []model.ArticleMeta
@@ -1688,4 +1697,38 @@ func testSiteFS() fs.FS {
 		"_app/immutable/chunk.abc.js": &fstest.MapFile{Data: []byte("export{}")},
 		"icons/icon-192.png":          &fstest.MapFile{Data: []byte("png")},
 	})
+}
+
+// ── Vocabulary (word cache) ───────────────────────────────────────────────────
+
+func (f *fakeStore) SaveLookups(_ context.Context, events []model.LookupEvent) (int, error) {
+	if f.saveLookupsErr != nil {
+		return 0, f.saveLookupsErr
+	}
+	f.savedLookups = append(f.savedLookups, events...)
+	return len(events), nil
+}
+
+func (f *fakeStore) ListVocab(_ context.Context, since time.Time) ([]model.VocabEntry, error) {
+	f.vocabSince = since
+	return f.vocab, f.vocabErr
+}
+
+func (f *fakeStore) ListKnownVocab(context.Context) ([]model.VocabEntry, error) {
+	return f.vocab, f.vocabErr
+}
+
+func (f *fakeStore) DeleteVocabEntry(_ context.Context, entryKey string) error {
+	f.deletedVocabKeys = append(f.deletedVocabKeys, entryKey)
+	return f.deleteVocabErr
+}
+
+func (f *fakeStore) PruneVocabTombstones(context.Context) (int, error) { return 0, nil }
+
+func (f *fakeStore) ListArticlesForLemmaBackfill(context.Context, int, int) ([]model.Article, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) SaveTokenLemmas(context.Context, string, []model.Token, int) error {
+	return nil
 }

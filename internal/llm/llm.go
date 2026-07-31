@@ -274,13 +274,24 @@ const DefaultEnrichmentPromptTemplate = "You are a language-learning assistant (
 	"tokens and a fluent translation into {{target_language}}.\n" +
 	"4. glossary: for domain-specific terms that deserve a definition rather than a plain translation, " +
 	"add an entry with the English term and an explanation in {{target_language}}.\n" +
-	"5. Return ONLY the JSON object matching the provided schema. No markdown, no prose.\n"
+	"5. Return ONLY the JSON object matching the provided schema. No markdown, no prose.\n" +
+	knownWordsInstruction
+
+// knownWordsInstruction is the {{known_words}} clause of the default enrichment
+// template. It is a separate constant because appendKnownTerms reuses the very
+// same wording when a user's CUSTOM template has no {{known_words}} placeholder
+// — which is what keeps every existing customised prompt working instead of
+// silently losing the feature (WORD-CACHE-ARCH.md §9.2).
+const knownWordsInstruction = "6. The reader already knows the following words and phrases (given as dictionary " +
+	"lemmas — this covers all their inflected forms). Do NOT include them in difficult_words " +
+	"or phrases; still translate the sentences containing them: {{known_words}}\n"
 
 // renderPrompt substitutes the supported placeholders in template with the
 // per-request settings and enrichment version.
-func renderPrompt(template string, settings model.Settings, enrichmentVersion int) string {
+func renderPrompt(template string, settings model.Settings, opts ports.EnrichOptions) string {
 	r := strings.NewReplacer(
-		"{{enrichment_version}}", strconv.Itoa(enrichmentVersion),
+		"{{enrichment_version}}", strconv.Itoa(opts.EnrichmentVersion),
+		"{{known_words}}", strings.Join(opts.KnownTerms, ", "),
 		"{{target_language}}", settings.TargetLanguage,
 		"{{cefr_level}}", settings.CEFRLevel,
 		"{{min_difficulty}}", settings.MinDifficultyToHighlight,
@@ -288,25 +299,73 @@ func renderPrompt(template string, settings model.Settings, enrichmentVersion in
 	return r.Replace(template)
 }
 
+// appendKnownTerms makes the known-word instruction reach the model regardless
+// of the template in force.
+//
+// A template that contains {{known_words}} has already had the list substituted
+// by renderPrompt, so nothing more is needed. A custom template written before
+// this feature existed has no such placeholder — there the instruction is
+// appended as one extra paragraph. Requiring the placeholder instead would have
+// broken every prompt the user had already customised.
+//
+// With no known terms nothing is appended: an empty "the reader already knows:"
+// sentence is noise that only costs tokens.
+func appendKnownTerms(rendered, template string, opts ports.EnrichOptions) string {
+	if len(opts.KnownTerms) == 0 {
+		// Nothing to skip. Drop the placeholder's line entirely rather than leave
+		// a dangling "the reader already knows: " — an empty list is noise that
+		// would only spend tokens and invite the model to invent one.
+		return dropPlaceholderLine(rendered)
+	}
+	if strings.Contains(template, "{{known_words}}") {
+		return rendered
+	}
+	return rendered + "\n" + strings.NewReplacer(
+		"{{known_words}}", strings.Join(opts.KnownTerms, ", "),
+	).Replace(knownWordsInstruction)
+}
+
+// dropPlaceholderLine removes the line left behind by an empty {{known_words}}
+// substitution. It matches on the rendered marker rather than the raw
+// placeholder because renderPrompt has already run by this point.
+func dropPlaceholderLine(rendered string) string {
+	if !strings.Contains(rendered, knownWordsMarker) {
+		return rendered
+	}
+	lines := strings.Split(rendered, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.Contains(line, knownWordsMarker) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// knownWordsMarker is the distinctive prefix of the known-words instruction,
+// used to find its line after substitution has erased the placeholder.
+const knownWordsMarker = "The reader already knows the following words"
+
 // buildPrompt returns the system and user messages for the enrichment call.
 // The system prompt comes from the user's configured enrichment prompt
 // template, falling back to DefaultEnrichmentPromptTemplate when unset. The
 // enrichmentVersion is substituted into the template so that prompt changes can
 // be traced via the version number.
-func buildPrompt(a *model.Article, settings model.Settings, enrichmentVersion int) (system, user string) {
-	system = renderSystemPrompt(settings, enrichmentVersion)
+func buildPrompt(a *model.Article, settings model.Settings, opts ports.EnrichOptions) (system, user string) {
+	system = renderSystemPrompt(settings, opts)
 	user = buildUserPrompt(a, a.Tokens)
 	return system, user
 }
 
 // renderSystemPrompt renders the enrichment system prompt from the user's
 // configured template (or the built-in default when unset).
-func renderSystemPrompt(settings model.Settings, enrichmentVersion int) string {
+func renderSystemPrompt(settings model.Settings, opts ports.EnrichOptions) string {
 	template := settings.EnrichmentPrompt
 	if template == "" {
 		template = DefaultEnrichmentPromptTemplate
 	}
-	return renderPrompt(template, settings, enrichmentVersion)
+	return appendKnownTerms(renderPrompt(template, settings, opts), template, opts)
 }
 
 // buildUserPrompt renders the user message: the article title, an optional
@@ -352,10 +411,10 @@ func buildUserPrompt(a *model.Article, tokens []model.Token) string {
 // tens of thousands of tokens (and minutes of latency) on every chunk. Token
 // indices are the original article indices, so the directive tells the model
 // they are not contiguous from zero.
-func buildSpanPrompt(a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (system, user string) {
+func buildSpanPrompt(a *model.Article, settings model.Settings, opts ports.EnrichOptions, spans []model.Span) (system, user string) {
 	ranges := formatSpans(spans)
 
-	system = renderSystemPrompt(settings, enrichmentVersion) +
+	system = renderSystemPrompt(settings, opts) +
 		"\nSPAN MODE: you are given ONLY a slice of the article's tokens. Their token_index " +
 		"values are the original indices from the full article, so they may not start at zero " +
 		"or be contiguous. Annotate ONLY the tokens within these inclusive token-index ranges: " +
@@ -462,9 +521,9 @@ func (e *DecodeError) RawResponse() string { return e.Raw }
 // Enrich builds the enrichment prompt, calls the OpenAI-compatible API once,
 // and returns the parsed model.Enrichment together with provider usage.
 // It honours ctx for cancellation and timeout.
-func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int) (*model.Enrichment, ports.Usage, error) {
+func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Settings, opts ports.EnrichOptions) (*model.Enrichment, ports.Usage, error) {
 	cn, fromProfile := c.resolveConn(ctx)
-	systemPrompt, userPrompt := buildPrompt(a, settings, enrichmentVersion)
+	systemPrompt, userPrompt := buildPrompt(a, settings, opts)
 	return c.complete(ctx, cn, a.ID, effectiveModel(cn, fromProfile, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
 }
 
@@ -472,9 +531,9 @@ func (c *Client) Enrich(ctx context.Context, a *model.Article, settings model.Se
 // uncovered token spans, calls the API once, and returns the partial enrichment
 // (only the annotations for those ranges). The enrich pool merges it into the
 // existing enrichment.
-func (c *Client) EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, enrichmentVersion int, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+func (c *Client) EnrichSpans(ctx context.Context, a *model.Article, settings model.Settings, opts ports.EnrichOptions, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
 	cn, fromProfile := c.resolveConn(ctx)
-	systemPrompt, userPrompt := buildSpanPrompt(a, settings, enrichmentVersion, spans)
+	systemPrompt, userPrompt := buildSpanPrompt(a, settings, opts, spans)
 	return c.complete(ctx, cn, a.ID, effectiveModel(cn, fromProfile, settings.LLMModel), systemPrompt, userPrompt, len(a.Tokens))
 }
 
@@ -514,7 +573,7 @@ func buildSummaryPrompt(a *model.Article, settings model.Settings) (system, user
 	if template == "" {
 		template = DefaultSummaryPromptTemplate
 	}
-	system = renderPrompt(template, settings, 0)
+	system = renderPrompt(template, settings, ports.EnrichOptions{})
 	user = "Article title: " + a.Title + "\n\nArticle text:\n" + a.OriginalText
 	return system, user
 }

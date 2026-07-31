@@ -3,6 +3,7 @@ package ingest_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,7 +213,7 @@ func TestAdd_NewURL(t *testing.T) {
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, wk)
+	ing := ingest.New(cfg, st, wk, nil)
 
 	rawURL := "https://example.com/article?utm_source=twitter#section"
 	art, err := ing.Add(context.Background(), rawURL)
@@ -253,7 +254,7 @@ func TestAddText_New(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
-	ing := ingest.New(cfg, st, wk)
+	ing := ingest.New(cfg, st, wk, nil)
 
 	const body = "First line is the title\nSecond paragraph with the body."
 	art, err := ing.AddText(context.Background(), "", "", body)
@@ -296,7 +297,7 @@ func TestAddText_New(t *testing.T) {
 
 func TestAddText_MarkdownFormat(t *testing.T) {
 	st := newFakeStore()
-	ing := ingest.New(defaultCfg(), st, &fakeWorker{})
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{}, nil)
 
 	const body = "# Title\n\nIntro paragraph.\n\n- one\n- two\n- three"
 	art, err := ing.AddText(context.Background(), "Title", "", body)
@@ -315,7 +316,7 @@ func TestAddText_MarkdownFormat(t *testing.T) {
 func TestAddText_SourceURL(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}
-	ing := ingest.New(defaultCfg(), st, wk)
+	ing := ingest.New(defaultCfg(), st, wk, nil)
 
 	// A valid source URL is normalized (utm_* stripped) and its host recorded.
 	art, err := ing.AddText(context.Background(), "T", "https://Example.com/post?utm_source=x", "Body text")
@@ -347,7 +348,7 @@ func TestAddText_SourceURL(t *testing.T) {
 func TestAddText_DedupAndEmpty(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}
-	ing := ingest.New(defaultCfg(), st, wk)
+	ing := ingest.New(defaultCfg(), st, wk, nil)
 
 	first, err := ing.AddText(context.Background(), "Custom title", "", "Same content")
 	if err != nil {
@@ -375,7 +376,7 @@ func TestAddText_DedupAndEmpty(t *testing.T) {
 func TestAdd_InvalidURLCreatesNoRecord(t *testing.T) {
 	st := newFakeStore()
 	wk := &fakeWorker{}
-	ing := ingest.New(defaultCfg(), st, wk)
+	ing := ingest.New(defaultCfg(), st, wk, nil)
 
 	if _, err := ing.Add(context.Background(), "/relative/path"); err == nil {
 		t.Fatal("Add: expected error for URL without host")
@@ -397,7 +398,7 @@ func TestAdd_DedupReturnExisting(t *testing.T) {
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, wk)
+	ing := ingest.New(cfg, st, wk, nil)
 
 	rawURL := "https://example.com/article"
 
@@ -436,7 +437,7 @@ func TestRetry_RequeuesAndNotifies(t *testing.T) {
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, wk)
+	ing := ingest.New(cfg, st, wk, nil)
 
 	// First, ingest an article so we have an id to retry.
 	art, err := ing.Add(context.Background(), "https://example.com/article")
@@ -467,7 +468,7 @@ func TestRetry_NotFound(t *testing.T) {
 	wk := &fakeWorker{}
 	cfg := defaultCfg()
 
-	ing := ingest.New(cfg, st, wk)
+	ing := ingest.New(cfg, st, wk, nil)
 
 	err := ing.Retry(context.Background(), "nonexistent-id")
 	if !errors.Is(err, ports.ErrNotFound) {
@@ -639,4 +640,92 @@ func mustNormalize(t *testing.T, rawURL string) string {
 		t.Fatalf("NormalizeURL(%q): %v", rawURL, err)
 	}
 	return n
+}
+
+// ── Vocabulary (word cache) stubs ─────────────────────────────────────────────
+
+func (f *fakeStore) SaveLookups(_ context.Context, _ []model.LookupEvent) (int, error) {
+	return 0, nil
+}
+func (f *fakeStore) ListVocab(_ context.Context, _ time.Time) ([]model.VocabEntry, error) {
+	return nil, nil
+}
+func (f *fakeStore) DeleteVocabEntry(_ context.Context, _ string) error  { return nil }
+func (f *fakeStore) PruneVocabTombstones(_ context.Context) (int, error) { return 0, nil }
+func (f *fakeStore) ListArticlesForLemmaBackfill(_ context.Context, _, _ int) ([]model.Article, error) {
+	return nil, nil
+}
+func (f *fakeStore) SaveTokenLemmas(_ context.Context, _ string, _ []model.Token, _ int) error {
+	return nil
+}
+
+func (f *fakeStore) ListKnownVocab(_ context.Context) ([]model.VocabEntry, error) {
+	return nil, nil
+}
+
+// stubLemmatizer is a two-entry dictionary: enough to prove AddText runs the
+// annotation pass without pulling the real dictionary into this package's tests.
+type stubLemmatizer struct{ dict map[string]string }
+
+func (s stubLemmatizer) Lemma(word string) string {
+	lower := strings.ToLower(word)
+	if l, ok := s.dict[lower]; ok {
+		return l
+	}
+	return lower
+}
+
+func (s stubLemmatizer) Annotate(tokens []model.Token) []model.Token {
+	for i := range tokens {
+		lower := strings.ToLower(tokens[i].Text)
+		if l := s.Lemma(tokens[i].Text); l != lower {
+			tokens[i].Lemma = l
+		}
+	}
+	return tokens
+}
+
+func TestAddText_AnnotatesTokensWithLemmas(t *testing.T) {
+	st := newFakeStore()
+	lem := stubLemmatizer{dict: map[string]string{"children": "child", "ran": "run"}}
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{}, lem)
+
+	art, err := ing.AddText(context.Background(), "T", "", "The children ran home")
+	if err != nil {
+		t.Fatalf("AddText: %v", err)
+	}
+
+	byText := map[string]model.Token{}
+	for _, tok := range art.Tokens {
+		byText[tok.Text] = tok
+	}
+	if got := byText["children"].Lemma; got != "child" {
+		t.Errorf("children lemma = %q, want child", got)
+	}
+	if got := byText["ran"].Lemma; got != "run" {
+		t.Errorf("ran lemma = %q, want run", got)
+	}
+	// Omitted when it equals the lowercased text — that is what keeps the
+	// payload cost small; consumers read `Lemma or lower(Text)`.
+	if got := byText["home"].Lemma; got != "" {
+		t.Errorf("home lemma = %q, want it omitted", got)
+	}
+}
+
+func TestAddText_WithoutLemmatizerStillTokenizes(t *testing.T) {
+	st := newFakeStore()
+	ing := ingest.New(defaultCfg(), st, &fakeWorker{}, nil)
+
+	art, err := ing.AddText(context.Background(), "T", "", "The children ran home")
+	if err != nil {
+		t.Fatalf("AddText: %v", err)
+	}
+	if len(art.Tokens) != 4 {
+		t.Fatalf("got %d tokens, want 4", len(art.Tokens))
+	}
+	for _, tok := range art.Tokens {
+		if tok.Lemma != "" {
+			t.Errorf("token %q carries a lemma without a lemmatizer: %q", tok.Text, tok.Lemma)
+		}
+	}
 }

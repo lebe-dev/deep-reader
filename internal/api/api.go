@@ -20,6 +20,8 @@
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
 //	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
 //	PATCH  /api/settings                    partial settings update
+//	POST   /api/lookups                     {events} -> {accepted}; record word/phrase lookups
+//	POST   /api/vocab/delete                {entry_key} -> 204; soft-delete a vocabulary entry
 //	GET    /api/llm-providers               list LLM connection profiles (keys masked)
 //	POST   /api/llm-providers               create a profile (first one becomes active)
 //	PATCH  /api/llm-providers/:id           update a profile (api_key write-only)
@@ -182,6 +184,10 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Put("/articles/:id/pin", s.setPinned)
 
 	api.Patch("/settings", s.patchSettings)
+
+	// Word cache writes. The read side is the /api/config delta.
+	api.Post("/lookups", s.saveLookups)
+	api.Post("/vocab/delete", s.deleteVocabEntry)
 
 	api.Get("/llm-providers", s.listLLMProviders)
 	api.Post("/llm-providers", s.createLLMProvider)

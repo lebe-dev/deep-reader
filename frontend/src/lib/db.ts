@@ -16,7 +16,9 @@ import type {
 	Settings,
 	SettingsPatch,
 	ProgressUpdate,
-	ReEnrichMode
+	ReEnrichMode,
+	LookupEvent,
+	VocabEntry
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +34,9 @@ export type OutboxKind =
 	| 'delete_article'
 	| 'retry'
 	| 'reenrich'
-	| 'pin';
+	| 'pin'
+	| 'lookup'
+	| 'vocab_delete';
 
 /** Payload shapes keyed by outbox kind. */
 export interface OutboxPayloadMap {
@@ -44,6 +48,13 @@ export interface OutboxPayloadMap {
 	retry: { id: string };
 	reenrich: { id: string; mode: ReEnrichMode };
 	pin: { id: string; pinned: boolean };
+	/**
+	 * One recorded translation lookup (WORD-CACHE-ARCH.md §5). These drain in
+	 * batches ahead of the FIFO loop: they are an independent, commutative,
+	 * append-only stream with no ordering relationship to the other kinds.
+	 */
+	lookup: LookupEvent;
+	vocab_delete: { entry_key: string };
 }
 
 /** A single queued offline write. `id` is the auto-increment insertion order. */
@@ -83,7 +94,7 @@ export interface SyncState {
 // ---------------------------------------------------------------------------
 
 /** Current schema version. Bump this whenever {@link STORES} changes. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * Store/index definitions for {@link SCHEMA_VERSION}. Frozen and exported so a
@@ -102,7 +113,10 @@ export const STORES = Object.freeze({
 	// Auto-increment id preserves FIFO insertion order; index by kind.
 	outbox: '++id, kind, created_at',
 	// Singleton config / cursor row.
-	sync_state: 'id'
+	sync_state: 'id',
+	// Vocabulary aggregate mirrored from the server, plus optimistic local rows
+	// for taps that have not been flushed yet (WORD-CACHE-ARCH.md §6).
+	vocab_entries: 'entry_key, kind, last_seen, count'
 } as const);
 
 export class DeepReaderDB extends Dexie {
@@ -111,6 +125,7 @@ export class DeepReaderDB extends Dexie {
 	progress!: Table<Progress, string>;
 	outbox!: Table<OutboxEntry, number>;
 	sync_state!: Table<SyncState, string>;
+	vocab_entries!: Table<VocabEntry, string>;
 
 	constructor() {
 		super('deep-reader');

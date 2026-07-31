@@ -17,7 +17,9 @@ import {
 	pinArticle as apiPinArticle,
 	putProgress,
 	reEnrichArticle as apiReEnrichArticle,
-	retryArticle as apiRetryArticle
+	retryArticle as apiRetryArticle,
+	saveLookups,
+	deleteVocabEntry
 } from '$lib/api';
 import { addSyncBreadcrumb, captureError } from '$lib/sentry';
 import type {
@@ -26,8 +28,16 @@ import type {
 	Progress,
 	ProgressUpdate,
 	ReEnrichMode,
-	SettingsPatch
+	SettingsPatch,
+	LookupEvent
 } from '$lib/types';
+
+/**
+ * How many lookup events go in one POST /api/lookups. Matches the server's
+ * accepted maximum (model.MaxLookupBatch); a larger request is rejected with
+ * 413 rather than truncated.
+ */
+const LOOKUP_BATCH_SIZE = 200;
 
 // ---------------------------------------------------------------------------
 // Wire contract: the delta-sync cursor is the server's `server_time` (RFC3339).
@@ -129,10 +139,18 @@ export async function pull(): Promise<void> {
 	// as null. Coerce to arrays so the filter/map/iteration below never throws.
 	const serverArticles = response.articles ?? [];
 	const serverProgress = response.progress ?? [];
+	const serverVocab = response.vocab ?? [];
 
 	await db.transaction(
 		'rw',
-		[db.articles_meta, db.articles_payload, db.progress, db.sync_state, db.outbox],
+		[
+			db.articles_meta,
+			db.articles_payload,
+			db.progress,
+			db.sync_state,
+			db.outbox,
+			db.vocab_entries
+		],
 		async () => {
 			// --- articles_meta ---
 			// Exclude articles that are pending deletion in the outbox — a concurrent
@@ -167,6 +185,20 @@ export async function pull(): Promise<void> {
 				const local = await db.progress.get(serverProg.article_id);
 				if (!local || isNewer(serverProg.updated_at, local.updated_at)) {
 					await db.progress.put(serverProg);
+				}
+			}
+
+			// --- vocabulary (word cache, WORD-CACHE-ARCH.md §7.2) ---
+			// Deletions are NEVER inferred from absence here, unlike articles above:
+			// removals travel as explicit tombstones, so there is no full-sync
+			// special case on either path. bulkPut makes a row re-sent at the
+			// inclusive cursor boundary a no-op.
+			if (serverVocab.length > 0) {
+				const tombstoned = serverVocab.filter((v) => v.deleted_at);
+				const alive = serverVocab.filter((v) => !v.deleted_at);
+				if (alive.length > 0) await db.vocab_entries.bulkPut(alive);
+				if (tombstoned.length > 0) {
+					await db.vocab_entries.bulkDelete(tombstoned.map((v) => v.entry_key));
 				}
 			}
 
@@ -238,7 +270,16 @@ function payloadSummary(entry: OutboxEntry): Record<string, unknown> {
  */
 export async function flushOutbox(): Promise<void> {
 	// Read all pending entries in insertion order.
-	const entries = await db.outbox.orderBy('id').toArray();
+	const allEntries = await db.outbox.orderBy('id').toArray();
+
+	// Lookup events are drained first, in batches, rather than one request each:
+	// they are an independent, commutative, append-only stream with no ordering
+	// relationship to progress / add_article / the rest, and a reading session
+	// can queue dozens of them (WORD-CACHE-ARCH.md §7.1).
+	const lookupEntries = allEntries.filter((e) => e.kind === 'lookup');
+	if (lookupEntries.length > 0 && !(await flushLookups(lookupEntries))) return;
+
+	const entries = allEntries.filter((e) => e.kind !== 'lookup');
 
 	for (const entry of entries) {
 		addSyncBreadcrumb('outbox dispatch', { id: entry.id, kind: entry.kind });
@@ -286,6 +327,54 @@ export async function flushOutbox(): Promise<void> {
 	}
 }
 
+/**
+ * POST the queued lookup events in chunks and delete the ones that landed.
+ *
+ * Returns false when the drain should stop (offline, lost session, or a server
+ * error) so the caller leaves the rest of the outbox for the next sync. The
+ * endpoint is idempotent, so a batch that was delivered but whose response was
+ * lost costs nothing on retry.
+ */
+async function flushLookups(entries: OutboxEntry[]): Promise<boolean> {
+	for (let i = 0; i < entries.length; i += LOOKUP_BATCH_SIZE) {
+		const chunk = entries.slice(i, i + LOOKUP_BATCH_SIZE);
+		addSyncBreadcrumb('outbox lookups', { count: chunk.length });
+		try {
+			await saveLookups(chunk.map((e) => e.payload as LookupEvent));
+			await db.outbox.bulkDelete(chunk.map((e) => e.id!));
+		} catch (err) {
+			if (err instanceof OfflineError) return false;
+
+			if (err instanceof ApiError && err.status === 401) {
+				await clearSession();
+				return false;
+			}
+
+			if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+				// Permanent rejection — drop the chunk rather than wedge the outbox
+				// behind it. Losing lookups is acceptable (they are low-value
+				// individually); a stuck outbox would block progress writes too.
+				captureError(err, {
+					area: 'sync',
+					extra: { kind: 'lookup', http_status: err.status, batch: chunk.length }
+				});
+				await db.outbox.bulkDelete(chunk.map((e) => e.id!));
+				continue;
+			}
+
+			if (err instanceof ApiError) {
+				captureError(err, {
+					area: 'sync',
+					extra: { kind: 'lookup', http_status: err.status, batch: chunk.length }
+				});
+			}
+			console.warn('[sync] lookup batch flush stopped', err);
+			return false;
+		}
+	}
+	return true;
+}
+
 /** Dispatch a single outbox entry to the correct API call. */
 async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 	switch (entry.kind) {
@@ -330,6 +419,11 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 		case 'reenrich': {
 			const { id, mode } = entry.payload as { id: string; mode: ReEnrichMode };
 			await apiReEnrichArticle(id, mode);
+			return;
+		}
+		case 'vocab_delete': {
+			const { entry_key } = entry.payload as { entry_key: string };
+			await deleteVocabEntry(entry_key);
 			return;
 		}
 		case 'pin': {

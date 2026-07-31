@@ -1,0 +1,34 @@
+{
+  "_comment": "Golden table pinning the ONE normalization of the word cache (WORD-CACHE-ARCH.md §3.3). Both internal/vocab/key_test.go and frontend/src/lib/vocab/key.test.ts read this file; a change here must keep both green, which is exactly the point — it is what stops the Go and TypeScript key builders from drifting.",
+  "normalize": [
+    { "in": "abduct", "out": "abduct" },
+    { "in": "Abduct", "out": "abduct" },
+    { "in": "ABDUCT", "out": "abduct" },
+    { "in": "  padded  ", "out": "padded" },
+    { "in": "spill the beans", "out": "spill the beans" },
+    { "in": "spill   the\tbeans", "out": "spill the beans" },
+    { "in": "spill\nthe\nbeans", "out": "spill the beans" },
+    { "in": "well-known", "out": "well known" },
+    { "in": "don't", "out": "don t" },
+    { "in": "it’s", "out": "it s" },
+    { "in": "state-of-the-art!", "out": "state of the art" },
+    { "in": "COVID-19", "out": "covid 19" },
+    { "in": "3.14", "out": "3 14" },
+    { "in": "\"quoted\"", "out": "quoted" },
+    { "in": "(parens)", "out": "parens" },
+    { "in": "…ellipsis…", "out": "ellipsis" },
+    { "in": "naïve café", "out": "naïve café" },
+    { "in": "Съешь ещё", "out": "съешь ещё" },
+    { "in": "", "out": "" },
+    { "in": "---", "out": "" },
+    { "in": "!?!", "out": "" },
+    { "in": "a", "out": "a" }
+  ],
+  "keys": [
+    { "kind": "word", "lang": "ru", "base": "abduct", "out": "word:ru:abduct" },
+    { "kind": "word", "lang": "ru", "base": "Resilient", "out": "word:ru:resilient" },
+    { "kind": "phrase", "lang": "ru", "base": "spill the bean", "out": "phrase:ru:spill the bean" },
+    { "kind": "phrase", "lang": "ru", "base": "take   off!", "out": "phrase:ru:take off" },
+    { "kind": "word", "lang": "en", "base": "Haus", "out": "word:en:haus" }
+  ]
+}
