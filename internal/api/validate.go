@@ -41,6 +41,11 @@ func validateSettingsPatch(patch model.SettingsPatch) (msg string, ok bool) {
 	if patch.NormalizePrompt != nil && len(*patch.NormalizePrompt) > model.MaxEnrichmentPromptLen {
 		return "normalize_prompt is too long", false
 	}
+	// translate_prompt may be empty (= use the built-in default); only the upper
+	// length bound is enforced.
+	if patch.TranslatePrompt != nil && len(*patch.TranslatePrompt) > model.MaxEnrichmentPromptLen {
+		return "translate_prompt is too long", false
+	}
 	// bot_wall_signatures may be empty (= use the built-in defaults); only the
 	// upper length bound is enforced.
 	if patch.BotWallSignatures != nil && len(*patch.BotWallSignatures) > model.MaxBotWallSignaturesLen {

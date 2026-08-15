@@ -12,6 +12,7 @@ import { db } from '$lib/db';
 import { captureError } from '$lib/sentry';
 import type { VocabEntry } from '$lib/types';
 import { buildVocabIndex, emptyVocabIndex, type VocabIndex } from './overlay';
+import { onVocabChanged } from './changes';
 
 export interface VocabStoreState {
 	/** Live (non-tombstoned) entries, as last read from Dexie. */
@@ -58,7 +59,9 @@ export async function refreshVocab(): Promise<void> {
 	try {
 		const [rows, outbox] = await Promise.all([
 			db.vocab_entries.toArray(),
-			db.outbox.where('kind').equals('lookup').toArray()
+			// Both kinds are un-flushed occurrences of an entry: a passive tap and a
+			// deliberate save count the same towards the displayed number.
+			db.outbox.where('kind').anyOf('lookup', 'manual_lookup').toArray()
 		]);
 
 		const pending = new Map<string, number>();
@@ -76,6 +79,15 @@ export async function refreshVocab(): Promise<void> {
 	}
 }
 
+// Reload whenever anything writes vocabulary rows to Dexie — the sync engine
+// applying a pull delta, or the outbox filling in the translation of a word the
+// user just saved (WORD-CACHE-ARCH.md §18.3). Registered once, at module load,
+// because this snapshot has no owner component: the reader and /words both read
+// it, and neither is guaranteed to be mounted when the write lands. Without it
+// the snapshot only reloaded on mount, so a saved word kept showing
+// "Translating…" until the reader was reopened.
+if (browser) onVocabChanged(() => void refreshVocab());
+
 /**
  * The count to display for an entry: the authoritative server count plus taps
  * still sitting in the outbox.
@@ -87,6 +99,18 @@ export function displayedCount(entry: VocabEntry): number {
 /** Whether an entry's displayed count includes un-flushed taps. */
 export function hasPendingLookups(entry: VocabEntry): boolean {
 	return (vocabStore.pending.get(entry.entry_key) ?? 0) > 0;
+}
+
+/**
+ * Whether the entry is still waiting for its translation.
+ *
+ * Only a manually saved term can be in this state: it is recorded the moment
+ * the user asks for it — offline included — and the translation arrives later,
+ * when the outbox reaches `POST /api/translate` (WORD-CACHE-ARCH.md §18). The
+ * UI shows the word with a "translating" hint rather than an empty line.
+ */
+export function isTranslationPending(entry: VocabEntry): boolean {
+	return entry.latest_translation.trim() === '';
 }
 
 /**

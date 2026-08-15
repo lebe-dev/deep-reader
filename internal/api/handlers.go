@@ -432,6 +432,7 @@ func serverInfoFromConfig(cfg *config.Config) model.ServerInfo {
 		EnrichmentPromptDefault:  llm.DefaultEnrichmentPromptTemplate,
 		SummaryPromptDefault:     llm.DefaultSummaryPromptTemplate,
 		NormalizePromptDefault:   normalize.DefaultPromptTemplate,
+		TranslatePromptDefault:   llm.DefaultTranslatePromptTemplate,
 		BotWallSignaturesDefault: strings.Join(model.DefaultBotWallSignatures, "\n"),
 		MarkdownEnabled:          cfg.MarkdownEnabled,
 		MarkdownBaseURL:          cfg.MarkdownBaseURL,

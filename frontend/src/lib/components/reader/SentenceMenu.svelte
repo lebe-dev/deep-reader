@@ -1,17 +1,25 @@
 <script lang="ts">
-	// SentenceMenu — small in-place action menu shown on a long-press over a
-	// sentence (touch) or a right-click (desktop). Anchored just below the
-	// pressed/clicked token, mirroring WordPopover's positioning. Offers two
-	// actions:
+	// SentenceMenu — small in-place action menu shown on a long-press over a word
+	// (touch) or a right-click (desktop). Anchored just below the pressed/clicked
+	// token, mirroring WordPopover's positioning. Offers:
+	//   Save "<word>"  → adds the word to the vocabulary (hidden once it is there).
+	//   Save phrase…   → starts picking the phrase's other end.
 	//   Copy sentence  → copies the sentence text to the clipboard.
 	//   Translate      → opens the sentence sheet (only when a translation exists).
+	//
+	// The two save items are why the menu opens on plain, unannotated words at
+	// all — those are precisely the words the reader cannot otherwise collect
+	// (WORD-CACHE-ARCH.md §18). The sentence items drop out when no sentence
+	// covers the token, which can leave the menu holding only the save actions.
 	//
 	// Positioning logic intentionally duplicates WordPopover rather than sharing
 	// a helper: the two panels have different sizes and the math is trivial.
 
 	import { cn } from '$lib/utils';
+	import BookmarkPlusIcon from '@lucide/svelte/icons/bookmark-plus';
 	import CopyIcon from '@lucide/svelte/icons/copy';
 	import LanguagesIcon from '@lucide/svelte/icons/languages';
+	import HighlighterIcon from '@lucide/svelte/icons/highlighter';
 	import type { SentenceMenuContent } from './reader-utils';
 
 	interface Props {
@@ -19,12 +27,20 @@
 		anchorEl: HTMLElement | null;
 		oncopy: (text: string) => void;
 		ontranslate: (content: SentenceMenuContent) => void;
+		/** Save the pressed word to the vocabulary. */
+		onsaveword: (content: SentenceMenuContent) => void;
+		/** Start picking a phrase that begins at the pressed word. */
+		onsavephrase: (content: SentenceMenuContent) => void;
 		onclose: () => void;
 	}
 
-	let { content, anchorEl, oncopy, ontranslate, onclose }: Props = $props();
+	let { content, anchorEl, oncopy, ontranslate, onsaveword, onsavephrase, onclose }: Props =
+		$props();
 
+	const hasSentence = $derived((content?.original.trim().length ?? 0) > 0);
 	const hasTranslation = $derived((content?.translation.trim().length ?? 0) > 0);
+	/** Already collected words offer nothing to save, so the item is hidden. */
+	const canSaveWord = $derived(content !== null && !content.alreadySaved);
 
 	/** Set when the menu was opened from the keyboard — see SentenceMenuContent. */
 	const viaKeyboard = $derived(content?.viaKeyboard === true);
@@ -133,6 +149,14 @@
 	function handleTranslate() {
 		if (content) ontranslate(content);
 	}
+
+	function handleSaveWord() {
+		if (content) onsaveword(content);
+	}
+
+	function handleSavePhrase() {
+		if (content) onsavephrase(content);
+	}
 </script>
 
 {#if content && anchorEl}
@@ -144,17 +168,41 @@
 		{style}
 		bind:this={menuEl}
 		role="menu"
-		aria-label="Sentence actions"
+		aria-label="Word actions"
 	>
+		{#if canSaveWord}
+			<button
+				type="button"
+				role="menuitem"
+				class="hover:bg-accent focus-visible:bg-accent focus-visible:ring-ring flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
+				onclick={handleSaveWord}
+			>
+				<BookmarkPlusIcon class="size-4 shrink-0" />
+				<span class="truncate">Save “{content.word}”</span>
+			</button>
+		{/if}
+
 		<button
 			type="button"
 			role="menuitem"
 			class="hover:bg-accent focus-visible:bg-accent focus-visible:ring-ring flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
-			onclick={handleCopy}
+			onclick={handleSavePhrase}
 		>
-			<CopyIcon class="size-4 shrink-0" />
-			<span>Copy sentence</span>
+			<HighlighterIcon class="size-4 shrink-0" />
+			<span>Save phrase…</span>
 		</button>
+
+		{#if hasSentence}
+			<button
+				type="button"
+				role="menuitem"
+				class="hover:bg-accent focus-visible:bg-accent focus-visible:ring-ring flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none"
+				onclick={handleCopy}
+			>
+				<CopyIcon class="size-4 shrink-0" />
+				<span>Copy sentence</span>
+			</button>
+		{/if}
 
 		{#if hasTranslation}
 			<button

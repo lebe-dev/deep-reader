@@ -422,6 +422,14 @@ type LLMClient interface {
 	// a bad pass never destroys the article. Like Enrich, it performs exactly one
 	// attempt.
 	Normalize(ctx context.Context, title, text string, settings model.Settings) (string, Usage, error)
+
+	// Translate produces one contextual translation for a word or phrase the
+	// user saved manually in the reader (WORD-CACHE-ARCH.md §18). It is a small,
+	// self-contained call: it never touches the article's enrichment, and the
+	// implementation filters the model's answer (an invented CEFR level or
+	// phrase type is dropped, an empty translation is an error). Like Enrich, it
+	// performs exactly one attempt — the retry lives in the client's outbox.
+	Translate(ctx context.Context, req model.TranslateRequest, settings model.Settings) (model.TranslateResponse, Usage, error)
 }
 
 // LLMProviderResolver supplies the active LLM connection at call time. The store

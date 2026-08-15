@@ -208,6 +208,55 @@ func TestSaveLookups_SurfaceFormsAreCappedAndDeduped(t *testing.T) {
 	}
 }
 
+func TestSaveLookups_SourceRidesTheAggregate(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Second)
+
+	manual := lookupAt("m1", "word:ru:abduct", "a1", 3, "abducted", at)
+	manual.Source = model.LookupSourceManual
+	// An event written before manual saving existed carries no source at all; it
+	// must read back as a tap rather than as an empty string.
+	legacy := lookupAt("t1", "word:ru:mitigate", "a1", 4, "mitigated", at)
+
+	if _, err := s.SaveLookups(ctx, []model.LookupEvent{manual, legacy}); err != nil {
+		t.Fatalf("SaveLookups: %v", err)
+	}
+
+	entries, err := s.ListVocab(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListVocab: %v", err)
+	}
+	got, ok := findEntry(entries, "word:ru:abduct")
+	if !ok {
+		t.Fatalf("manual aggregate missing; got %+v", entries)
+	}
+	if got.LatestSource != model.LookupSourceManual {
+		t.Errorf("LatestSource = %q, want %q", got.LatestSource, model.LookupSourceManual)
+	}
+	tapped, ok := findEntry(entries, "word:ru:mitigate")
+	if !ok {
+		t.Fatalf("tap aggregate missing; got %+v", entries)
+	}
+	if tapped.LatestSource != model.LookupSourceTap {
+		t.Errorf("LatestSource = %q, want %q (an empty source means tap)", tapped.LatestSource, model.LookupSourceTap)
+	}
+
+	// A later tap at another position supersedes the manual origin: latest_* is
+	// exactly that, the newest event's view of the entry.
+	later := lookupAt("t2", "word:ru:abduct", "a1", 9, "abduct", at.Add(time.Hour))
+	if _, err := s.SaveLookups(ctx, []model.LookupEvent{later}); err != nil {
+		t.Fatalf("SaveLookups later: %v", err)
+	}
+	entries, err = s.ListVocab(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListVocab: %v", err)
+	}
+	if got, _ = findEntry(entries, "word:ru:abduct"); got.LatestSource != model.LookupSourceTap {
+		t.Errorf("LatestSource after a newer tap = %q, want %q", got.LatestSource, model.LookupSourceTap)
+	}
+}
+
 func TestListVocab_DeltaBySince(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

@@ -36,6 +36,7 @@ export type OutboxKind =
 	| 'reenrich'
 	| 'pin'
 	| 'lookup'
+	| 'manual_lookup'
 	| 'vocab_delete';
 
 /** Payload shapes keyed by outbox kind. */
@@ -54,6 +55,14 @@ export interface OutboxPayloadMap {
 	 * append-only stream with no ordering relationship to the other kinds.
 	 */
 	lookup: LookupEvent;
+	/**
+	 * A word or phrase saved deliberately from the reader's action menu
+	 * (WORD-CACHE-ARCH.md §18). It carries the same event shape, but with an
+	 * empty `translation` until the drain fetches one from `POST /api/translate`
+	 * — which is why it stays in the FIFO loop instead of joining the batched
+	 * `lookup` drain: each entry may need its own request first.
+	 */
+	manual_lookup: LookupEvent;
 	vocab_delete: { entry_key: string };
 }
 

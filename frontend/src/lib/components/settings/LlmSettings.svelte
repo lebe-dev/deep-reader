@@ -151,6 +151,27 @@
 
 			<Separator />
 
+			<!-- Single-term translation (words and phrases saved from the reader) -->
+			<PromptEditor
+				id="translate-prompt"
+				label="Saved-word translation prompt"
+				rows={10}
+				saved={settings.translate_prompt}
+				defaultValue={serverInfo?.translate_prompt_default ?? ''}
+				onSave={(value) => patchField({ translate_prompt: value })}
+				onReset={() => patchField({ translate_prompt: '' })}
+			>
+				{#snippet help()}
+					System prompt for translating a single word or phrase you save from the reader (long-press
+					a word → “Save”). It runs once per saved term, with the sentence it appeared in as
+					context, and never touches the article's own annotations. Pre-filled with the default
+					template — edit it to customise. Supported placeholders:
+					<code>{'{{target_language}}'}</code>, <code>{'{{cefr_level}}'}</code>.
+				{/snippet}
+			</PromptEditor>
+
+			<Separator />
+
 			<!-- Skip the summary step entirely (off by default). -->
 			<div class="flex items-start justify-between gap-4">
 				<div class="grid gap-0.5">

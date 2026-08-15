@@ -371,6 +371,11 @@ type Settings struct {
 	// extractor leaked into the article body. Empty means use the built-in
 	// default (normalize.DefaultPromptTemplate).
 	NormalizePrompt string `json:"normalize_prompt"`
+	// TranslatePrompt is the user's custom system-prompt template for the
+	// on-demand translation of a single saved word or phrase (POST
+	// /api/translate). Empty means use the built-in default
+	// (llm.DefaultTranslatePromptTemplate).
+	TranslatePrompt string `json:"translate_prompt"`
 	// BotWallSignatures is the user's custom newline-separated list of bot-wall /
 	// captcha substrings the fetch stage matches against to detect a challenge
 	// page before any LLM call. Empty means use the built-in
@@ -421,6 +426,7 @@ type SettingsPatch struct {
 	EnrichmentPrompt         *string `json:"enrichment_prompt,omitempty"`
 	SummaryPrompt            *string `json:"summary_prompt,omitempty"`
 	NormalizePrompt          *string `json:"normalize_prompt,omitempty"`
+	TranslatePrompt          *string `json:"translate_prompt,omitempty"`
 	BotWallSignatures        *string `json:"bot_wall_signatures,omitempty"`
 	ChunkTokens              *int    `json:"chunk_tokens,omitempty"`
 	FontSize                 *string `json:"font_size,omitempty"`
@@ -656,6 +662,10 @@ type ServerInfo struct {
 	// NormalizePromptDefault is the built-in content-normalization prompt template
 	// the client pre-fills the editor with and resets to. It is non-secret.
 	NormalizePromptDefault string `json:"normalize_prompt_default"`
+	// TranslatePromptDefault is the built-in single-term translation prompt
+	// template the client pre-fills the editor with and resets to. It is
+	// non-secret.
+	TranslatePromptDefault string `json:"translate_prompt_default"`
 	// BotWallSignaturesDefault is the built-in newline-separated bot-wall /
 	// captcha signature list the client pre-fills the editor with and resets to.
 	BotWallSignaturesDefault string `json:"bot_wall_signatures_default"`
@@ -820,25 +830,44 @@ const (
 	LookupKindPhrase = "phrase"
 )
 
+// Lookup sources — how the term entered the vocabulary.
+const (
+	// LookupSourceTap is the passive capture of WORD-CACHE-ARCH.md §5: the user
+	// tapped a word the enrichment had already annotated and saw its
+	// translation. It is what an empty Source means, so events written before
+	// manual saving existed keep their meaning.
+	LookupSourceTap = "tap"
+	// LookupSourceManual is an explicit save from the reader's action menu: the
+	// user picked a word or phrase the LLM never annotated. Its translation is
+	// fetched on demand (POST /api/translate) rather than read off the article.
+	LookupSourceManual = "manual"
+)
+
+// LookupSources is the set of valid LookupEvent.Source values.
+var LookupSources = []string{LookupSourceTap, LookupSourceManual}
+
 // LookupEvent is one recorded translation lookup: the user tapped a word or
 // phrase in the reader and saw its translation. Events are append-only and
 // deduplicated by (ArticleID, Kind, SpanStart) — one event per distinct
 // position — so re-tapping the same word never inflates the counter.
 type LookupEvent struct {
-	ID           string    `json:"id"`
-	EntryKey     string    `json:"entry_key"`
-	Kind         string    `json:"kind"`
-	ArticleID    string    `json:"article_id"`
-	ArticleTitle string    `json:"article_title"`
-	SpanStart    int       `json:"span_start"`
-	SpanEnd      int       `json:"span_end"`
-	Surface      string    `json:"surface"`
-	Lemma        string    `json:"lemma"`
-	Translation  string    `json:"translation"`
-	CEFRLevel    string    `json:"cefr_level,omitempty"`
-	PhraseType   string    `json:"phrase_type,omitempty"`
-	Context      string    `json:"context"`
-	OccurredAt   time.Time `json:"occurred_at"`
+	ID           string `json:"id"`
+	EntryKey     string `json:"entry_key"`
+	Kind         string `json:"kind"`
+	ArticleID    string `json:"article_id"`
+	ArticleTitle string `json:"article_title"`
+	SpanStart    int    `json:"span_start"`
+	SpanEnd      int    `json:"span_end"`
+	Surface      string `json:"surface"`
+	Lemma        string `json:"lemma"`
+	Translation  string `json:"translation"`
+	CEFRLevel    string `json:"cefr_level,omitempty"`
+	PhraseType   string `json:"phrase_type,omitempty"`
+	Context      string `json:"context"`
+	// Source is LookupSourceTap (passive capture) or LookupSourceManual (saved
+	// deliberately from the reader's action menu). Empty is read as tap.
+	Source     string    `json:"source,omitempty"`
+	OccurredAt time.Time `json:"occurred_at"`
 }
 
 // VocabEntry is the aggregate of every LookupEvent sharing an EntryKey — the row
@@ -864,8 +893,11 @@ type VocabEntry struct {
 	LatestContext      string    `json:"latest_context"`
 	LatestArticleID    string    `json:"latest_article_id"`
 	LatestArticleTitle string    `json:"latest_article_title"`
-	DeletedAt          time.Time `json:"deleted_at,omitzero"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	// LatestSource mirrors the newest event's Source, so /words can tell a word
+	// that collected itself from one the user saved deliberately.
+	LatestSource string    `json:"latest_source,omitempty"`
+	DeletedAt    time.Time `json:"deleted_at,omitzero"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // MaxSurfaceForms caps how many observed inflections an aggregate retains, most
@@ -885,6 +917,44 @@ type SaveLookupsRequest struct {
 // id or by position) are silently ignored, so Accepted may be below len(Events).
 type SaveLookupsResponse struct {
 	Accepted int `json:"accepted"`
+}
+
+// Length caps for a translate request. Text and Lemma bound a term; Context is
+// the covering sentence, which the client already truncates to 300 characters.
+const (
+	MaxTranslateTextLen    = 200
+	MaxTranslateContextLen = 500
+)
+
+// TranslateRequest is the POST /api/translate body: one word or phrase the user
+// saved from the reader, with the sentence it appeared in. The target language,
+// CEFR level and prompt all come from Settings — the client sends only what it
+// cannot know.
+type TranslateRequest struct {
+	// Kind is LookupKindWord or LookupKindPhrase. It selects what the model is
+	// asked for: a CEFR level for a word, a phrase type for a phrase.
+	Kind string `json:"kind"`
+	// Text is the surface form exactly as it appears in the article.
+	Text string `json:"text"`
+	// Lemma is the dictionary form the client derived from the token lemmas.
+	// Empty is acceptable; the model then works from Text alone.
+	Lemma string `json:"lemma"`
+	// Context is the covering sentence, so the translation matches the sense the
+	// word carries HERE rather than its most common one. May be empty.
+	Context string `json:"context"`
+}
+
+// TranslateResponse is the on-demand translation of one saved term. It carries
+// exactly the fields a LookupEvent needs, so the client can fill in the event it
+// queued and post it unchanged.
+type TranslateResponse struct {
+	Translation string `json:"translation"`
+	// CEFRLevel is set for words only, and only when the model returns a valid
+	// level (see CEFRLevels).
+	CEFRLevel string `json:"cefr_level,omitempty"`
+	// PhraseType is set for phrases only, and only when the model returns a
+	// valid type (see PhraseTypes).
+	PhraseType string `json:"phrase_type,omitempty"`
 }
 
 // Public-page TTL bounds for Settings.PublicPageTTLHours. 0 is accepted

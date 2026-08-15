@@ -1666,3 +1666,167 @@ func captureSystemPromptOpts(t *testing.T, settings model.Settings, opts ports.E
 	}
 	return system
 }
+
+// ── Translate (on-demand translation of a manually saved term) ────────────────
+
+// translateServer answers a translate call with `content` and records the two
+// prompts it was sent.
+func translateServer(t *testing.T, content string, system, user *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "system" && system != nil {
+				*system = m.Content
+			}
+			if m.Role == "user" && user != nil {
+				*user = m.Content
+			}
+		}
+		payload, err := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"content": content}}},
+			"usage":   map[string]int{"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+		})
+		if err != nil {
+			t.Errorf("marshal translate response: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(payload)
+	}))
+}
+
+func TestTranslate_WordCarriesContextAndLevel(t *testing.T) {
+	var system, user string
+	srv := translateServer(t, `{"translation":"устойчивый","cefr_level":"B2"}`, &system, &user)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	got, usage, err := client.Translate(context.Background(), model.TranslateRequest{
+		Kind:    model.LookupKindWord,
+		Text:    "resilient",
+		Lemma:   "resilient",
+		Context: "The system proved remarkably resilient to shocks.",
+	}, testSettings())
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got.Translation != "устойчивый" {
+		t.Errorf("Translation = %q, want устойчивый", got.Translation)
+	}
+	if got.CEFRLevel != model.CEFRB2 {
+		t.Errorf("CEFRLevel = %q, want B2", got.CEFRLevel)
+	}
+	if got.PhraseType != "" {
+		t.Errorf("PhraseType = %q, want empty for a word", got.PhraseType)
+	}
+	if usage.TotalTokens != 12 {
+		t.Errorf("usage.TotalTokens = %d, want 12", usage.TotalTokens)
+	}
+	// The sentence is what makes the translation contextual — without it the
+	// model returns the most common sense, which is the bug this guards.
+	if !strings.Contains(user, "resilient to shocks") {
+		t.Errorf("user prompt lost the context sentence: %q", user)
+	}
+	if !strings.Contains(system, model.DefaultTargetLanguage) {
+		t.Errorf("system prompt lost the target language: %q", system)
+	}
+	if strings.Contains(system, "{{") {
+		t.Errorf("system prompt has unsubstituted placeholders: %q", system)
+	}
+}
+
+func TestTranslate_PhraseKeepsTypeAndDropsLevel(t *testing.T) {
+	var user string
+	srv := translateServer(t, `{"translation":"взлетать","phrase_type":"phrasal_verb","cefr_level":"C1"}`, nil, &user)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	got, _, err := client.Translate(context.Background(), model.TranslateRequest{
+		Kind:  model.LookupKindPhrase,
+		Text:  "take off",
+		Lemma: "take off",
+	}, testSettings())
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got.PhraseType != model.PhraseTypePhrasalVerb {
+		t.Errorf("PhraseType = %q, want phrasal_verb", got.PhraseType)
+	}
+	// A CEFR level is meaningless for a phrase; the model volunteering one must
+	// not end up on the vocabulary entry.
+	if got.CEFRLevel != "" {
+		t.Errorf("CEFRLevel = %q, want empty for a phrase", got.CEFRLevel)
+	}
+}
+
+// The model is a hint, not an authority (CLAUDE.md): a level or type outside the
+// known sets is dropped rather than stored and rendered as a badge.
+func TestTranslate_RejectsInvalidLevelAndType(t *testing.T) {
+	cases := []struct {
+		name    string
+		kind    string
+		content string
+	}{
+		{"invented cefr level", model.LookupKindWord, `{"translation":"перевод","cefr_level":"Z9"}`},
+		{"invented phrase type", model.LookupKindPhrase, `{"translation":"перевод","phrase_type":"proverb"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := translateServer(t, tc.content, nil, nil)
+			defer srv.Close()
+
+			client := llm.New(testConfig(srv.URL))
+			got, _, err := client.Translate(context.Background(),
+				model.TranslateRequest{Kind: tc.kind, Text: "x"}, testSettings())
+			if err != nil {
+				t.Fatalf("Translate: %v", err)
+			}
+			if got.Translation != "перевод" {
+				t.Errorf("Translation = %q, want перевод", got.Translation)
+			}
+			if got.CEFRLevel != "" || got.PhraseType != "" {
+				t.Errorf("invalid facets survived: %+v", got)
+			}
+		})
+	}
+}
+
+// An answer that echoes the source word is no translation at all; the caller
+// must be able to tell that apart from a real one.
+func TestTranslate_EmptyTranslationIsAnError(t *testing.T) {
+	srv := translateServer(t, `{"translation":"   "}`, nil, nil)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	_, _, err := client.Translate(context.Background(),
+		model.TranslateRequest{Kind: model.LookupKindWord, Text: "resilient"}, testSettings())
+	if err == nil {
+		t.Fatal("Translate: want an error for an empty translation, got nil")
+	}
+}
+
+func TestTranslate_CustomPromptTemplate(t *testing.T) {
+	var system string
+	srv := translateServer(t, `{"translation":"устойчивый"}`, &system, nil)
+	defer srv.Close()
+
+	client := llm.New(testConfig(srv.URL))
+	settings := testSettings()
+	settings.TranslatePrompt = "CUSTOM TRANSLATE into {{target_language}}."
+	if _, _, err := client.Translate(context.Background(),
+		model.TranslateRequest{Kind: model.LookupKindWord, Text: "resilient"}, settings); err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if !strings.Contains(system, "CUSTOM TRANSLATE") {
+		t.Errorf("custom translate prompt was not used: %q", system)
+	}
+	if !strings.Contains(system, model.DefaultTargetLanguage) {
+		t.Errorf("custom prompt placeholder not substituted: %q", system)
+	}
+}

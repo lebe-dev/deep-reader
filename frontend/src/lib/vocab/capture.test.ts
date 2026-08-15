@@ -29,7 +29,9 @@ vi.mock('$lib/sentry', () => ({ captureError: h.captureError }));
 
 import {
 	buildLookupEvent,
+	buildManualEvent,
 	captureLookup,
+	saveManualTerm,
 	contextFor,
 	resetCaptureSession,
 	truncateOnWordBoundary,
@@ -297,5 +299,152 @@ describe('captureLookup', () => {
 		expect(row.updated_at).toBe('srv');
 		expect(row.latest_translation).toBe('устойчивый');
 		expect(row.latest_article_title).toBe('The Economist');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Manual saving (WORD-CACHE-ARCH.md §18)
+// ---------------------------------------------------------------------------
+
+function manualInput(overrides: Partial<Parameters<typeof buildManualEvent>[0]> = {}) {
+	return {
+		articleId: 'a1',
+		articleTitle: 'The Economist',
+		kind: 'word' as const,
+		startIndex: 4,
+		endIndex: 4,
+		tokens,
+		originalText,
+		enrichment,
+		targetLang: 'ru',
+		...overrides
+	};
+}
+
+describe('buildManualEvent', () => {
+	it('keys a word on its lemma and leaves the translation empty', () => {
+		const event = buildManualEvent(manualInput({ startIndex: 3, endIndex: 3 }))!;
+
+		expect(event.entry_key).toBe('word:ru:remarkable');
+		expect(event.surface).toBe('remarkably');
+		expect(event.lemma).toBe('remarkable');
+		// Nothing annotated this word, so there is no translation to copy — the
+		// outbox fetches one from POST /api/translate.
+		expect(event.translation).toBe('');
+		expect(event.source).toBe('manual');
+	});
+
+	it('keys a phrase on the joined lemmas of the range', () => {
+		const event = buildManualEvent(manualInput({ kind: 'phrase', startIndex: 2, endIndex: 3 }))!;
+
+		expect(event.entry_key).toBe('phrase:ru:prove remarkable');
+		expect(event.surface).toBe('proved remarkably');
+		expect(event.span_start).toBe(2);
+		expect(event.span_end).toBe(3);
+	});
+
+	it('carries the covering sentence as context for the translation call', () => {
+		const event = buildManualEvent(manualInput())!;
+		expect(event.context).toBe('The market proved remarkably resilient');
+	});
+
+	it('reuses an existing enrichment translation instead of asking the LLM again', () => {
+		const annotated: Enrichment = {
+			...enrichment,
+			difficult_words: [
+				{ token_index: 4, lemma: 'resilient', translation: 'устойчивый', cefr_level: 'B2' }
+			]
+		};
+		const event = buildManualEvent(manualInput({ enrichment: annotated }))!;
+
+		expect(event.translation).toBe('устойчивый');
+		expect(event.cefr_level).toBe('B2');
+	});
+
+	it('reuses an enrichment phrase translation for the exact same range', () => {
+		const annotated: Enrichment = {
+			...enrichment,
+			phrases: [
+				{
+					start_index: 2,
+					end_index: 3,
+					type: 'idiom',
+					text: 'proved remarkably',
+					translation: 'оказался удивительно'
+				}
+			]
+		};
+		const event = buildManualEvent(
+			manualInput({ kind: 'phrase', startIndex: 2, endIndex: 3, enrichment: annotated })
+		)!;
+
+		expect(event.translation).toBe('оказался удивительно');
+		expect(event.phrase_type).toBe('idiom');
+	});
+
+	it('returns null for an unkeyable span', () => {
+		expect(buildManualEvent(manualInput({ startIndex: 99, endIndex: 99 }))).toBeNull();
+		expect(
+			buildManualEvent(manualInput({ kind: 'phrase', startIndex: 3, endIndex: 2 }))
+		).toBeNull();
+	});
+});
+
+describe('saveManualTerm', () => {
+	it('queues an untranslated term as manual_lookup so the drain translates it', async () => {
+		const result = await saveManualTerm(manualInput());
+
+		expect(result.status).toBe('saved');
+		expect(h.enqueueOutbox).toHaveBeenCalledWith(
+			'manual_lookup',
+			expect.objectContaining({ entry_key: 'word:ru:resilient', translation: '' })
+		);
+		// The word joins the vocabulary immediately, so the overlay lights up its
+		// other occurrences before any network round trip.
+		expect(h.vocabRows.get('word:ru:resilient')).toBeTruthy();
+	});
+
+	it('queues an already-translated term as a plain lookup — no LLM call needed', async () => {
+		const annotated: Enrichment = {
+			...enrichment,
+			difficult_words: [
+				{ token_index: 4, lemma: 'resilient', translation: 'устойчивый', cefr_level: 'B2' }
+			]
+		};
+		await saveManualTerm(manualInput({ enrichment: annotated }));
+
+		expect(h.enqueueOutbox).toHaveBeenCalledWith(
+			'lookup',
+			expect.objectContaining({ translation: 'устойчивый' })
+		);
+	});
+
+	it('reports an unkeyable span instead of queuing anything', async () => {
+		const result = await saveManualTerm(manualInput({ startIndex: 99, endIndex: 99 }));
+
+		expect(result.status).toBe('rejected');
+		expect(h.enqueueOutbox).not.toHaveBeenCalled();
+	});
+
+	it('does not blank an existing translation when the same lemma is saved again', async () => {
+		h.vocabRows.set('word:ru:resilient', {
+			entry_key: 'word:ru:resilient',
+			kind: 'word',
+			lemma: 'resilient',
+			target_lang: 'ru',
+			surface_forms: ['resilient'],
+			count: 3,
+			first_seen: '2026-01-01T00:00:00Z',
+			last_seen: '2026-01-02T00:00:00Z',
+			latest_translation: 'устойчивый',
+			latest_context: 'old context',
+			latest_article_id: 'a0',
+			latest_article_title: 'Old',
+			updated_at: '2026-01-02T00:00:00Z'
+		});
+
+		await saveManualTerm(manualInput());
+
+		expect(h.vocabRows.get('word:ru:resilient')!.latest_translation).toBe('устойчивый');
 	});
 });

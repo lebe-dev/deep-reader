@@ -19,9 +19,12 @@ import {
 	reEnrichArticle as apiReEnrichArticle,
 	retryArticle as apiRetryArticle,
 	saveLookups,
-	deleteVocabEntry
+	deleteVocabEntry,
+	translateTerm
 } from '$lib/api';
 import { addSyncBreadcrumb, captureError } from '$lib/sentry';
+import { applyTranslationLocally } from '$lib/vocab/capture';
+import { notifyVocabChanged } from '$lib/vocab/changes';
 import type {
 	ArticlePayload,
 	ConfigResponse,
@@ -141,6 +144,10 @@ export async function pull(): Promise<void> {
 	const serverProgress = response.progress ?? [];
 	const serverVocab = response.vocab ?? [];
 
+	// Set inside the transaction, announced after it commits: the in-memory
+	// vocabulary snapshot must reload from rows that are already durable.
+	let vocabChanged = false;
+
 	await db.transaction(
 		'rw',
 		[
@@ -200,6 +207,7 @@ export async function pull(): Promise<void> {
 				if (tombstoned.length > 0) {
 					await db.vocab_entries.bulkDelete(tombstoned.map((v) => v.entry_key));
 				}
+				vocabChanged = true;
 			}
 
 			// --- settings + markdown.new budget + server info + cursor ---
@@ -211,6 +219,8 @@ export async function pull(): Promise<void> {
 			});
 		}
 	);
+
+	if (vocabChanged) notifyVocabChanged();
 
 	// --- lazy payload fetch for enriched articles with a stale/absent cache ---
 	// Run outside the transaction so we don't hold it open during network I/O.
@@ -296,6 +306,15 @@ export async function flushOutbox(): Promise<void> {
 				return;
 			}
 
+			if (err instanceof ApiError && err.status === 429) {
+				// Rate limited. Despite being a 4xx this is transient by definition —
+				// the server asked us to slow down, not to give up — so the entry is
+				// kept and the drain stops. Dropping it here would silently lose the
+				// queued write (an added article, a saved word).
+				console.warn(`[sync] rate limited at entry ${entry.id} (${entry.kind}); retrying later`);
+				return;
+			}
+
 			if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
 				// Permanent client error — drop to avoid infinite retry. This is
 				// irrecoverable loss of a queued write, so report it before deleting
@@ -350,6 +369,12 @@ async function flushLookups(entries: OutboxEntry[]): Promise<boolean> {
 				return false;
 			}
 
+			if (err instanceof ApiError && err.status === 429) {
+				// Transient by definition — keep the chunk and stop (see flushOutbox).
+				console.warn('[sync] rate limited on a lookup batch; retrying later');
+				return false;
+			}
+
 			if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
 				// Permanent rejection — drop the chunk rather than wedge the outbox
 				// behind it. Losing lookups is acceptable (they are low-value
@@ -373,6 +398,50 @@ async function flushLookups(entries: OutboxEntry[]): Promise<boolean> {
 		}
 	}
 	return true;
+}
+
+/**
+ * Fill in the translation of a manually saved term, or decide that the save
+ * should go out without one.
+ *
+ * The failure policy is what makes this safe offline:
+ * - offline / 5xx / 429 / 401 → rethrow, so flushOutbox keeps the entry and
+ *   retries on the next sync. The word is never lost to a temporary problem.
+ * - any other 4xx → the term itself is unacceptable to the server and retrying
+ *   would loop forever, so the save proceeds UNTRANSLATED. Losing a translation
+ *   is recoverable (delete the entry and save the word again); losing the save
+ *   the user asked for is not.
+ */
+async function resolveManualTranslation(event: LookupEvent): Promise<LookupEvent> {
+	if (event.translation !== '') return event;
+
+	try {
+		const result = await translateTerm({
+			kind: event.kind,
+			text: event.surface,
+			lemma: event.lemma,
+			context: event.context
+		});
+		return {
+			...event,
+			translation: result.translation,
+			...(result.cefr_level ? { cefr_level: result.cefr_level } : {}),
+			...(result.phrase_type ? { phrase_type: result.phrase_type } : {})
+		};
+	} catch (err) {
+		if (err instanceof OfflineError) throw err;
+		if (
+			err instanceof ApiError &&
+			(err.status >= 500 || err.status === 429 || err.status === 401)
+		) {
+			throw err;
+		}
+		captureError(err, {
+			area: 'vocab',
+			extra: { op: 'translateTerm', kind: event.kind, surface_len: event.surface.length }
+		});
+		return event;
+	}
 }
 
 /** Dispatch a single outbox entry to the correct API call. */
@@ -419,6 +488,21 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 		case 'reenrich': {
 			const { id, mode } = entry.payload as { id: string; mode: ReEnrichMode };
 			await apiReEnrichArticle(id, mode);
+			return;
+		}
+		case 'manual_lookup': {
+			// A term the user saved deliberately. It has no translation yet (the
+			// LLM never annotated it), so one is fetched first and written back
+			// onto the event before it is recorded — see resolveManualTranslation
+			// for what happens when that call fails.
+			const queued = entry.payload as LookupEvent;
+			const event = await resolveManualTranslation(queued);
+			await saveLookups([event]);
+			await applyTranslationLocally(event);
+			// The reader may still be showing this word's popover, which was
+			// resolved before the translation existed. Announcing the change is
+			// what turns "Translating…" into the translation without a remount.
+			notifyVocabChanged();
 			return;
 		}
 		case 'vocab_delete': {
@@ -471,6 +555,16 @@ async function runSyncOnce(): Promise<void> {
 /** Determine whether the browser currently considers itself online. */
 function isOnline(): boolean {
 	return typeof navigator === 'undefined' || navigator.onLine;
+}
+
+/**
+ * Kick a sync when the network is there, ignoring the failure of a background
+ * attempt. It is what the enqueue helpers below do after every write; callers
+ * that queue an outbox entry themselves (the reader's manual vocabulary save)
+ * use it so their write does not sit until the next scheduled sync.
+ */
+export function triggerSync(): void {
+	if (isOnline()) sync().catch(console.warn);
 }
 
 /** Enqueue a progress update and optimistically update local db. */

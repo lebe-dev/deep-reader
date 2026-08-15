@@ -186,7 +186,9 @@ const m = vi.hoisted(() => {
 		patchSettings: vi.fn(),
 		saveLookups: vi.fn(),
 		deleteVocabEntry: vi.fn(),
+		translateTerm: vi.fn(),
 		clearSession: vi.fn(),
+		notifyVocabChanged: vi.fn(),
 		captureError: vi.fn(),
 		addSyncBreadcrumb: vi.fn()
 	};
@@ -207,7 +209,9 @@ const {
 	patchSettings,
 	saveLookups,
 	deleteVocabEntry,
+	translateTerm,
 	clearSession,
+	notifyVocabChanged,
 	captureError,
 	addSyncBreadcrumb
 } = m;
@@ -226,10 +230,13 @@ vi.mock('$lib/api', () => ({
 	putProgress: m.putProgress,
 	patchSettings: m.patchSettings,
 	saveLookups: m.saveLookups,
-	deleteVocabEntry: m.deleteVocabEntry
+	deleteVocabEntry: m.deleteVocabEntry,
+	translateTerm: m.translateTerm
 }));
 
 vi.mock('$lib/auth/store.svelte', () => ({ clearSession: m.clearSession }));
+
+vi.mock('$lib/vocab/changes', () => ({ notifyVocabChanged: m.notifyVocabChanged }));
 
 vi.mock('$lib/sentry', () => ({
 	captureError: m.captureError,
@@ -980,6 +987,21 @@ describe('pull — vocabulary delta', () => {
 		getConfig.mockResolvedValue(configResponse({ vocab: null }));
 		await expect(pull()).resolves.toBeUndefined();
 	});
+
+	// The reader overlay and /words render from an in-memory snapshot of these
+	// rows. Writing Dexie without announcing it leaves that snapshot stale until
+	// the page remounts, which is what made a saved word sit on "Translating…".
+	it('announces the change so the in-memory snapshot reloads', async () => {
+		getConfig.mockResolvedValue(configResponse({ vocab: [vocabEntry()] }));
+		await pull();
+		expect(notifyVocabChanged).toHaveBeenCalled();
+	});
+
+	it('stays quiet when the delta carried no vocabulary', async () => {
+		getConfig.mockResolvedValue(configResponse({ vocab: [] }));
+		await pull();
+		expect(notifyVocabChanged).not.toHaveBeenCalled();
+	});
 });
 
 describe('flushOutbox — lookups', () => {
@@ -1067,5 +1089,133 @@ describe('flushOutbox — lookups', () => {
 
 		expect(deleteVocabEntry).toHaveBeenCalledWith('word:ru:resilient');
 		expect(await outbox.toArray()).toHaveLength(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Manual vocabulary saves (WORD-CACHE-ARCH.md §18)
+// ---------------------------------------------------------------------------
+
+function manualEntry(id: number, translation = ''): OutboxEntry {
+	const entry = lookupEntry(id);
+	return {
+		...entry,
+		kind: 'manual_lookup',
+		payload: { ...entry.payload, translation, source: 'manual' }
+	} as OutboxEntry;
+}
+
+/** The local aggregate a manual save writes optimistically before the drain. */
+async function seedPendingEntry(): Promise<void> {
+	await vocab_entries.put({
+		entry_key: 'word:ru:resilient',
+		kind: 'word',
+		lemma: 'resilient',
+		target_lang: 'ru',
+		surface_forms: ['resilient'],
+		count: 0,
+		first_seen: '2026-06-10T12:00:00Z',
+		last_seen: '2026-06-10T12:00:00Z',
+		latest_translation: '',
+		latest_context: '',
+		latest_article_id: 'a1',
+		latest_article_title: 'T',
+		latest_source: 'manual',
+		updated_at: ''
+	} as VocabEntry);
+}
+
+describe('flushOutbox — manual saves', () => {
+	it('translates an untranslated term, posts it, and fills the local entry', async () => {
+		await seedPendingEntry();
+		await outbox.put(manualEntry(1));
+		translateTerm.mockResolvedValue({ translation: 'устойчивый', cefr_level: 'B2' });
+		saveLookups.mockResolvedValue({ accepted: 1 });
+
+		await flushOutbox();
+
+		expect(translateTerm).toHaveBeenCalledWith(
+			expect.objectContaining({ kind: 'word', text: 'resilient', lemma: 'resilient' })
+		);
+		expect(saveLookups.mock.calls[0][0][0]).toMatchObject({
+			translation: 'устойчивый',
+			cefr_level: 'B2',
+			source: 'manual'
+		});
+		// The reader popover and /words read this row, so the translation has to
+		// land locally too — the next pull only confirms it.
+		const row = await vocab_entries.get('word:ru:resilient');
+		expect(row?.latest_translation).toBe('устойчивый');
+		expect(await outbox.toArray()).toHaveLength(0);
+		// …and the open popover only learns about it through this signal.
+		expect(notifyVocabChanged).toHaveBeenCalled();
+	});
+
+	it('skips the translation call when the term already carries one', async () => {
+		await outbox.put(manualEntry(1, 'устойчивый'));
+		saveLookups.mockResolvedValue({ accepted: 1 });
+
+		await flushOutbox();
+
+		expect(translateTerm).not.toHaveBeenCalled();
+		expect(saveLookups).toHaveBeenCalledTimes(1);
+	});
+
+	it('keeps the save queued while offline so nothing is lost', async () => {
+		await outbox.put(manualEntry(1));
+		translateTerm.mockRejectedValue(new OfflineError());
+
+		await flushOutbox();
+
+		expect(saveLookups).not.toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(1);
+	});
+
+	it('keeps the save queued when the provider fails, and retries later', async () => {
+		await outbox.put(manualEntry(1));
+		translateTerm.mockRejectedValueOnce(new ApiError(502, 'provider down'));
+
+		await flushOutbox();
+		expect(await outbox.toArray()).toHaveLength(1);
+
+		translateTerm.mockResolvedValueOnce({ translation: 'устойчивый' });
+		saveLookups.mockResolvedValue({ accepted: 1 });
+		await flushOutbox();
+
+		expect(saveLookups).toHaveBeenCalledTimes(1);
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('keeps the save queued when rate limited rather than dropping the word', async () => {
+		await outbox.put(manualEntry(1));
+		translateTerm.mockRejectedValue(new ApiError(429, 'slow down'));
+
+		await flushOutbox();
+
+		expect(await outbox.toArray()).toHaveLength(1);
+	});
+
+	it('saves the word untranslated when the term is permanently rejected', async () => {
+		await outbox.put(manualEntry(1));
+		translateTerm.mockRejectedValue(new ApiError(400, 'text is too long'));
+		saveLookups.mockResolvedValue({ accepted: 1 });
+
+		await flushOutbox();
+
+		// Losing the translation is recoverable; losing the save is not.
+		expect(saveLookups.mock.calls[0][0][0]).toMatchObject({ translation: '' });
+		expect(captureError).toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('clears the session and stops on 401 from the translation call', async () => {
+		await outbox.put(manualEntry(1));
+		translateTerm.mockRejectedValue(new ApiError(401, ''));
+
+		await flushOutbox();
+
+		expect(clearSession).toHaveBeenCalled();
+		expect(saveLookups).not.toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(1);
 	});
 });

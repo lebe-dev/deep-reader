@@ -252,6 +252,8 @@ export interface Settings {
 	summary_prompt: string;
 	/** Custom content-normalization system-prompt template. Empty = use the server default. */
 	normalize_prompt: string;
+	/** Custom single-term translation system-prompt template. Empty = use the server default. */
+	translate_prompt: string;
 	/** Custom bot-wall / captcha signatures (one per line). Empty = use the server defaults. */
 	bot_wall_signatures: string;
 	/** Step-wise enrichment window size (tokens per chunk). 0 = use the server default. */
@@ -296,6 +298,7 @@ export type SettingsPatch = Partial<
 		| 'enrichment_prompt'
 		| 'summary_prompt'
 		| 'normalize_prompt'
+		| 'translate_prompt'
 		| 'bot_wall_signatures'
 		| 'chunk_tokens'
 		| 'font_size'
@@ -399,6 +402,8 @@ export interface ServerInfo {
 	summary_prompt_default: string;
 	/** Built-in content-normalization prompt template the client pre-fills / resets to. */
 	normalize_prompt_default: string;
+	/** Built-in single-term translation prompt template the client pre-fills / resets to. */
+	translate_prompt_default: string;
 	/** Built-in bot-wall / captcha signature list the client pre-fills / resets to. */
 	bot_wall_signatures_default: string;
 	markdown_enabled: boolean;
@@ -529,6 +534,9 @@ export interface ProgressUpdate {
 /** What a lookup recorded: a single word, or a multi-token phrase. */
 export type LookupKind = 'word' | 'phrase';
 
+/** How a term entered the vocabulary — passive capture, or a deliberate save. */
+export type LookupSource = 'tap' | 'manual';
+
 /**
  * One recorded translation lookup: the user tapped a word or phrase in the
  * reader and saw its translation. Events are append-only and deduplicated
@@ -558,6 +566,12 @@ export interface LookupEvent {
 	phrase_type?: string;
 	/** Covering sentence, truncated. Empty when no sentence covers the token. */
 	context: string;
+	/**
+	 * How the term entered the vocabulary: `tap` (the user opened an annotated
+	 * word's translation) or `manual` (the user saved a word the LLM never
+	 * annotated). Omitted means `tap`, matching the backend default.
+	 */
+	source?: LookupSource;
 	/** Client clock, RFC3339. */
 	occurred_at: string;
 }
@@ -590,6 +604,8 @@ export interface VocabEntry {
 	latest_context: string;
 	latest_article_id: string;
 	latest_article_title: string;
+	/** The newest event's source; `manual` marks a deliberately saved term. */
+	latest_source?: LookupSource;
 	/** Tombstone. Present and non-empty means the entry was deleted. */
 	deleted_at?: string;
 	/** Server clock — the delta-sync cursor field. */
@@ -605,6 +621,31 @@ export interface SaveLookupsRequest {
 export interface SaveLookupsResponse {
 	/** Events that actually landed; duplicates are ignored, so this may be less. */
 	accepted: number;
+}
+
+/**
+ * `POST /api/translate` request body: one term the user saved from the reader,
+ * with the sentence it appeared in. The target language, CEFR level and prompt
+ * all come from the server's settings — the client sends only what the server
+ * cannot know.
+ */
+export interface TranslateRequest {
+	kind: LookupKind;
+	/** Surface form exactly as it appears in the article. */
+	text: string;
+	/** Dictionary form derived from the token lemmas. May be empty. */
+	lemma: string;
+	/** Covering sentence, so the translation matches the sense used HERE. */
+	context: string;
+}
+
+/** `POST /api/translate` response — exactly the fields a LookupEvent needs. */
+export interface TranslateResponse {
+	translation: string;
+	/** Words only, and only when the model returned a valid CEFR level. */
+	cefr_level?: string;
+	/** Phrases only, and only when the model returned a valid phrase type. */
+	phrase_type?: string;
 }
 
 /** `POST /api/vocab/delete` request body. */

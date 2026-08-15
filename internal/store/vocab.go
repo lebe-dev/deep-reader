@@ -47,9 +47,9 @@ func (s *SQLite) SaveLookups(ctx context.Context, events []model.LookupEvent) (i
 
 	const insQ = `INSERT OR IGNORE INTO lookup_events
         (id, entry_key, kind, article_id, article_title, span_start, span_end,
-         surface, lemma, translation, cefr_level, phrase_type, context,
+         surface, lemma, translation, cefr_level, phrase_type, context, source,
          occurred_at, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 	createdAt := fmtTime(now())
 	accepted := 0
@@ -61,7 +61,7 @@ func (s *SQLite) SaveLookups(ctx context.Context, events []model.LookupEvent) (i
 		res, err := tx.ExecContext(ctx, insQ,
 			e.ID, e.EntryKey, e.Kind, e.ArticleID, e.ArticleTitle, e.SpanStart, e.SpanEnd,
 			e.Surface, e.Lemma, e.Translation, e.CEFRLevel, e.PhraseType, e.Context,
-			fmtTime(e.OccurredAt), createdAt,
+			lookupSourceOrDefault(e.Source), fmtTime(e.OccurredAt), createdAt,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("store: SaveLookups insert: %w", err)
@@ -94,6 +94,16 @@ func (s *SQLite) SaveLookups(ctx context.Context, events []model.LookupEvent) (i
 	return accepted, nil
 }
 
+// lookupSourceOrDefault normalizes an event's source. A client that predates
+// manual saving sends none, and the column is NOT NULL: an empty value is a tap,
+// which is what every event meant before the manual path existed.
+func lookupSourceOrDefault(source string) string {
+	if source == model.LookupSourceManual {
+		return model.LookupSourceManual
+	}
+	return model.LookupSourceTap
+}
+
 // recomputeAggregate rebuilds the vocab_entries row for entryKey from the
 // events currently in the log, clearing any tombstone (a fresh lookup revives a
 // deleted entry — see WORD-CACHE-ARCH.md §8.3).
@@ -119,11 +129,11 @@ func recomputeAggregate(ctx context.Context, tx *sql.Tx, entryKey string, stamp 
 	// deterministically when two events share an occurred_at second.
 	var latest model.LookupEvent
 	err = tx.QueryRowContext(ctx,
-		`SELECT kind, lemma, translation, cefr_level, phrase_type, context, article_id, article_title
+		`SELECT kind, lemma, translation, cefr_level, phrase_type, context, source, article_id, article_title
          FROM lookup_events WHERE entry_key = ?
          ORDER BY occurred_at DESC, id DESC LIMIT 1`, entryKey,
 	).Scan(&latest.Kind, &latest.Lemma, &latest.Translation, &latest.CEFRLevel,
-		&latest.PhraseType, &latest.Context, &latest.ArticleID, &latest.ArticleTitle)
+		&latest.PhraseType, &latest.Context, &latest.Source, &latest.ArticleID, &latest.ArticleTitle)
 	if err != nil {
 		return fmt.Errorf("store: recomputeAggregate latest %q: %w", entryKey, err)
 	}
@@ -140,8 +150,8 @@ func recomputeAggregate(ctx context.Context, tx *sql.Tx, entryKey string, stamp 
 	const upsertQ = `INSERT INTO vocab_entries
         (entry_key, kind, lemma, target_lang, surface_forms, count, first_seen, last_seen,
          latest_translation, latest_cefr_level, latest_phrase_type, latest_context,
-         latest_article_id, latest_article_title, deleted_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?)
+         latest_article_id, latest_article_title, latest_source, deleted_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?)
         ON CONFLICT(entry_key) DO UPDATE SET
             kind=excluded.kind,
             lemma=excluded.lemma,
@@ -156,13 +166,15 @@ func recomputeAggregate(ctx context.Context, tx *sql.Tx, entryKey string, stamp 
             latest_context=excluded.latest_context,
             latest_article_id=excluded.latest_article_id,
             latest_article_title=excluded.latest_article_title,
+            latest_source=excluded.latest_source,
             deleted_at='',
             updated_at=excluded.updated_at`
 
 	_, err = tx.ExecContext(ctx, upsertQ,
 		entryKey, latest.Kind, latest.Lemma, targetLangOf(entryKey), string(formsJSON), count,
 		firstSeen, lastSeen, latest.Translation, latest.CEFRLevel, latest.PhraseType,
-		latest.Context, latest.ArticleID, latest.ArticleTitle, fmtTime(stamp),
+		latest.Context, latest.ArticleID, latest.ArticleTitle,
+		lookupSourceOrDefault(latest.Source), fmtTime(stamp),
 	)
 	if err != nil {
 		return fmt.Errorf("store: recomputeAggregate upsert %q: %w", entryKey, err)
@@ -237,7 +249,8 @@ func (s *SQLite) ListKnownVocab(ctx context.Context) ([]model.VocabEntry, error)
 
 const vocabColumns = `entry_key, kind, lemma, target_lang, surface_forms, count,
     first_seen, last_seen, latest_translation, latest_cefr_level, latest_phrase_type,
-    latest_context, latest_article_id, latest_article_title, deleted_at, updated_at`
+    latest_context, latest_article_id, latest_article_title, latest_source,
+    deleted_at, updated_at`
 
 func (s *SQLite) queryVocab(ctx context.Context, since time.Time, aliveOnly bool) ([]model.VocabEntry, error) {
 	var (
@@ -285,7 +298,8 @@ func scanVocabEntry(rows *sql.Rows) (model.VocabEntry, error) {
 	)
 	if err := rows.Scan(&e.EntryKey, &e.Kind, &e.Lemma, &e.TargetLang, &formsJSON, &e.Count,
 		&firstSeen, &lastSeen, &e.LatestTranslation, &e.LatestCEFRLevel, &e.LatestPhraseType,
-		&e.LatestContext, &e.LatestArticleID, &e.LatestArticleTitle, &deleted, &upd); err != nil {
+		&e.LatestContext, &e.LatestArticleID, &e.LatestArticleTitle, &e.LatestSource,
+		&deleted, &upd); err != nil {
 		return model.VocabEntry{}, fmt.Errorf("store: scanVocabEntry: %w", err)
 	}
 	if err := json.Unmarshal([]byte(formsJSON), &e.SurfaceForms); err != nil {

@@ -340,11 +340,26 @@ export interface SentenceSheetContent {
 }
 
 /**
- * In-place action menu shown on a long-press over a sentence. Offers copying
- * the sentence and (when a translation exists in the enrichment) opening it.
+ * In-place action menu shown on a long-press (or right-click) over a word.
+ *
+ * It started as a sentence menu and still carries that name on the wire, but it
+ * is now the entry point for saving a word or a phrase to the vocabulary
+ * (WORD-CACHE-ARCH.md §18) — which is why it opens even for a token no sentence
+ * covers, where every sentence action is unavailable.
  */
 export interface SentenceMenuContent {
 	kind: 'sentence-menu';
+	/** The pressed token — the identity every save action works from. */
+	tokenIndex: number;
+	/** The pressed word, verbatim, for the "Save …" item's label. */
+	word: string;
+	/**
+	 * True when this word is already in the vocabulary. The save item is hidden
+	 * rather than disabled: an action that cannot do anything is noise in a menu
+	 * this small.
+	 */
+	alreadySaved: boolean;
+	/** The covering sentence, or an empty string when none covers the token. */
 	original: string;
 	/** Empty string when the enrichment has no translation for this sentence. */
 	translation: string;

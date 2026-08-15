@@ -608,6 +608,13 @@ func (f *fakeLLM) Summarize(_ context.Context, _ *model.Article, _ model.Setting
 	return "test summary", ports.Usage{PromptTokens: 3, CompletionTokens: 3, TotalTokens: 6}, nil
 }
 
+// Translate satisfies ports.LLMClient. The enrichment pool never calls it (the
+// on-demand term translation is driven straight from the API layer), so the
+// fake answers with a fixed stub rather than growing another knob.
+func (f *fakeLLM) Translate(_ context.Context, req model.TranslateRequest, _ model.Settings) (model.TranslateResponse, ports.Usage, error) {
+	return model.TranslateResponse{Translation: "перевод " + req.Text}, ports.Usage{}, nil
+}
+
 // Normalize is a configurable fake for the fetch-stage normalization step. By
 // default it is a pass-through (returns the text unchanged) so existing fetch
 // tests tokenize the same content. Tests can inject a transform via

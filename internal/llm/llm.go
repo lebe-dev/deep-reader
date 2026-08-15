@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -613,6 +614,145 @@ func (c *Client) Summarize(ctx context.Context, a *model.Article, settings model
 		return "", usage, &DecodeError{Raw: content, Err: fmt.Errorf("llm: unmarshal summary content: %w", err), Transient: transient}
 	}
 	return strings.TrimSpace(sr.Summary), usage, nil
+}
+
+// ── On-demand translation of a single saved term ──────────────────────────────
+//
+// This is the LLM half of manual vocabulary saving (WORD-CACHE-ARCH.md §18): the
+// user long-presses a word the enrichment never annotated, and the reader needs
+// one translation for it. Deliberately a separate, tiny call rather than a
+// re-enrichment — the article's annotation layer is not rewritten, only the
+// vocabulary entry gains a translation.
+
+// translateSchema is the JSON Schema for one term translation. Both optional
+// facets are declared so a provider that requires every property to be listed
+// still accepts the request; the Go post-filter decides what survives.
+const translateSchema = `{
+  "type": "object",
+  "required": ["translation"],
+  "additionalProperties": false,
+  "properties": {
+    "translation": {"type": "string"},
+    "cefr_level": {"type": "string"},
+    "phrase_type": {"type": "string"}
+  }
+}`
+
+// translateResponse is the parsed completion, before validation.
+type translateResponse struct {
+	Translation string `json:"translation"`
+	CEFRLevel   string `json:"cefr_level"`
+	PhraseType  string `json:"phrase_type"`
+}
+
+// DefaultTranslatePromptTemplate is the built-in system prompt for the
+// single-term translation, used when settings.TranslatePrompt is empty. The
+// {{target_language}} and {{cefr_level}} placeholders are substituted by
+// renderPrompt; the JSON schema is enforced separately via response_format.
+const DefaultTranslatePromptTemplate = "You are a bilingual dictionary for a learner of English whose level is " +
+	"{{cefr_level}}. Translate the given word or phrase into {{target_language}}, in the sense it carries in the " +
+	"supplied sentence — not its most common sense in general. Answer with the translation only: a dictionary " +
+	"form, at most a few words, no explanations, no source word, no quotes. For a single word also return its " +
+	"CEFR level as one of A2, B1, B2, C1, C2. For a phrase also return its type as one of idiom, phrasal_verb, " +
+	"term. Return ONLY the JSON object matching the provided schema. No markdown, no prose."
+
+// buildTranslatePrompt returns the system and user messages for the term
+// translation. The user message names the kind explicitly so the model knows
+// which of the two optional facets is being asked for.
+func buildTranslatePrompt(req model.TranslateRequest, settings model.Settings) (system, user string) {
+	template := settings.TranslatePrompt
+	if template == "" {
+		template = DefaultTranslatePromptTemplate
+	}
+	system = renderPrompt(template, settings, ports.EnrichOptions{})
+
+	kind := "Word"
+	if req.Kind == model.LookupKindPhrase {
+		kind = "Phrase"
+	}
+	user = kind + ": " + req.Text
+	if req.Lemma != "" && !strings.EqualFold(req.Lemma, req.Text) {
+		user += "\nDictionary form: " + req.Lemma
+	}
+	if req.Context != "" {
+		user += "\nSentence: " + req.Context
+	}
+	return system, user
+}
+
+// Translate produces one contextual translation for a word or phrase the user
+// saved from the reader. It performs exactly one HTTP request (with the usual
+// json_schema → json_object fallback); retry is the caller's responsibility —
+// here that is the client's outbox, which keeps the queued save until a
+// translation lands.
+//
+// The model's answer is filtered in Go before it is returned: an invented CEFR
+// level or phrase type is dropped, a level on a phrase (or a type on a word) is
+// dropped, and an empty translation is an error rather than a stored blank.
+func (c *Client) Translate(ctx context.Context, req model.TranslateRequest, settings model.Settings) (model.TranslateResponse, ports.Usage, error) {
+	cn, fromProfile := c.resolveConn(ctx)
+	systemPrompt, userPrompt := buildTranslatePrompt(req, settings)
+	reqBody := chatRequest{
+		Model: effectiveModel(cn, fromProfile, settings.LLMModel),
+		Messages: []chatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		ResponseFormat: schemaResponseFormat("translation", translateSchema, cn.forceJSONObject),
+		Temperature:    0.2,
+	}
+
+	content, usage, err := c.postChat(ctx, cn, reqBody)
+	if err != nil {
+		if !cn.forceJSONObject && isSchemaUnsupported(err) {
+			reqBody.ResponseFormat = &responseFormat{Type: "json_object"}
+			content, usage, err = c.postChat(ctx, cn, reqBody)
+		}
+		if err != nil {
+			return model.TranslateResponse{}, usage, err
+		}
+	}
+
+	var tr translateResponse
+	if err := json.Unmarshal([]byte(content), &tr); err != nil {
+		transient := strings.TrimSpace(content) == ""
+		return model.TranslateResponse{}, usage, &DecodeError{
+			Raw:       content,
+			Err:       fmt.Errorf("llm: unmarshal translation content: %w", err),
+			Transient: transient,
+		}
+	}
+
+	out, err := sanitizeTranslation(tr, req.Kind)
+	if err != nil {
+		return model.TranslateResponse{}, usage, err
+	}
+	return out, usage, nil
+}
+
+// sanitizeTranslation applies the deterministic filter to the model's answer.
+// Kept separate from the transport so it is testable on its own and so the rule
+// "the LLM is a hint, not an authority" lives in one readable place.
+func sanitizeTranslation(tr translateResponse, kind string) (model.TranslateResponse, error) {
+	out := model.TranslateResponse{Translation: strings.TrimSpace(tr.Translation)}
+	if out.Translation == "" {
+		return model.TranslateResponse{}, &DecodeError{
+			Raw:       tr.Translation,
+			Err:       errors.New("llm: empty translation"),
+			Transient: true,
+		}
+	}
+
+	if kind == model.LookupKindPhrase {
+		if slices.Contains(model.PhraseTypes, tr.PhraseType) {
+			out.PhraseType = tr.PhraseType
+		}
+		return out, nil
+	}
+	if slices.Contains(model.CEFRLevels, tr.CEFRLevel) {
+		out.CEFRLevel = tr.CEFRLevel
+	}
+	return out, nil
 }
 
 // Normalize runs the content-normalization pass of the fetch stage: it sends the

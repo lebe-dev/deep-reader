@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"deep-reader/internal/model"
+	"deep-reader/internal/ports"
 )
 
 func validEvent() model.LookupEvent {
@@ -270,5 +272,148 @@ func TestPatchSettings_VocabAssist(t *testing.T) {
 	}
 	if applied.VocabAssist == nil || *applied.VocabAssist {
 		t.Errorf("vocab_assist patch not applied: %+v", applied.VocabAssist)
+	}
+}
+
+// ── POST /api/translate ───────────────────────────────────────────────────────
+
+// fakeLLMClient records the translate call and answers with a canned response
+// (or the injected error). Only Translate is exercised by the API layer; the
+// other methods exist to satisfy ports.LLMClient.
+type fakeLLMClient struct {
+	req      model.TranslateRequest
+	settings model.Settings
+	calls    int
+	resp     model.TranslateResponse
+	err      error
+}
+
+func (f *fakeLLMClient) Enrich(context.Context, *model.Article, model.Settings, ports.EnrichOptions) (*model.Enrichment, ports.Usage, error) {
+	return nil, ports.Usage{}, errors.New("not used")
+}
+
+func (f *fakeLLMClient) EnrichSpans(context.Context, *model.Article, model.Settings, ports.EnrichOptions, []model.Span) (*model.Enrichment, ports.Usage, error) {
+	return nil, ports.Usage{}, errors.New("not used")
+}
+
+func (f *fakeLLMClient) Summarize(context.Context, *model.Article, model.Settings) (string, ports.Usage, error) {
+	return "", ports.Usage{}, errors.New("not used")
+}
+
+func (f *fakeLLMClient) Normalize(_ context.Context, _, text string, _ model.Settings) (string, ports.Usage, error) {
+	return text, ports.Usage{}, nil
+}
+
+func (f *fakeLLMClient) Translate(_ context.Context, req model.TranslateRequest, settings model.Settings) (model.TranslateResponse, ports.Usage, error) {
+	f.calls++
+	f.req = req
+	f.settings = settings
+	if f.err != nil {
+		return model.TranslateResponse{}, ports.Usage{}, f.err
+	}
+	return f.resp, ports.Usage{TotalTokens: 12, Model: "test-model"}, nil
+}
+
+// newTranslateServer builds a server wired to a fake LLM client.
+func newTranslateServer(t *testing.T, st *fakeStore, llm ports.LLMClient) *Server {
+	t.Helper()
+	s := newTestServer(t, st, &fakeIngestor{})
+	s.llm = llm
+	return s
+}
+
+func TestTranslateTerm_ReturnsTranslation(t *testing.T) {
+	st := &fakeStore{settings: model.Settings{
+		CEFRLevel:      model.CEFRB1,
+		TargetLanguage: model.DefaultTargetLanguage,
+	}}
+	llm := &fakeLLMClient{resp: model.TranslateResponse{Translation: "устойчивый", CEFRLevel: model.CEFRB2}}
+	s := newTranslateServer(t, st, llm)
+
+	body := model.TranslateRequest{
+		Kind:    model.LookupKindWord,
+		Text:    "resilient",
+		Lemma:   "resilient",
+		Context: "proved remarkably resilient to shocks",
+	}
+	resp := doReq(t, s, http.MethodPost, "/api/translate", body, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got model.TranslateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Translation != "устойчивый" || got.CEFRLevel != model.CEFRB2 {
+		t.Errorf("response = %+v", got)
+	}
+	// The stored settings supply the target language and level — the client
+	// never sends them, so a mismatch here means the wrong prompt was built.
+	if llm.settings.TargetLanguage != model.DefaultTargetLanguage {
+		t.Errorf("settings not passed through: %+v", llm.settings)
+	}
+	if llm.req.Context != body.Context {
+		t.Errorf("context lost: %q", llm.req.Context)
+	}
+}
+
+func TestTranslateTerm_Validation(t *testing.T) {
+	cases := []struct {
+		name string
+		body model.TranslateRequest
+	}{
+		{"unknown kind", model.TranslateRequest{Kind: "sentence", Text: "x"}},
+		{"empty text", model.TranslateRequest{Kind: model.LookupKindWord, Text: "   "}},
+		{"text too long", model.TranslateRequest{Kind: model.LookupKindWord, Text: strings.Repeat("a", model.MaxTranslateTextLen+1)}},
+		{"context too long", model.TranslateRequest{Kind: model.LookupKindWord, Text: "x", Context: strings.Repeat("a", model.MaxTranslateContextLen+1)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			llm := &fakeLLMClient{}
+			s := newTranslateServer(t, &fakeStore{}, llm)
+			resp := doReq(t, s, http.MethodPost, "/api/translate", tc.body, testToken)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			if llm.calls != 0 {
+				t.Errorf("provider was called for an invalid request (%d times)", llm.calls)
+			}
+		})
+	}
+}
+
+func TestTranslateTerm_RequiresAuth(t *testing.T) {
+	llm := &fakeLLMClient{}
+	s := newTranslateServer(t, &fakeStore{}, llm)
+	resp := doReq(t, s, http.MethodPost, "/api/translate",
+		model.TranslateRequest{Kind: model.LookupKindWord, Text: "resilient"}, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if llm.calls != 0 {
+		t.Errorf("provider was called without a session")
+	}
+}
+
+// Without an LLM client the route degrades to 503 rather than panicking — the
+// client keeps the queued save and retries, so the word is not lost.
+func TestTranslateTerm_NoClientIs503(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+	resp := doReq(t, s, http.MethodPost, "/api/translate",
+		model.TranslateRequest{Kind: model.LookupKindWord, Text: "resilient"}, testToken)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// A provider failure is upstream, not the client's fault: answering 4xx would
+// make the outbox DROP the queued save (see flushOutbox), losing the word.
+func TestTranslateTerm_ProviderFailureIs502(t *testing.T) {
+	llm := &fakeLLMClient{err: errors.New("provider exploded")}
+	s := newTranslateServer(t, &fakeStore{}, llm)
+	resp := doReq(t, s, http.MethodPost, "/api/translate",
+		model.TranslateRequest{Kind: model.LookupKindWord, Text: "resilient"}, testToken)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }

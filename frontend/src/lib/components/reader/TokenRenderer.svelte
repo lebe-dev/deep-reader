@@ -5,10 +5,11 @@
 	//
 	// Interactions:
 	//   Click word        → phrase (if in phrase range) or difficult-word popover.
-	//   Long-press (touch, ≥500ms) → in-place sentence action menu (the only path
-	//                      to a sentence translation; plain clicks/selection do not
-	//                      open the sentence sheet).
-	//   Right-click (desktop) → the same sentence action menu, the pointer-based
+	//   Long-press (touch, ≥500ms) → in-place word/sentence action menu: the only
+	//                      path to a sentence translation, and the entry point for
+	//                      saving a word or phrase to the vocabulary. It opens on
+	//                      EVERY token, annotated or not.
+	//   Right-click (desktop) → the same action menu, the pointer-based
 	//                      counterpart of the touch long-press.
 	//
 	// Keyboard: the annotated words form ONE composite widget with a roving
@@ -19,12 +20,13 @@
 	//   Shift+F10, Menu   → the sentence action menu (the keyboard's right-click).
 	//   Escape            → close whatever is open, focus stays on the word.
 	// Only annotated words take part: a plain word is inert to a click too, so
-	// making it a stop would promise something the reader cannot deliver.
+	// making it a stop would promise something the reader cannot deliver. The one
+	// exception is phrase-selection mode, where every word is a valid endpoint.
 	//
 	// Reading position: IntersectionObserver tracks furthest-seen word token;
 	// calls onProgress(tokenIndex) when it advances.
 
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
 	import type { Enrichment, Token } from '$lib/types';
 	import {
 		buildDifficultWordMap,
@@ -40,7 +42,12 @@
 		type SentenceMenuContent
 	} from './reader-utils';
 	import { buildMarkdownBlocks, type InlineMark, type InlineSegment } from './markdown-blocks';
-	import { buildOverlayIndices, emptyVocabIndex, type VocabIndex } from '$lib/vocab/overlay';
+	import {
+		buildOverlayIndices,
+		emptyVocabIndex,
+		matchWord,
+		type VocabIndex
+	} from '$lib/vocab/overlay';
 	import ImageLightbox from './ImageLightbox.svelte';
 	import { cn } from '$lib/utils';
 
@@ -65,8 +72,21 @@
 		vocabIndex?: VocabIndex;
 		/** Called when word/phrase popover content changes. */
 		onWordClick: (content: PopoverContent | null, anchor: HTMLElement | null) => void;
-		/** Called on long-press to open the in-place sentence action menu. */
+		/** Called on long-press to open the in-place word/sentence action menu. */
 		onSentenceMenu: (content: SentenceMenuContent | null, anchor: HTMLElement | null) => void;
+		/**
+		 * The first token of a phrase the user is picking, or null when not in
+		 * phrase-selection mode (WORD-CACHE-ARCH.md §18). While it is set, a tap on
+		 * any token completes the phrase instead of opening a translation — which
+		 * is the whole reason this state lives with the page rather than here: the
+		 * page owns the menu that starts it and the toast that explains it.
+		 */
+		phraseAnchor?: number | null;
+		/**
+		 * Called during phrase selection with the token the user tapped, or null
+		 * when the selection was cancelled (Escape).
+		 */
+		onPhraseSelect?: (tokenIndex: number | null) => void;
 	}
 
 	let {
@@ -78,8 +98,13 @@
 		vocabIndex = emptyVocabIndex(),
 		onProgress,
 		onWordClick,
-		onSentenceMenu
+		onSentenceMenu,
+		phraseAnchor = null,
+		onPhraseSelect
 	}: Props = $props();
+
+	/** True while the user is picking the second end of a phrase. */
+	const phraseSelecting = $derived(phraseAnchor !== null);
 
 	// ---------------------------------------------------------------------------
 	// Derived lookup maps
@@ -198,9 +223,13 @@
 	// Keyboard navigation (roving tabindex)
 	// ---------------------------------------------------------------------------
 
-	/** The annotated words, in reading order, one stop per phrase. */
+	// The annotated words, in reading order, one stop per phrase — except while a
+	// phrase is being picked, when EVERY word is a valid endpoint and arrow keys
+	// must be able to reach the plain ones too.
 	const interactiveIndices = $derived(
-		buildInteractiveIndices(tokens, difficultSet, phraseMap, vocabSet)
+		phraseSelecting
+			? tokens.map((token) => token.index)
+			: buildInteractiveIndices(tokens, difficultSet, phraseMap, vocabSet)
 	);
 
 	/** The word that currently owns the article's single tab stop. */
@@ -311,14 +340,24 @@
 	// Sentence helpers
 	// ---------------------------------------------------------------------------
 
+	// The menu opens for ANY token, including one no sentence covers: its word
+	// actions (save to the vocabulary) are exactly what a plain, unannotated word
+	// needs, and those are the words this feature exists for. The sentence
+	// actions simply drop out when there is no sentence.
 	function showSentenceMenuForToken(tokenIndex: number, anchor: HTMLElement, viaKeyboard = false) {
+		const token = tokens[tokenIndex];
+		if (!token) return;
 		const sentence = findCoveringSentence(tokenIndex, enrichment.sentences);
-		if (!sentence) return;
 		onSentenceMenu(
 			{
 				kind: 'sentence-menu',
-				original: sliceText(tokens, sentence.start_index, sentence.end_index, originalText),
-				translation: sentence.translation,
+				tokenIndex,
+				word: token.text,
+				alreadySaved: matchWord(vocabIndex, token) !== undefined,
+				original: sentence
+					? sliceText(tokens, sentence.start_index, sentence.end_index, originalText)
+					: '',
+				translation: sentence?.translation ?? '',
 				viaKeyboard
 			},
 			anchor
@@ -361,11 +400,34 @@
 		onWordClick(result, anchor);
 	}
 
+	// A manually saved word joins the vocabulary WITHOUT a translation and gains
+	// one moments later, when the outbox reaches POST /api/translate. The open
+	// popover is a snapshot taken at click time, so without this it would keep
+	// showing the pending state forever. Re-resolving on a vocabulary change
+	// keeps exactly one code path deciding what the panel shows.
+	// svelte-ignore state_referenced_locally
+	let renderedVocabIndex = vocabIndex;
+	$effect(() => {
+		const current = vocabIndex;
+		if (current === renderedVocabIndex) return;
+		renderedVocabIndex = current;
+		const index = untrack(() => describedIndex);
+		if (index === null) return;
+		const el = tokenEls.get(index);
+		if (el) openWordPanel(el, index);
+	});
+
 	function handleWordClick(event: MouseEvent | TouchEvent, tokenIndex: number) {
 		// Swallow the synthetic click that trails a long-press so it doesn't open
 		// the sentence sheet over the action menu.
 		if (longPressFired) {
 			longPressFired = false;
+			return;
+		}
+
+		// Picking a phrase: this tap names its other end, not a word to translate.
+		if (phraseSelecting) {
+			onPhraseSelect?.(tokenIndex);
 			return;
 		}
 
@@ -383,6 +445,10 @@
 			case ' ':
 				// Space would otherwise page down out from under the word.
 				event.preventDefault();
+				if (phraseSelecting) {
+					onPhraseSelect?.(tokenIndex);
+					return;
+				}
 				openWordPanel(anchor, tokenIndex);
 				return;
 			case 'ArrowRight':
@@ -396,6 +462,10 @@
 			// Up/Down are deliberately left alone: they scroll the article, which is
 			// what a reader parked on a word expects them to do.
 			case 'Escape':
+				if (phraseSelecting) {
+					onPhraseSelect?.(null);
+					return;
+				}
 				clearHighlight();
 				onWordClick(null, null);
 				onSentenceMenu(null, null);
@@ -412,8 +482,12 @@
 		}
 	}
 
-	// Touch: short tap = click, long press = sentence action menu.
+	// Touch: short tap = click, long press = the action menu.
 	function handleTouchStart(event: TouchEvent, tokenIndex: number) {
+		// While a phrase is being picked every token means "end the phrase here";
+		// opening the menu on top of that would offer a second, contradictory
+		// answer to the same press.
+		if (phraseSelecting) return;
 		clearLongPress();
 		longPressFired = false;
 		// Capture the anchor now; currentTarget is null once the timer fires.
@@ -443,9 +517,10 @@
 	// ---------------------------------------------------------------------------
 
 	function handleContextMenu(event: MouseEvent, tokenIndex: number) {
-		// Suppress the native context menu and open our sentence action menu,
-		// anchored to the right-clicked token (mirrors long-press positioning).
+		// Suppress the native context menu and open our action menu, anchored to
+		// the right-clicked token (mirrors long-press positioning).
 		event.preventDefault();
+		if (phraseSelecting) return;
 		const anchor = event.currentTarget as HTMLElement;
 		clearHighlight();
 		onWordClick(null, null);
@@ -458,6 +533,9 @@
 
 	function tokenClass(index: number): string {
 		const base = baseTokenClass.get(index) ?? 'token rounded-sm px-[1px]';
+		// The anchor of a phrase being picked stays lit until the range closes, so
+		// the user can see where the selection started while scrolling to its end.
+		if (phraseAnchor === index) return `${base} token-active rounded`;
 		const isHighlightedPhrase =
 			highlightedPhraseRange !== null &&
 			index >= highlightedPhraseRange.start &&
@@ -475,7 +553,7 @@
 	 the underline promises); a plain word stays plain text, because it does
 	 nothing when activated. -->
 {#snippet wordSpan(index: number, text: string, extra: string)}
-	{@const clickable = clickableSet.has(index)}
+	{@const clickable = clickableSet.has(index) || phraseSelecting}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->

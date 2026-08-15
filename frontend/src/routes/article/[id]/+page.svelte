@@ -24,6 +24,7 @@
 	import type {
 		ArticleMeta,
 		ArticlePayload,
+		LookupKind,
 		Progress,
 		ReEnrichMode,
 		FontSize,
@@ -41,7 +42,10 @@
 	} from '$lib/components/reader/reader-utils';
 	import { scrollBehavior } from '$lib/a11y';
 	import { captureError } from '$lib/sentry';
-	import { captureLookup, resetCaptureSession } from '$lib/vocab/capture';
+	import { captureLookup, resetCaptureSession, saveManualTerm } from '$lib/vocab/capture';
+	import { triggerSync } from '$lib/sync/engine';
+	import { syncStatus } from '$lib/sync/store.svelte';
+	import { savedTermMessage } from '$lib/vocab/pending';
 	import { refreshVocab, vocabIndex as currentVocabIndex } from '$lib/vocab/store.svelte';
 	import { emptyVocabIndex } from '$lib/vocab/overlay';
 	import { readerFont, getReaderFontCss } from '$lib/reader-font.svelte';
@@ -189,6 +193,11 @@
 	let sentenceContent: SentenceSheetContent | null = $state(null);
 	let sentenceMenu: SentenceMenuContent | null = $state(null);
 	let sentenceMenuAnchor: HTMLElement | null = $state(null);
+
+	// First token of a phrase being picked, or null when not picking one. Held
+	// here rather than in TokenRenderer because this page owns both the menu that
+	// starts the selection and the toast that explains it (WORD-CACHE-ARCH.md §18).
+	let phraseAnchor: number | null = $state(null);
 
 	// ---------------------------------------------------------------------------
 	// Load article
@@ -508,6 +517,75 @@
 		}
 	}
 
+	// ---------------------------------------------------------------------------
+	// Manual vocabulary saving (WORD-CACHE-ARCH.md §18)
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * Save a token range to the vocabulary and show what happened.
+	 *
+	 * The save is recorded locally first — offline included — so the word joins
+	 * the overlay at once; its translation is fetched by the outbox drain, which
+	 * is why the toast promises it rather than showing it. triggerSync starts
+	 * that drain immediately when there is a network.
+	 */
+	async function saveTerm(kind: LookupKind, startIndex: number, endIndex: number) {
+		if (!payload || !currentId) return;
+
+		const result = await saveManualTerm({
+			articleId: currentId,
+			articleTitle: meta?.title ?? '',
+			kind,
+			startIndex,
+			endIndex,
+			tokens: payload.tokens,
+			originalText: payload.original_text,
+			enrichment,
+			targetLang
+		});
+
+		if (result.status === 'rejected') {
+			toast.error('Could not save that.');
+			return;
+		}
+		await refreshVocab();
+		vocabVersion++;
+		if (result.status === 'duplicate') return;
+
+		// The save itself is already durable at this point — it went to the outbox
+		// before any network was involved — so the toast leads with that and only
+		// then says where the translation stands (WORD-CACHE-ARCH.md §18.3).
+		const translated = result.event.translation !== '';
+		toast(savedTermMessage(result.event.surface, translated, syncStatus.online));
+		if (!translated) triggerSync();
+	}
+
+	function handleSaveWord(content: SentenceMenuContent) {
+		closeSentenceMenu();
+		void saveTerm('word', content.tokenIndex, content.tokenIndex);
+	}
+
+	function handleSavePhrase(content: SentenceMenuContent) {
+		closeSentenceMenu();
+		phraseAnchor = content.tokenIndex;
+		toast('Tap the last word of the phrase.', {
+			duration: 8000,
+			action: { label: 'Cancel', onClick: () => (phraseAnchor = null) }
+		});
+	}
+
+	/**
+	 * Complete a phrase selection. Tapping the anchor again cancels — the same
+	 * gesture that started the selection undoes it, so there is no way to get
+	 * stuck in the mode without a visible escape.
+	 */
+	function handlePhraseSelect(tokenIndex: number | null) {
+		const anchor = phraseAnchor;
+		phraseAnchor = null;
+		if (anchor === null || tokenIndex === null || tokenIndex === anchor) return;
+		void saveTerm('phrase', Math.min(anchor, tokenIndex), Math.max(anchor, tokenIndex));
+	}
+
 	function handleSentenceTranslate(content: SentenceMenuContent) {
 		closeSentenceMenu();
 		handleSentenceSelect({
@@ -604,6 +682,8 @@
 	anchorEl={sentenceMenuAnchor}
 	oncopy={handleSentenceCopy}
 	ontranslate={handleSentenceTranslate}
+	onsaveword={handleSaveWord}
+	onsavephrase={handleSavePhrase}
 	onclose={closeSentenceMenu}
 />
 
@@ -815,7 +895,8 @@
 						<span class="underline decoration-dotted decoration-1 underline-offset-3">Dotted</span>
 						= difficult word ·
 						<span class="underline decoration-solid decoration-1 underline-offset-3">Solid</span>
-						= phrase · Tap a word to translate · Long-press or right-click for sentence · Keyboard:
+						= phrase · Tap a word to translate · Long-press or right-click to save a word or open the
+						sentence · Keyboard:
 						<kbd class="font-sans">Tab</kbd>
 						into the text,
 						<kbd class="font-sans">←</kbd> <kbd class="font-sans">→</kbd> between words,
@@ -863,6 +944,8 @@
 				onProgress={handleProgress}
 				onWordClick={handleWordClick}
 				onSentenceMenu={handleSentenceMenu}
+				{phraseAnchor}
+				onPhraseSelect={handlePhraseSelect}
 			/>
 		</div>
 

@@ -127,6 +127,10 @@ vocabulary-overlay match) as `role="button"`, and gives exactly one of them
 `buildInteractiveIndices` in `reader-utils.ts`, which must stay in step with
 `resolveClickContent`: anything a click can open must be reachable from the
 keyboard, and nothing else may become a stop. One stop per phrase, not per token.
+The single exception is phrase-selection mode (`phraseAnchor` set, see
+`WORD-CACHE-ARCH.md` §18): while the user is picking a phrase, *every* token is
+a valid endpoint, so every token becomes a button and joins the roving set —
+`←`/`→` then walk word by word and `Enter` closes the range.
 
 **Translated text carries `lang`.** The document is `lang="en"`, so any run in
 the user's target language (`Settings.target_language`, a BCP 47 tag) needs its
@@ -173,6 +177,44 @@ readability until the next reset. The remaining daily budget is shown in the
 | `MARKDOWN_TIMEOUT` | `45s` | Timeout for a single conversion. |
 | `MARKDOWN_DAILY_LIMIT` | `500` | Request-unit budget per UTC day (`0` = unlimited). |
 | `MARKDOWN_COST_PER_ARTICLE` | `50` | Request units charged per article conversion. |
+
+## Vocabulary and saved words
+
+Every word or phrase you tap for a translation is recorded automatically and fed
+back into reading — the full design is in
+[WORD-CACHE-ARCH.md](WORD-CACHE-ARCH.md). Two things about it are worth knowing
+before touching the code.
+
+**Manual saving** (`WORD-CACHE-ARCH.md` §18) lets the reader collect a word the
+LLM never annotated: long-press (or right-click) any token → *Save “word”*, or
+*Save phrase…* and then tap the phrase's other end. It writes into the same
+`vocab_entries` aggregate as a passive tap, so the overlay, `/words`, the
+enrichment filter and the delta sync need no special case.
+
+**`POST /api/translate`** is what supplies the translation for such a term:
+
+```
+POST /api/translate   {kind, text, lemma, context} -> {translation, cefr_level?, phrase_type?}
+```
+
+It is the only LLM call a client can trigger, so note:
+
+- It is **rate-limited to 60 requests/minute** (`defaultTranslateMax` in
+  `internal/api/api.go`), and the limiter is registered *left of* the handler.
+- Its status codes are a contract with the client's outbox: a 4xx makes the
+  queued save go out **untranslated**, a 5xx/429 makes it retry. A provider
+  failure must therefore answer 502, never 400.
+- The prompt is user-editable in Settings → LLM (`settings.translate_prompt`,
+  empty = `llm.DefaultTranslatePromptTemplate`); placeholders
+  `{{target_language}}` and `{{cefr_level}}`.
+- **Saving works offline.** Nothing in the save path touches the network: the
+  entry is written to Dexie and the outbox immediately, and the drain — woken by
+  the `online` event, the 60s foreground interval, or resume-from-background —
+  fills in the translation later. The pending state is worded by connectivity
+  (`vocab/pending.ts`, driven by `syncStatus.online`): "Translating…" when
+  online, "will translate when you're back online" when not. Keep that
+  distinction if you touch the copy — a spinner-ish label with no network reads
+  as a hung app.
 
 ## Public pages
 

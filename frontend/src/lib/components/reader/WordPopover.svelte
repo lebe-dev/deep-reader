@@ -8,6 +8,8 @@
 
 	import { cn } from '$lib/utils';
 	import { WORD_POPOVER_ID, type PopoverContent } from './reader-utils';
+	import { pendingTranslationLabel } from '$lib/vocab/pending';
+	import { syncStatus } from '$lib/sync/store.svelte';
 
 	interface Props {
 		content: PopoverContent | null;
@@ -104,6 +106,16 @@
 		return () => window.removeEventListener('keydown', onKeydown);
 	});
 
+	/**
+	 * Shown in place of the translation of a word the user just saved: the entry
+	 * exists locally the moment they ask for it, and its translation arrives when
+	 * the outbox reaches POST /api/translate — which offline means "later"
+	 * (WORD-CACHE-ARCH.md §18). The wording follows the connection, so an offline
+	 * save never claims to be translating; it flips on its own when the network
+	 * returns, and again when the translation lands.
+	 */
+	const pendingLabel = $derived(pendingTranslationLabel(syncStatus.online));
+
 	const phraseTypeLabel: Record<string, string> = {
 		idiom: 'Idiom',
 		phrasal_verb: 'Phrasal verb',
@@ -138,9 +150,13 @@
 					{phraseTypeLabel[content.phraseType] ?? content.phraseType}
 				</span>
 				<p class="font-semibold leading-snug">{content.original}</p>
-				<p class="text-muted-foreground leading-relaxed" {lang}>
-					{content.translationOrDefinition}
-				</p>
+				{#if content.translationOrDefinition}
+					<p class="text-muted-foreground leading-relaxed" {lang}>
+						{content.translationOrDefinition}
+					</p>
+				{:else}
+					<p class="text-muted-foreground text-sm italic">{pendingLabel}</p>
+				{/if}
 				{#if content.fromVocab}
 					<!-- Marks the translation as the user's own, captured elsewhere,
 						 rather than the model's reading of THIS article (§10.4). -->
@@ -172,7 +188,11 @@
 				{#if content.lemma && content.lemma !== content.original}
 					<p class="text-muted-foreground text-xs italic">{content.lemma}</p>
 				{/if}
-				<p class="leading-relaxed" {lang}>{content.translation}</p>
+				{#if content.translation}
+					<p class="leading-relaxed" {lang}>{content.translation}</p>
+				{:else}
+					<p class="text-muted-foreground text-sm italic">{pendingLabel}</p>
+				{/if}
 				{#if content.fromGlossary}
 					<span
 						class="self-start rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"

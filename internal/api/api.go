@@ -25,6 +25,7 @@
 //	PATCH  /api/settings                    partial settings update
 //	POST   /api/lookups                     {events} -> {accepted}; record word/phrase lookups
 //	POST   /api/vocab/delete                {entry_key} -> 204; soft-delete a vocabulary entry
+//	POST   /api/translate                   {kind,text,lemma,context} -> translation of one saved term
 //	GET    /api/llm-providers               list LLM connection profiles (keys masked)
 //	POST   /api/llm-providers               create a profile (first one becomes active)
 //	PATCH  /api/llm-providers/:id           update a profile (api_key write-only)
@@ -71,9 +72,18 @@ type Server struct {
 	// keep the rest of the service from starting.
 	pub *publish.Publisher
 
+	// llm serves POST /api/translate — the on-demand translation of a word the
+	// user saved manually (WORD-CACHE-ARCH.md §18). It is nil when the server
+	// was built without one, and the endpoint then answers 503 instead of
+	// panicking: every other route must keep working.
+	llm ports.LLMClient
+
 	// ingestMax overrides the POST /api/articles per-minute limit. Zero means
 	// use the default; tests set a small value to trip the 429 deterministically.
 	ingestMax int
+	// translateMax overrides the POST /api/translate per-minute limit. Zero
+	// means use the default.
+	translateMax int
 }
 
 // Option customises Server construction. It exists primarily so tests can
@@ -84,6 +94,14 @@ type Option func(*serverOptions)
 type serverOptions struct {
 	siteFS fs.FS
 	log    *slog.Logger
+	llm    ports.LLMClient
+}
+
+// WithLLMClient supplies the client POST /api/translate calls. Without it that
+// one route answers 503 and everything else is unaffected — which is also what
+// keeps api.New's documented three-argument signature intact.
+func WithLLMClient(client ports.LLMClient) Option {
+	return func(o *serverOptions) { o.llm = client }
 }
 
 // WithStaticFS overrides the embedded PWA filesystem (used in tests).
@@ -112,6 +130,7 @@ func New(cfg *config.Config, st ports.Store, ing ports.Ingestor, opts ...Option)
 		cfg:        cfg,
 		store:      st,
 		ingest:     ing,
+		llm:        o.llm,
 		log:        o.log,
 		loginGuard: newLoginGuard(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow, cfg.LoginLockoutDuration),
 	}
@@ -210,6 +229,10 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	// Word cache writes. The read side is the /api/config delta.
 	api.Post("/lookups", s.saveLookups)
 	api.Post("/vocab/delete", s.deleteVocabEntry)
+	// On-demand translation of one manually saved term. Rate-limited because it
+	// is the only client-triggered LLM call in the app, and the limiter must sit
+	// LEFT of the terminal handler (see ingestRateLimiter).
+	api.Post("/translate", s.translateRateLimiter(), s.translateTerm)
 
 	api.Get("/llm-providers", s.listLLMProviders)
 	api.Post("/llm-providers", s.createLLMProvider)
@@ -259,6 +282,27 @@ func (s *Server) ingestRateLimiter() fiber.Handler {
 	max := defaultIngestMax
 	if s.ingestMax > 0 {
 		max = s.ingestMax
+	}
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: time.Minute,
+		LimitReached: func(c fiber.Ctx) error {
+			return sendError(c, fiber.StatusTooManyRequests, "rate limit exceeded; slow down")
+		},
+	})
+}
+
+// defaultTranslateMax is the per-minute cap on POST /api/translate. Saving a
+// word is a deliberate, one-at-a-time action, so this is generous for a reader
+// and still bounds what a stuck client can spend at the provider.
+const defaultTranslateMax = 60
+
+// translateRateLimiter limits POST /api/translate. Like ingestRateLimiter it
+// must be registered ahead of the terminal handler.
+func (s *Server) translateRateLimiter() fiber.Handler {
+	max := defaultTranslateMax
+	if s.translateMax > 0 {
+		max = s.translateMax
 	}
 	return limiter.New(limiter.Config{
 		Max:        max,

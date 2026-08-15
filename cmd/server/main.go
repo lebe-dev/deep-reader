@@ -145,7 +145,7 @@ func run() error {
 	// cancelled.
 	go pool.Start(rootCtx)
 
-	srv := api.New(cfg, st, ingestor, api.WithLogger(log))
+	srv := api.New(cfg, st, ingestor, api.WithLogger(log), api.WithLLMClient(llmClient))
 
 	// Reclaim disk from public pages whose TTL ran out (and from files orphaned
 	// when their article was deleted). Expiry is enforced on every request

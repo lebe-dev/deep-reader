@@ -28,7 +28,9 @@ import type {
 	Publication,
 	PublishRequest,
 	SaveLookupsRequest,
-	SaveLookupsResponse
+	SaveLookupsResponse,
+	TranslateRequest,
+	TranslateResponse
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -412,6 +414,27 @@ export function deleteVocabEntry(entryKey: string, signal?: AbortSignal): Promis
 		body: { entry_key: entryKey },
 		signal
 	});
+}
+
+/**
+ * `POST /api/translate` — translate one word or phrase the user saved manually.
+ *
+ * A manually saved term has no translation anywhere (the LLM never annotated
+ * it), so this is the only client-triggered LLM call in the app. It is issued
+ * from the outbox drain rather than from the reader, which is what gives the
+ * offline path for free: the save is recorded locally either way and the
+ * translation catches up when a connection exists.
+ */
+export async function translateTerm(
+	req: TranslateRequest,
+	signal?: AbortSignal
+): Promise<TranslateResponse> {
+	const res = await request<TranslateResponse>('/api/translate', {
+		method: 'POST',
+		body: req,
+		signal
+	});
+	return res ?? { translation: '' };
 }
 
 // ---------------------------------------------------------------------------

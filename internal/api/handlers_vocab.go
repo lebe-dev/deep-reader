@@ -4,6 +4,9 @@
 package api
 
 import (
+	"log/slog"
+	"strings"
+
 	"github.com/gofiber/fiber/v3"
 
 	"deep-reader/internal/model"
@@ -79,6 +82,78 @@ func (s *Server) deleteVocabEntry(c fiber.Ctx) error {
 		return s.serverError(c, "delete vocab entry", err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// translateTerm translates one word or phrase the user saved from the reader.
+//
+// POST /api/translate  {kind, text, lemma, context}  ->  {translation, ...}
+//
+// It exists because a manually saved term has no translation anywhere: the LLM
+// never annotated it, so there is nothing to copy off the article (see
+// WORD-CACHE-ARCH.md §18). The target language, the CEFR level and the prompt
+// come from the stored settings — the client sends only what the server cannot
+// know.
+//
+// Status codes matter more here than elsewhere, because the client's outbox
+// reads them: a 4xx makes it DROP the queued save (the word is stored without a
+// translation), while a 5xx makes it keep the entry and retry. So a provider
+// failure is 502, never 400.
+func (s *Server) translateTerm(c fiber.Ctx) error {
+	if s.llm == nil {
+		return sendError(c, fiber.StatusServiceUnavailable, "translation is not available on this server")
+	}
+
+	var req model.TranslateRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
+	}
+	req.Text = strings.TrimSpace(req.Text)
+	req.Lemma = strings.TrimSpace(req.Lemma)
+	req.Context = strings.TrimSpace(req.Context)
+	if msg, ok := validateTranslateRequest(req); !ok {
+		return sendError(c, fiber.StatusBadRequest, msg)
+	}
+
+	settings, err := s.store.GetSettings(c.Context())
+	if err != nil {
+		return s.serverError(c, "translate: read settings", err)
+	}
+
+	out, usage, err := s.llm.Translate(c.Context(), req, settings)
+	if err != nil {
+		s.log.Error("translate term failed",
+			slog.String("kind", req.Kind),
+			slog.Int("text_bytes", len(req.Text)),
+			slog.Any("error", err),
+		)
+		return sendError(c, fiber.StatusBadGateway, "the translation provider failed; try again")
+	}
+	s.log.Debug("term translated",
+		slog.String("kind", req.Kind),
+		slog.String("model", usage.Model),
+		slog.Int("total_tokens", usage.TotalTokens),
+	)
+	return c.JSON(out)
+}
+
+// validateTranslateRequest checks the translate body against the wire contract.
+func validateTranslateRequest(req model.TranslateRequest) (msg string, ok bool) {
+	if req.Kind != model.LookupKindWord && req.Kind != model.LookupKindPhrase {
+		return "kind must be one of word, phrase", false
+	}
+	if req.Text == "" {
+		return "text must not be empty", false
+	}
+	if len(req.Text) > model.MaxTranslateTextLen {
+		return "text is too long", false
+	}
+	if len(req.Lemma) > model.MaxTranslateTextLen {
+		return "lemma is too long", false
+	}
+	if len(req.Context) > model.MaxTranslateContextLen {
+		return "context is too long", false
+	}
+	return "", true
 }
 
 // validateLookupEvent checks one event against the wire contract, returning a

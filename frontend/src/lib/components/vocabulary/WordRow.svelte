@@ -14,6 +14,9 @@
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import type { VocabEntry } from '$lib/types';
 	import { displayableSurfaceForms, highlightSegments } from './words-utils';
+	import { isTranslationPending } from '$lib/vocab/store.svelte';
+	import { pendingTranslationShortLabel } from '$lib/vocab/pending';
+	import { syncStatus } from '$lib/sync/store.svelte';
 
 	interface Props {
 		entry: VocabEntry;
@@ -46,6 +49,7 @@
 
 	const rowId = $derived(`word-row-${encodeURIComponent(entry.entry_key)}`);
 	const forms = $derived(displayableSurfaceForms(entry));
+	const translationPending = $derived(isTranslationPending(entry));
 
 	const phraseTypeLabel: Record<string, string> = {
 		idiom: 'Idiom',
@@ -109,9 +113,16 @@
 						>{/each}
 				</span>
 				<span class="text-muted-foreground min-w-0 flex-1 truncate text-sm" {lang}>
-					{#each highlightSegments(entry.latest_translation, query) as seg, i (i)}<span
-							class={seg.match ? 'bg-primary/20 rounded-[2px]' : ''}>{seg.text}</span
-						>{/each}
+					{#if translationPending}
+						<!-- A word saved manually is stored before its translation exists;
+							 the outbox fetches one on the next sync (§18). Offline that is
+							 "later", and the label says so rather than implying work. -->
+						<span class="italic">{pendingTranslationShortLabel(syncStatus.online)}</span>
+					{:else}
+						{#each highlightSegments(entry.latest_translation, query) as seg, i (i)}<span
+								class={seg.match ? 'bg-primary/20 rounded-[2px]' : ''}>{seg.text}</span
+							>{/each}
+					{/if}
 				</span>
 			</span>
 
@@ -153,7 +164,12 @@
 				<DropdownMenu.Item onclick={() => copy(entry.lemma, 'Word copied.')}>
 					Copy word
 				</DropdownMenu.Item>
-				<DropdownMenu.Item onclick={() => copy(entry.latest_translation, 'Translation copied.')}>
+				<!-- Disabled while the translation is still pending: copying an empty
+					 string and reporting "Translation copied." would be a small lie. -->
+				<DropdownMenu.Item
+					disabled={translationPending}
+					onclick={() => copy(entry.latest_translation, 'Translation copied.')}
+				>
 					Copy translation
 				</DropdownMenu.Item>
 				<DropdownMenu.Separator />
