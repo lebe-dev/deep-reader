@@ -17,6 +17,7 @@ import (
 	"math"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -77,19 +78,49 @@ type Pool struct {
 	// fall back to the lowercased text, as the field's contract requires.
 	lem    ports.Lemmatizer
 	notify chan struct{}
+
+	// claimMu guards inflight: the set of article IDs some worker is currently
+	// processing. ListWork deliberately returns in-flight statuses
+	// (fetching/enriching) so a crash-stranded article is re-selected — the
+	// price is that with more than one worker the same article appears in every
+	// worker's batch. Claiming is what stops two workers from processing (and
+	// double-spending LLM tokens on, and racing status writes over) the same
+	// article at the same time.
+	claimMu  sync.Mutex
+	inflight map[string]struct{}
 }
 
 // NewPool creates a new Pool. It satisfies ports.EnrichmentWorker via *Pool.
 // Start(ctx) must be called to launch the workers.
 func NewPool(cfg *config.Config, st ports.Store, ex ports.Extractor, client ports.LLMClient, lem ports.Lemmatizer) *Pool {
 	return &Pool{
-		cfg:    cfg,
-		store:  st,
-		ex:     ex,
-		llm:    client,
-		lem:    lem,
-		notify: make(chan struct{}, 1),
+		cfg:      cfg,
+		store:    st,
+		ex:       ex,
+		llm:      client,
+		lem:      lem,
+		notify:   make(chan struct{}, 1),
+		inflight: make(map[string]struct{}),
 	}
+}
+
+// tryClaim marks the article as being processed by this worker. It returns
+// false when another worker already holds the claim.
+func (p *Pool) tryClaim(id string) bool {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+	if _, held := p.inflight[id]; held {
+		return false
+	}
+	p.inflight[id] = struct{}{}
+	return true
+}
+
+// release frees the claim taken by tryClaim.
+func (p *Pool) release(id string) {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+	delete(p.inflight, id)
 }
 
 // Notify signals that new pending articles may be available. Non-blocking; a
@@ -189,7 +220,11 @@ func (p *Pool) drain(ctx context.Context, workerID int) {
 			if ctx.Err() != nil {
 				return
 			}
+			if !p.tryClaim(articles[i].ID) {
+				continue // another worker is already on it
+			}
 			p.processArticle(ctx, workerID, &articles[i])
+			p.release(articles[i].ID)
 		}
 
 		// If we got a full batch there may be more; loop back to check.
@@ -1251,15 +1286,22 @@ func isRetryable(err error) bool {
 
 // cancelled reports whether a stage error is the result of the worker's context
 // being cancelled (graceful shutdown) rather than a genuine pipeline failure.
-// It is true when ctx is already done, or when err wraps context.Canceled /
-// context.DeadlineExceeded — either way the caller must bail out without logging
-// an ERROR, persisting a *_failed status, or firing Sentry: the article stays in
-// its current queued/in-flight state and is re-selected on the next boot.
+// It is true when ctx is already done, or when err wraps context.Canceled — the
+// caller must then bail out without logging an ERROR, persisting a *_failed
+// status, or firing Sentry: the article stays in its current queued/in-flight
+// state and is re-selected on the next boot.
+//
+// Deliberately NOT matched: context.DeadlineExceeded. The worker context
+// carries no deadline, so with a live ctx a DeadlineExceeded can only come from
+// an HTTP client timeout (http.Client.Timeout wraps it since Go 1.16) — a slow
+// provider or site, i.e. a real failure that must be retried and, if it keeps
+// failing, recorded. Matching it here used to make every timed-out article
+// bail out silently and sit in fetching/enriching forever.
 func cancelled(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return true
 	}
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	return errors.Is(err, context.Canceled)
 }
 
 // rawResponder is implemented by errors that carry the raw LLM output that

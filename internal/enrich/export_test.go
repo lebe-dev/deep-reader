@@ -19,6 +19,12 @@ func IsRetryable(err error) bool {
 	return isRetryable(err)
 }
 
+// TryClaimForTest exposes the worker claim registry for unit tests.
+func (p *Pool) TryClaimForTest(id string) bool { return p.tryClaim(id) }
+
+// ReleaseClaimForTest exposes the claim release for unit tests.
+func (p *Pool) ReleaseClaimForTest(id string) { p.release(id) }
+
 // UncoveredSpans exposes the unexported uncoveredSpans for unit tests.
 func UncoveredSpans(e model.Enrichment, tokenCount int) []model.Span {
 	return uncoveredSpans(e, tokenCount)

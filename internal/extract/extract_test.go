@@ -2,6 +2,7 @@ package extract_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -435,5 +436,57 @@ func TestRebindToLoopbackBlockedAtConnect(t *testing.T) {
 	}
 	if !isErr(err, extract.ErrBlockedHost) {
 		t.Fatalf("expected ErrBlockedHost, got %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Transport-error classification
+// ----------------------------------------------------------------------------
+
+// A network-level fetch failure (connection refused, reset, timeout) is a
+// transient condition the enrichment pool should retry with backoff. The pool
+// classifies via the duck-typed Retryable(); a plain wrapped error would fail
+// the article permanently on the first hiccup of the site or of markdown.new's
+// readability fallback.
+func TestFetchNetworkErrorRetryable(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srvAddr(srv)
+	url := srv.URL
+	srv.Close() // guarantees connection refused on a just-freed port
+
+	ex := extract.NewForTest(minimalConfig(2*time.Second), addr)
+	_, err := ex.Extract(context.Background(), url)
+	if err == nil {
+		t.Fatal("Extract: want a transport error, got nil")
+	}
+
+	var te *extract.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("Extract: want *extract.TransportError, got %T (%v)", err, err)
+	}
+	if !te.Retryable() {
+		t.Error("a connection failure must be retryable")
+	}
+}
+
+// The SSRF guard's rejection also surfaces through the transport (the dialer
+// refuses to connect), but it is deterministic policy, not a network hiccup —
+// it must stay ErrBlockedHost and must NOT classify as retryable.
+func TestBlockedHostNotRetryable(t *testing.T) {
+	t.Parallel()
+
+	ex := extract.New(minimalConfig(2 * time.Second))
+	_, err := ex.Extract(context.Background(), "http://127.0.0.1:1/article")
+	if err == nil {
+		t.Fatal("Extract: want ErrBlockedHost, got nil")
+	}
+	if !errors.Is(err, extract.ErrBlockedHost) {
+		t.Fatalf("Extract: want ErrBlockedHost, got %v", err)
+	}
+	var re interface{ Retryable() bool }
+	if errors.As(err, &re) && re.Retryable() {
+		t.Error("an SSRF-blocked host must not be retryable")
 	}
 }

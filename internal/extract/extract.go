@@ -55,6 +55,23 @@ var (
 	ErrUnparseable = errors.New("article content could not be extracted")
 )
 
+// TransportError wraps a network-level failure to fetch the URL — a connection
+// refused/reset, a DNS failure, a TLS error, or the client timeout firing on a
+// slow site. The server never produced a response, so the condition is
+// transient by nature; Retryable() tells the enrichment pool to retry the fetch
+// with backoff instead of marking the article fetch_failed on the first hiccup.
+// SSRF rejections are excluded on purpose: they surface as ErrBlockedHost
+// (deterministic policy, never retried) before this wrapping applies.
+type TransportError struct{ Err error }
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// Retryable reports that the enrichment pool should retry: a transport-level
+// failure is always transient from the caller's point of view.
+func (e *TransportError) Retryable() bool { return true }
+
 // maxBodyBytes caps the HTTP response body read to 10 MiB.
 const maxBodyBytes = 10 * 1024 * 1024
 
@@ -189,7 +206,7 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*ports.ExtractR
 			return nil, ErrBlockedHost
 		}
 		slog.Warn("extract: fetch failed", "url", rawURL, "err", err)
-		return nil, fmt.Errorf("extract: fetch %q: %w", rawURL, err)
+		return nil, &TransportError{Err: fmt.Errorf("extract: fetch %q: %w", rawURL, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	slog.Debug("extract: response received",
@@ -203,7 +220,9 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*ports.ExtractR
 	limited := io.LimitReader(resp.Body, maxBodyBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, fmt.Errorf("extract: read body: %w", err)
+		// A mid-body failure is the same class of network fault as a failed Do:
+		// the stream dropped, so a re-fetch is worth attempting.
+		return nil, &TransportError{Err: fmt.Errorf("extract: read body: %w", err)}
 	}
 	if int64(len(body)) > maxBodyBytes {
 		slog.Warn("extract: response body exceeds limit", "url", rawURL, "limit_bytes", maxBodyBytes)

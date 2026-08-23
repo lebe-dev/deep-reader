@@ -479,6 +479,28 @@ func (e *APIError) Retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
+// TransportError wraps a failure to perform the HTTP exchange itself — a
+// connection refused/reset, a DNS failure, a TLS error, or http.Client.Timeout
+// firing on a slow provider. The provider never produced a status code, so
+// unlike APIError there is nothing to classify on: the condition is transient
+// by nature and always worth retrying.
+//
+// The client-timeout case is why this must be a distinct type: since Go 1.16
+// that error wraps context.DeadlineExceeded even though no caller context
+// carried a deadline. Returned as a plain wrapped error it was misread twice —
+// as a permanent failure by the pool's retry classification, and as a graceful
+// shutdown by its cancellation check, leaving the article silently stuck in an
+// in-flight status whenever the provider was merely slow.
+type TransportError struct{ Err error }
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// Retryable reports that the enrichment pool should retry: a transport-level
+// failure is always transient from the caller's point of view.
+func (e *TransportError) Retryable() bool { return true }
+
 // DecodeError wraps a failure to decode a successful (2xx) provider response —
 // either the chat envelope or the enrichment JSON inside it — together with the
 // raw model output that could not be parsed. The enrichment pool persists Raw
@@ -875,7 +897,7 @@ func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string
 	start := time.Now()
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return "", ports.Usage{}, fmt.Errorf("llm: http: %w", err)
+		return "", ports.Usage{}, &TransportError{Err: fmt.Errorf("llm: http: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -886,7 +908,9 @@ func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string
 	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
 	respBody, err := io.ReadAll(limited)
 	if err != nil {
-		return "", ports.Usage{}, fmt.Errorf("llm: read response body: %w", err)
+		// A mid-body failure is the same class of network fault as a failed Do:
+		// the stream dropped, so a re-send is worth attempting.
+		return "", ports.Usage{}, &TransportError{Err: fmt.Errorf("llm: read response body: %w", err)}
 	}
 	if int64(len(respBody)) > maxResponseBytes {
 		slog.Warn("llm: response body exceeds limit",

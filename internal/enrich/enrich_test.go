@@ -536,12 +536,19 @@ type fakeLLM struct {
 	// spanFunc, when set, computes the EnrichSpans result from the requested
 	// spans (used by the step-wise multi-chunk test).
 	spanFunc func([]model.Span) *model.Enrichment
+	// enrichDelay, when set, makes each EnrichSpans call sleep before touching
+	// the fake's state — outside the mutex, so concurrent callers overlap the
+	// way real slow LLM calls do (used by the worker-claim test).
+	enrichDelay time.Duration
 	// lastOpts records the options of the most recent call, so tests can assert
 	// what known-term list the prompt carried (WORD-CACHE-ARCH.md §9.2).
 	lastOpts ports.EnrichOptions
 }
 
 func (f *fakeLLM) EnrichSpans(_ context.Context, _ *model.Article, _ model.Settings, opts ports.EnrichOptions, spans []model.Span) (*model.Enrichment, ports.Usage, error) {
+	if f.enrichDelay > 0 {
+		time.Sleep(f.enrichDelay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callCount++
@@ -1780,4 +1787,113 @@ func (f *fakeLLM) lastEnrichOptions() ports.EnrichOptions {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastOpts
+}
+
+// TestFetchClientTimeoutMarksFetchFailed pins the distinction between a real
+// cancellation and an HTTP client timeout. A slow site makes the extract error
+// wrap context.DeadlineExceeded while the worker's context is still alive; that
+// is a genuine fetch failure and must surface as fetch_failed — historically it
+// was mistaken for a graceful shutdown and left the article silently stuck in
+// "fetching" forever, which the UI shows as endless processing.
+func TestFetchClientTimeoutMarksFetchFailed(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-fetchtimeout", "https://example.com/a"))
+	ex := &fakeExtractor{
+		err: fmt.Errorf("extract: fetch %q: %w", "https://example.com/a", context.DeadlineExceeded),
+	}
+	llm := &fakeLLM{result: goodEnrichment(2)}
+	pool := enrich.NewPool(testCfg(1, 0), st, ex, llm, nil)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-fetchtimeout") == model.StatusFetchFailed
+	})
+	if !ok {
+		t.Fatalf("a client timeout must mark fetch_failed, got %q", st.status("article-fetchtimeout"))
+	}
+	if st.errMsg("article-fetchtimeout") == "" {
+		t.Error("expected the timeout error message to be stored")
+	}
+}
+
+// TestTopUpClientTimeoutMarksEnrichFailed is the top-up twin of the fetch test
+// above: an EnrichSpans error wrapping context.DeadlineExceeded with a live
+// worker context is a failed LLM call, not a shutdown, and must surface as
+// enrich_failed instead of leaving the article stuck in "enriching".
+func TestTopUpClientTimeoutMarksEnrichFailed(t *testing.T) {
+	const id = "article-topuptimeout"
+	article := makeArticle(id, 6)
+	article.Status = model.StatusTopupQueued
+	st := newFakeStore(article)
+	// Existing enrichment covers only [0,2]; tokens [3,5] are an uncovered gap, so
+	// the top-up will issue an EnrichSpans call.
+	st.enrichments[id] = model.Enrichment{
+		DifficultWords: []model.DifficultWord{word(0)},
+		Sentences:      []model.Sentence{sentence(0, 2)},
+	}
+	llm := &fakeLLM{
+		failN:   100, // always fail
+		failErr: fmt.Errorf("llm: http: %w", context.DeadlineExceeded),
+	}
+	pool := enrich.NewPool(testCfg(1, 0), st, &fakeExtractor{}, llm, nil)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status(id) == model.StatusEnrichFailed
+	})
+	if !ok {
+		t.Fatalf("a client timeout must mark enrich_failed, got %q", st.status(id))
+	}
+}
+
+// TestWorkersDoNotDoubleProcessSameArticle: ListWork deliberately returns
+// in-flight statuses (so a crash-stranded article is re-selected), which means
+// every worker's batch can contain the article another worker is busy with.
+// The claim registry must make the second worker skip it — otherwise two
+// workers annotate the same article concurrently, double-spending LLM tokens
+// and racing each other's status writes.
+func TestWorkersDoNotDoubleProcessSameArticle(t *testing.T) {
+	article := makeArticle("article-shared", 5)
+	st := newFakeStore(article)
+	llm := &fakeLLM{
+		result: goodEnrichment(5),
+		// Long enough for the second worker to wake, list the same article, and
+		// (correctly) skip it while the first worker is still mid-call.
+		enrichDelay: 500 * time.Millisecond,
+	}
+	pool := enrich.NewPool(testCfg(2, 0), st, &fakeExtractor{}, llm, nil)
+
+	// Start wakes one worker via the pool's initial Notify; nudge the second
+	// worker while the first is still inside the slow EnrichSpans call.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		pool.Notify()
+	}()
+
+	ok := runPool(t, pool, 5*time.Second, func() bool {
+		return st.status("article-shared") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-shared"))
+	}
+	if got := llm.spanCallCount(); got != 1 {
+		t.Errorf("EnrichSpans calls = %d, want 1 — the same article was processed by more than one worker", got)
+	}
+}
+
+// TestClaimLifecycle unit-tests the claim registry directly: a held claim
+// rejects a second claim, and releasing it makes the article claimable again.
+func TestClaimLifecycle(t *testing.T) {
+	pool := enrich.NewPool(testCfg(2, 0), newFakeStore(), &fakeExtractor{}, &fakeLLM{}, nil)
+
+	if !pool.TryClaimForTest("a1") {
+		t.Fatal("first claim must succeed")
+	}
+	if pool.TryClaimForTest("a1") {
+		t.Error("second claim on a held article must fail")
+	}
+	if !pool.TryClaimForTest("a2") {
+		t.Error("claim on a different article must succeed")
+	}
+	pool.ReleaseClaimForTest("a1")
+	if !pool.TryClaimForTest("a1") {
+		t.Error("claim after release must succeed")
+	}
 }

@@ -1830,3 +1830,67 @@ func TestTranslate_CustomPromptTemplate(t *testing.T) {
 		t.Errorf("custom prompt placeholder not substituted: %q", system)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Transport-error classification.
+// ---------------------------------------------------------------------------
+
+// A connection-level failure (refused, reset, DNS) means the provider never
+// answered — the transient condition retries exist for. The enrichment pool
+// classifies via the duck-typed Retryable(); a plain wrapped error would be
+// treated as permanent and fail the article on the first network hiccup.
+func TestEnrich_ConnectionErrorIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // guarantees connection refused on a just-freed port
+
+	client := llm.New(testConfig(url))
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{})
+	if err == nil {
+		t.Fatal("Enrich: want a transport error, got nil")
+	}
+
+	var te *llm.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("Enrich: want *llm.TransportError, got %T (%v)", err, err)
+	}
+	if !te.Retryable() {
+		t.Error("a connection failure must be retryable")
+	}
+}
+
+// http.Client.Timeout on a slow provider produces an error wrapping
+// context.DeadlineExceeded even though no caller context carried a deadline.
+// It must still classify as a retryable transport error — historically it was
+// either treated as permanent or mistaken for a graceful shutdown, leaving the
+// article stuck in its in-flight status.
+func TestEnrich_ClientTimeoutIsRetryable(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the response until the client has timed out
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	cfg := testConfig(srv.URL)
+	cfg.LLMRequestTimeout = 50 * time.Millisecond
+	client := llm.New(cfg)
+
+	_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{})
+	if err == nil {
+		t.Fatal("Enrich: want a timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("precondition: client timeout should wrap context.DeadlineExceeded, got %v", err)
+	}
+
+	var te *llm.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("Enrich: want *llm.TransportError, got %T (%v)", err, err)
+	}
+	if !te.Retryable() {
+		t.Error("a client timeout must be retryable")
+	}
+}
