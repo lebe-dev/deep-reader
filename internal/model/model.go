@@ -8,6 +8,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -344,8 +345,13 @@ type Span struct {
 type User struct {
 	Username     string
 	PasswordHash string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// WebAuthnUserHandle is the stable, opaque 32-byte user handle passkeys are
+	// registered against. The authenticator stores it alongside a discoverable
+	// credential and echoes it back on login, so it is generated once when the
+	// account is created and never rotated.
+	WebAuthnUserHandle []byte
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // Settings is the singleton user-settings row. Persisted in the DB (not env),
@@ -699,6 +705,11 @@ type AuthStatus struct {
 	Initialized bool `json:"initialized"`
 	// Authenticated is true when the request carried a valid session token.
 	Authenticated bool `json:"authenticated"`
+	// PasskeyEnabled reports whether the deployment has a usable WebAuthn relying
+	// party configured (PASSKEY_* env). The client hides every passkey affordance
+	// when it is false, so a deployment without an RP ID never offers a flow that
+	// can only fail.
+	PasskeyEnabled bool `json:"passkey_enabled"`
 }
 
 // ConfigResponse is the single bootstrap/delta-sync response from
@@ -773,6 +784,56 @@ type LoginRequest struct {
 type AuthResponse struct {
 	Token    string `json:"token"`
 	Username string `json:"username"`
+}
+
+// ── Passkeys (WebAuthn) ─────────────────────────────────────────────────────
+
+// MaxPasskeyNameLen bounds the user-supplied label of a passkey. It is a display
+// string only; the bound keeps a runaway client from filling the row.
+const MaxPasskeyNameLen = 64
+
+// PasskeyView is the client-facing description of one registered passkey. The
+// credential material itself (public key, credential ID) never leaves the
+// server — the client only ever needs to list, rename and delete.
+type PasskeyView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// CreatedAt is when the passkey was registered.
+	CreatedAt time.Time `json:"created_at"`
+	// LastUsedAt is when it last completed a login, nil if it never has.
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+// PasskeyChallenge is the response of both "begin" endpoints. Options is the
+// verbatim WebAuthn options object (protocol.CredentialCreation or
+// protocol.CredentialAssertion) the client hands to navigator.credentials.
+//
+// CeremonyID identifies the server-side challenge state for the matching
+// "finish" call. Deep Reader is a bearer-token API with no cookies, and the
+// login ceremony by definition runs before any token exists, so the ceremony
+// handle travels in the body instead. It is an opaque 256-bit random value,
+// single-use, and expires with the challenge.
+type PasskeyChallenge struct {
+	CeremonyID string `json:"ceremony_id"`
+	Options    any    `json:"options"`
+}
+
+// PasskeyFinishRequest is the body of both "finish" endpoints: the ceremony
+// handle from the matching "begin" call plus the raw credential the browser (or
+// the native passkey plugin) produced. Credential is kept as raw JSON because
+// the WebAuthn library parses and validates it itself — re-modelling it here
+// would only add a place for the two shapes to drift.
+type PasskeyFinishRequest struct {
+	CeremonyID string          `json:"ceremony_id"`
+	Credential json.RawMessage `json:"credential"`
+	// Name is the label for a newly registered passkey (registration only).
+	// Empty falls back to a generated default.
+	Name string `json:"name"`
+}
+
+// PasskeyRenameRequest is the PATCH /api/passkeys/:id body.
+type PasskeyRenameRequest struct {
+	Name string `json:"name"`
 }
 
 // MarkdownBudget reports the markdown.new daily request-unit budget so the

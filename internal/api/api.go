@@ -10,7 +10,14 @@
 //	                                        setup/auth flag, library data only when authed
 //	POST   /api/setup                       (no auth) first-run account creation -> {token}
 //	POST   /api/login                       (no auth) credentials -> {token}
+//	POST   /api/passkeys/login/begin        (no auth) discoverable WebAuthn challenge
+//	POST   /api/passkeys/login/finish       (no auth) assertion -> {token}
 //	POST   /api/logout                      end the current session
+//	GET    /api/passkeys                    registered passkeys
+//	POST   /api/passkeys/register/begin     WebAuthn creation challenge
+//	POST   /api/passkeys/register/finish    attestation -> 201 the stored passkey
+//	PATCH  /api/passkeys/:id                {name} -> 204; rename a passkey
+//	DELETE /api/passkeys/:id                revoke a passkey -> 204
 //	GET    /api/articles/:id                full enriched payload (409 if not enriched)
 //	GET    /api/articles/:id/raw            raw LLM response captured on enrich failure
 //	POST   /api/articles                    {url} -> {id,status} (rate limited)
@@ -32,6 +39,8 @@
 //	DELETE /api/llm-providers/:id           remove a profile
 //	POST   /api/llm-providers/:id/activate  make a profile the active connection
 //	GET    /api/stats                        library counters
+//	GET    /.well-known/apple-app-site-association  (no auth) iOS passkey association
+//	GET    /.well-known/assetlinks.json     (no auth) Android passkey association
 //	GET    /p/:token                        (no auth) published page, 404 once expired
 //	GET    /*                               embedded PWA (no auth, SPA fallback)
 //
@@ -53,6 +62,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 
 	"deep-reader/internal/config"
+	"deep-reader/internal/passkey"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/publish"
 	"deep-reader/web"
@@ -72,6 +82,12 @@ type Server struct {
 	// keep the rest of the service from starting.
 	pub *publish.Publisher
 
+	// passkey is the WebAuthn relying party. It is nil when the deployment has no
+	// usable PASSKEY_* configuration, and every passkey route then answers 501
+	// while GET /api/config reports the feature as off — so a server without an
+	// RP ID never offers a flow that can only fail.
+	passkey *passkey.Service
+
 	// llm serves POST /api/translate — the on-demand translation of a word the
 	// user saved manually (WORD-CACHE-ARCH.md §18). It is nil when the server
 	// was built without one, and the endpoint then answers 503 instead of
@@ -84,6 +100,9 @@ type Server struct {
 	// translateMax overrides the POST /api/translate per-minute limit. Zero
 	// means use the default.
 	translateMax int
+	// passkeyMax overrides the passkey login per-minute limit. Zero means use
+	// the default.
+	passkeyMax int
 }
 
 // Option customises Server construction. It exists primarily so tests can
@@ -92,9 +111,17 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	siteFS fs.FS
-	log    *slog.Logger
-	llm    ports.LLMClient
+	siteFS  fs.FS
+	log     *slog.Logger
+	llm     ports.LLMClient
+	passkey *passkey.Service
+}
+
+// WithPasskeys supplies the WebAuthn relying party. Without it the passkey
+// routes answer 501 and /api/config reports passkeys as unavailable, which is
+// exactly what a deployment with no PASSKEY_* configuration should do.
+func WithPasskeys(svc *passkey.Service) Option {
+	return func(o *serverOptions) { o.passkey = svc }
 }
 
 // WithLLMClient supplies the client POST /api/translate calls. Without it that
@@ -131,6 +158,7 @@ func New(cfg *config.Config, st ports.Store, ing ports.Ingestor, opts ...Option)
 		store:      st,
 		ingest:     ing,
 		llm:        o.llm,
+		passkey:    o.passkey,
 		log:        o.log,
 		loginGuard: newLoginGuard(cfg.LoginMaxAttempts, cfg.LoginAttemptWindow, cfg.LoginLockoutDuration),
 	}
@@ -201,6 +229,12 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	app.Get("/api/config", s.getConfig)
 	app.Post("/api/setup", s.setup)
 	app.Post("/api/login", s.login)
+	// Passkey sign-in is unauthenticated by definition — it runs before a session
+	// exists — so both halves of the ceremony are registered here, ahead of the
+	// protected group, and carry their own rate limiter (left of the terminal
+	// handler, as everywhere else).
+	app.Post("/api/passkeys/login/begin", s.passkeyRateLimiter(), s.beginPasskeyLogin)
+	app.Post("/api/passkeys/login/finish", s.passkeyRateLimiter(), s.finishPasskeyLogin)
 
 	// All other /api/* routes require a valid session token.
 	api := app.Group("/api", s.requireAuth)
@@ -224,6 +258,14 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Post("/articles/:id/publish", s.publishArticle)
 	api.Delete("/articles/:id/publish", s.unpublishArticle)
 
+	// Passkey management. Registration is authenticated: a passkey is added to an
+	// account the caller already controls.
+	api.Get("/passkeys", s.listPasskeys)
+	api.Post("/passkeys/register/begin", s.beginPasskeyRegistration)
+	api.Post("/passkeys/register/finish", s.finishPasskeyRegistration)
+	api.Patch("/passkeys/:id", s.renamePasskey)
+	api.Delete("/passkeys/:id", s.deletePasskey)
+
 	api.Patch("/settings", s.patchSettings)
 
 	// Word cache writes. The read side is the /api/config delta.
@@ -239,6 +281,12 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Patch("/llm-providers/:id", s.updateLLMProvider)
 	api.Delete("/llm-providers/:id", s.deleteLLMProvider)
 	api.Post("/llm-providers/:id/activate", s.activateLLMProvider)
+
+	// Native app association, no auth. Both are read by the OS over plain HTTPS
+	// before the app is ever signed in, and they must be registered ahead of the
+	// static mount or the SPA fallback answers them with index.html.
+	app.Get("/.well-known/apple-app-site-association", s.serveAppleAppSiteAssociation)
+	app.Get("/.well-known/assetlinks.json", s.serveAssetLinks)
 
 	// Public article pages, no auth. Registered ahead of the static mount so the
 	// SPA fallback never swallows a share link, and behind its own path prefix
@@ -303,6 +351,27 @@ func (s *Server) translateRateLimiter() fiber.Handler {
 	max := defaultTranslateMax
 	if s.translateMax > 0 {
 		max = s.translateMax
+	}
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: time.Minute,
+		LimitReached: func(c fiber.Ctx) error {
+			return sendError(c, fiber.StatusTooManyRequests, "rate limit exceeded; slow down")
+		},
+	})
+}
+
+// defaultPasskeyMax is the per-minute cap on the unauthenticated passkey login
+// ceremony. A real sign-in is one or two calls; the cap bounds what an anonymous
+// caller can make the server spend on challenge state and signature validation.
+const defaultPasskeyMax = 30
+
+// passkeyRateLimiter limits the public passkey login endpoints. Like the other
+// limiters it must be registered ahead of the terminal handler.
+func (s *Server) passkeyRateLimiter() fiber.Handler {
+	max := defaultPasskeyMax
+	if s.passkeyMax > 0 {
+		max = s.passkeyMax
 	}
 	return limiter.New(limiter.Config{
 		Max:        max,

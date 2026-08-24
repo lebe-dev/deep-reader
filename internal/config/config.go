@@ -65,6 +65,42 @@ type Config struct {
 	// LoginMaxAttempts. Env: LOGIN_LOCKOUT_DURATION (15m).
 	LoginLockoutDuration time.Duration
 
+	// PasskeyEnabled turns WebAuthn passkeys on. It is on by default, but the
+	// feature still needs a resolvable relying-party ID: with neither
+	// PASSKEY_RP_ID nor PUBLIC_BASE_URL set the server logs a warning and reports
+	// passkeys as unavailable rather than offering a flow that can only fail.
+	// Env: PASSKEY_ENABLED (true).
+	PasskeyEnabled bool
+	// PasskeyRPID is the WebAuthn relying-party ID: the bare registrable domain
+	// credentials are bound to (e.g. reader.example — no scheme, no port). It
+	// cannot be derived per request, because a credential registered under one RP
+	// ID is unusable under another. Defaults to the host of PublicBaseURL. Env:
+	// PASSKEY_RP_ID (empty).
+	PasskeyRPID string
+	// PasskeyRPName is the human-readable relying-party name shown in the
+	// platform's passkey prompt. Env: PASSKEY_RP_NAME (Deep Reader).
+	PasskeyRPName string
+	// PasskeyRPOrigins is the allowlist of origins permitted to run a ceremony.
+	// When empty it is derived as https://<PasskeyRPID> plus the PublicBaseURL
+	// origin; set it explicitly for local development over http. The Android
+	// native facets are always appended from PasskeyAndroidFingerprints. Env:
+	// PASSKEY_RP_ORIGINS (comma-separated, empty).
+	PasskeyRPOrigins []string
+	// PasskeyIOSAppID is the iOS application identifier (<TeamID>.<BundleID>)
+	// published in /.well-known/apple-app-site-association. Empty makes that
+	// endpoint answer 404. Env: PASSKEY_IOS_APP_ID (empty).
+	PasskeyIOSAppID string
+	// PasskeyAndroidPackage is the Android application id published in
+	// /.well-known/assetlinks.json. Empty (or no fingerprints) makes that
+	// endpoint answer 404. Env: PASSKEY_ANDROID_PACKAGE (empty).
+	PasskeyAndroidPackage string
+	// PasskeyAndroidFingerprints are the SHA-256 signing-certificate fingerprints
+	// of the Android app, as printed by keytool. They serve double duty: they go
+	// into assetlinks.json, and they are converted into the
+	// "android:apk-key-hash:" origins the Credential Manager reports for a native
+	// caller. Env: PASSKEY_ANDROID_FINGERPRINTS (comma-separated, empty).
+	PasskeyAndroidFingerprints []string
+
 	// LLMAPIBaseURL, LLMAPIKey and LLMModel are the LLM connection. They are now
 	// managed per-profile in the UI (Settings > LLM) and stored in the DB; these
 	// env vars are an optional first-boot seed used only to create the initial
@@ -190,6 +226,18 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.LoginLockoutDuration = loginLockout
+
+	passkeyEnabled, err := envBool("PASSKEY_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	cfg.PasskeyEnabled = passkeyEnabled
+	cfg.PasskeyRPID = envStr("PASSKEY_RP_ID", "")
+	cfg.PasskeyRPName = envStr("PASSKEY_RP_NAME", "Deep Reader")
+	cfg.PasskeyRPOrigins = envStrings("PASSKEY_RP_ORIGINS")
+	cfg.PasskeyIOSAppID = envStr("PASSKEY_IOS_APP_ID", "")
+	cfg.PasskeyAndroidPackage = envStr("PASSKEY_ANDROID_PACKAGE", "")
+	cfg.PasskeyAndroidFingerprints = envStrings("PASSKEY_ANDROID_FINGERPRINTS")
 
 	cfg.LLMAPIBaseURL = os.Getenv("LLM_API_BASE_URL")
 	cfg.LLMAPIKey = os.Getenv("LLM_API_KEY")

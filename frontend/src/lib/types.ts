@@ -452,6 +452,40 @@ export interface AuthStatus {
 	initialized: boolean;
 	/** True when the request carried a valid session token. */
 	authenticated: boolean;
+	/**
+	 * Whether the deployment has a usable WebAuthn relying party configured
+	 * (`PASSKEY_*` env). Every passkey affordance is hidden when false, so a
+	 * server without an RP ID never offers a flow that can only fail.
+	 *
+	 * Optional on the wire: a server older than the passkey feature omits it.
+	 */
+	passkey_enabled?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Passkeys (WebAuthn)
+// ---------------------------------------------------------------------------
+
+/** One registered passkey, as listed by `GET /api/passkeys`. */
+export interface PasskeyView {
+	id: string;
+	name: string;
+	/** RFC3339 timestamp of registration. */
+	created_at: string;
+	/** RFC3339 timestamp of the last successful login, null if never used. */
+	last_used_at: string | null;
+}
+
+/**
+ * Response of both passkey "begin" endpoints: the opaque ceremony handle plus
+ * the raw WebAuthn options object.
+ *
+ * `options` is deliberately untyped here — it is passed straight to the WebAuthn
+ * conversion helpers, which are the only code that understands its shape.
+ */
+export interface PasskeyChallenge {
+	ceremony_id: string;
+	options: unknown;
 }
 
 /** Response of `POST /api/setup` and `POST /api/login`. */

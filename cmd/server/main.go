@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -25,6 +27,7 @@ import (
 	"deep-reader/internal/llm"
 	"deep-reader/internal/markdown"
 	"deep-reader/internal/obs"
+	"deep-reader/internal/passkey"
 	"deep-reader/internal/ports"
 	"deep-reader/internal/store"
 	"deep-reader/internal/version"
@@ -145,7 +148,27 @@ func run() error {
 	// cancelled.
 	go pool.Start(rootCtx)
 
-	srv := api.New(cfg, st, ingestor, api.WithLogger(log), api.WithLLMClient(llmClient))
+	// The WebAuthn relying party is optional: without a resolvable RP ID (no
+	// PASSKEY_RP_ID and no PUBLIC_BASE_URL) passkeys stay off and the rest of the
+	// service starts normally. A malformed value, though, is an operator mistake
+	// worth failing loudly for — silently ignoring it would leave the deployment
+	// convinced passkeys work.
+	var passkeys *passkey.Service
+	switch svc, perr := passkey.New(cfg); {
+	case perr == nil:
+		passkeys = svc
+		log.Info("passkeys enabled", slog.String("rp_id", svc.RPID()), slog.Any("origins", svc.Origins()))
+	case errors.Is(perr, passkey.ErrDisabled):
+		log.Info("passkeys disabled: set PASSKEY_RP_ID (or PUBLIC_BASE_URL) to enable them")
+	default:
+		return fmt.Errorf("passkey setup: %w", perr)
+	}
+
+	srv := api.New(cfg, st, ingestor,
+		api.WithLogger(log),
+		api.WithLLMClient(llmClient),
+		api.WithPasskeys(passkeys),
+	)
 
 	// Reclaim disk from public pages whose TTL ran out (and from files orphaned
 	// when their article was deleted). Expiry is enforced on every request

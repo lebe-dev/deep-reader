@@ -252,6 +252,11 @@
   resolved "https://registry.npmjs.org/@capacitor/status-bar/-/status-bar-8.0.3.tgz"
   integrity sha512-csSpfNeN49Hx9JaQBSJEIiEbOLtXg3kcc2IpScq2fu5L520h3AWEvsxoH8Srk1jxfRKepaJ4S4sqSC3foI4AgA==
 
+"@capgo/capacitor-passkey@^8.5.1":
+  version "8.5.1"
+  resolved "https://registry.npmjs.org/@capgo/capacitor-passkey/-/capacitor-passkey-8.5.1.tgz"
+  integrity sha512-UT8q9ekJXOHaq05SDzWtzmec1uFRPVh36s6oWVlGcjBN2U7LBajHA0gKNTLtN+mP+k+p0lNkP85velll8EWmFA==
+
 "@cspotcode/source-map-support@^0.8.0":
   version "0.8.1"
   resolved "https://registry.npmjs.org/@cspotcode/source-map-support/-/source-map-support-0.8.1.tgz"

@@ -32,8 +32,11 @@ func (s *SQLite) CreateUser(ctx context.Context, username, passwordHash string) 
 	defer s.wmu.Unlock()
 
 	ts := fmtTime(now())
-	const q = `INSERT INTO app_user (id, username, password_hash, created_at, updated_at)
-	           VALUES (1, ?, ?, ?, ?)`
+	// randomblob(32) mints the WebAuthn user handle in the same statement that
+	// creates the account, so ports.Store.CreateUser keeps its two-argument shape
+	// and the handle exists before any passkey can be registered.
+	const q = `INSERT INTO app_user (id, username, password_hash, webauthn_user_handle, created_at, updated_at)
+	           VALUES (1, ?, ?, randomblob(32), ?, ?)`
 	if _, err := s.write.ExecContext(ctx, q, username, passwordHash, ts, ts); err != nil {
 		if isSQLiteUnique(err) {
 			return ports.ErrAlreadyInitialized
@@ -47,11 +50,11 @@ func (s *SQLite) CreateUser(ctx context.Context, username, passwordHash string) 
 // GetUser returns the built-in account, or [ports.ErrNotFound] if the service is
 // not yet initialized.
 func (s *SQLite) GetUser(ctx context.Context) (*model.User, error) {
-	const q = `SELECT username, password_hash, created_at, updated_at
+	const q = `SELECT username, password_hash, webauthn_user_handle, created_at, updated_at
 	           FROM app_user WHERE id = 1`
 	var u model.User
 	var createdAtStr, updAtStr string
-	if err := s.db.QueryRowContext(ctx, q).Scan(&u.Username, &u.PasswordHash, &createdAtStr, &updAtStr); err != nil {
+	if err := s.db.QueryRowContext(ctx, q).Scan(&u.Username, &u.PasswordHash, &u.WebAuthnUserHandle, &createdAtStr, &updAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
 		}

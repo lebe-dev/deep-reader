@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -75,6 +76,12 @@ type fakeStore struct {
 	// Publications (public pages), keyed by share token.
 	pubs                  map[string]model.Publication
 	replacePublicationErr error
+
+	// Passkeys (WebAuthn credentials).
+	passkeys         []ports.Passkey
+	createPasskeyErr error
+	listPasskeysErr  error
+	renamedTo        string
 
 	// sessionErr, when set, makes SessionExists fail — simulating a DB outage so
 	// auth must surface a 5xx rather than masking it as a 401.
@@ -362,6 +369,66 @@ func (f *fakeStore) DeleteSession(_ context.Context, tokenHash string) error {
 	return nil
 }
 
+// ── Passkeys ────────────────────────────────────────────────────────────────
+
+func (f *fakeStore) CreatePasskey(_ context.Context, p ports.Passkey) (ports.Passkey, error) {
+	if f.createPasskeyErr != nil {
+		return ports.Passkey{}, f.createPasskeyErr
+	}
+	p.ID = fmt.Sprintf("pk-%d", len(f.passkeys)+1)
+	p.CreatedAt = time.Now().UTC().Truncate(time.Second)
+	f.passkeys = append(f.passkeys, p)
+	return p, nil
+}
+
+func (f *fakeStore) ListPasskeys(context.Context) ([]ports.Passkey, error) {
+	if f.listPasskeysErr != nil {
+		return nil, f.listPasskeysErr
+	}
+	return append([]ports.Passkey{}, f.passkeys...), nil
+}
+
+func (f *fakeStore) GetPasskeyByCredentialID(_ context.Context, credentialID []byte) (ports.Passkey, error) {
+	for _, p := range f.passkeys {
+		if bytes.Equal(p.CredentialID, credentialID) {
+			return p, nil
+		}
+	}
+	return ports.Passkey{}, ports.ErrNotFound
+}
+
+func (f *fakeStore) TouchPasskey(_ context.Context, id string, credential []byte, usedAt time.Time) error {
+	for i := range f.passkeys {
+		if f.passkeys[i].ID == id {
+			f.passkeys[i].Credential = credential
+			f.passkeys[i].LastUsedAt = &usedAt
+			return nil
+		}
+	}
+	return ports.ErrNotFound
+}
+
+func (f *fakeStore) RenamePasskey(_ context.Context, id, name string) error {
+	for i := range f.passkeys {
+		if f.passkeys[i].ID == id {
+			f.passkeys[i].Name = name
+			f.renamedTo = name
+			return nil
+		}
+	}
+	return ports.ErrNotFound
+}
+
+func (f *fakeStore) DeletePasskey(_ context.Context, id string) error {
+	for i := range f.passkeys {
+		if f.passkeys[i].ID == id {
+			f.passkeys = append(f.passkeys[:i], f.passkeys[i+1:]...)
+			return nil
+		}
+	}
+	return ports.ErrNotFound
+}
+
 // fakeIngestor is an in-memory ports.Ingestor.
 type fakeIngestor struct {
 	add          func(string) (*model.Article, error)
@@ -413,7 +480,7 @@ func newTestServer(t *testing.T, st ports.Store, ing ports.Ingestor) *Server {
 
 // newTestServerCfg builds a test server like newTestServer but lets a test tweak
 // the config (e.g. enable markdown.new) before construction.
-func newTestServerCfg(t *testing.T, st ports.Store, ing ports.Ingestor, tweak func(*config.Config)) *Server {
+func newTestServerCfg(t *testing.T, st ports.Store, ing ports.Ingestor, tweak func(*config.Config), opts ...Option) *Server {
 	t.Helper()
 	cfg := &config.Config{
 		HTTPPort:          8080,
@@ -437,7 +504,7 @@ func newTestServerCfg(t *testing.T, st ports.Store, ing ports.Ingestor, tweak fu
 		fs.sessions[auth.HashToken(testToken)] = true
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, st, ing, WithStaticFS(testSiteFS()), WithLogger(log))
+	return New(cfg, st, ing, append([]Option{WithStaticFS(testSiteFS()), WithLogger(log)}, opts...)...)
 }
 
 func doReq(t *testing.T, s *Server, method, target string, body any, token string) *http.Response {

@@ -215,6 +215,18 @@ func (f *fakeStore) CreateSession(_ context.Context, _ string, _ time.Time) erro
 func (f *fakeStore) SessionExists(_ context.Context, _ string) (bool, error) { return false, nil }
 func (f *fakeStore) DeleteSession(_ context.Context, _ string) error         { return nil }
 
+// Passkeys are irrelevant to this package; the stubs only satisfy ports.Store.
+func (f *fakeStore) CreatePasskey(context.Context, ports.Passkey) (ports.Passkey, error) {
+	return ports.Passkey{}, nil
+}
+func (f *fakeStore) ListPasskeys(context.Context) ([]ports.Passkey, error) { return nil, nil }
+func (f *fakeStore) GetPasskeyByCredentialID(context.Context, []byte) (ports.Passkey, error) {
+	return ports.Passkey{}, ports.ErrNotFound
+}
+func (f *fakeStore) TouchPasskey(context.Context, string, []byte, time.Time) error { return nil }
+func (f *fakeStore) RenamePasskey(context.Context, string, string) error           { return nil }
+func (f *fakeStore) DeletePasskey(context.Context, string) error                   { return nil }
+
 // fakeWorker counts Notify calls.
 type fakeWorker struct {
 	notified atomic.Int32

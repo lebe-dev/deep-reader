@@ -28,9 +28,19 @@ export interface AuthState {
 	checked: boolean;
 	/** Logged-in username, when known. */
 	username?: string;
+	/**
+	 * Whether the server has a usable WebAuthn relying party configured. Every
+	 * passkey affordance is hidden while this is false, so a deployment without
+	 * `PASSKEY_RP_ID` never shows a button that can only fail.
+	 */
+	passkeyEnabled: boolean;
 }
 
-export const authState = $state<AuthState>({ authenticated: false, checked: false });
+export const authState = $state<AuthState>({
+	authenticated: false,
+	checked: false,
+	passkeyEnabled: false
+});
 
 /**
  * Whether an error from a best-effort, server-touching action is "expected" and
@@ -67,6 +77,8 @@ export async function refreshAuth(): Promise<void> {
 		initSentry(cfg.sentry);
 		authState.initialized = cfg.auth.initialized;
 		authState.authenticated = cfg.auth.authenticated;
+		// Absent on a server older than the passkey feature; treat that as off.
+		authState.passkeyEnabled = cfg.auth.passkey_enabled ?? false;
 	} catch (err) {
 		if (err instanceof OfflineError) {
 			const state = await getSyncState();

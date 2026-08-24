@@ -23,6 +23,14 @@ const buildConstants = {
 	__APP_VERSION__: 'readonly'
 };
 
+// `no-undef` cannot see type-only identifiers: DOM interfaces such as
+// `CredentialCreationOptions` or `PublicKeyCredentialDescriptor` exist in
+// lib.dom.d.ts but are not runtime globals, so the rule reports every one of
+// them as undefined. TypeScript already checks undefined names properly (and
+// `svelte-check` runs in `just lint`), which is why typescript-eslint's own
+// guidance is to switch the rule off in TypeScript files.
+const undefRule = { 'no-undef': 'off' };
+
 // Shared no-unused-vars config: defer to the type-aware rule and let `_`-prefixed
 // names mark deliberately-unused params/vars (e.g. `(_event) => …`, `{#each … as _, i}`).
 const unusedVars = {
@@ -67,7 +75,8 @@ export default [
 		},
 		rules: {
 			...tseslint.configs.recommended.rules,
-			...unusedVars
+			...unusedVars,
+			...undefRule
 		}
 	},
 	{
@@ -98,7 +107,8 @@ export default [
 		},
 		rules: {
 			...svelte.configs.recommended.rules,
-			...unusedVars
+			...unusedVars,
+			...undefRule
 		}
 	}
 ];

@@ -25,6 +25,8 @@ import type {
 	LLMProviderView,
 	LLMProviderInput,
 	LookupEvent,
+	PasskeyChallenge,
+	PasskeyView,
 	Publication,
 	PublishRequest,
 	SaveLookupsRequest,
@@ -210,6 +212,72 @@ export function login(
 /** `POST /api/logout` — end the current session server-side. */
 export function logout(signal?: AbortSignal): Promise<void> {
 	return request<void>('/api/logout', { method: 'POST', signal });
+}
+
+// ---------------------------------------------------------------------------
+// Passkey endpoints (WebAuthn)
+// ---------------------------------------------------------------------------
+//
+// Both ceremonies are two calls: "begin" returns a challenge plus an opaque
+// `ceremony_id`, and "finish" sends the authenticator's answer back with that
+// same id. The id travels in the body rather than a cookie because the API is
+// bearer-token based, and the login ceremony by definition runs before a token
+// exists.
+
+/** `GET /api/passkeys` — the registered passkeys, newest first. */
+export function listPasskeys(signal?: AbortSignal): Promise<PasskeyView[]> {
+	return request<PasskeyView[]>('/api/passkeys', { signal });
+}
+
+/** `POST /api/passkeys/register/begin` — credential-creation challenge. */
+export function beginPasskeyRegistration(signal?: AbortSignal): Promise<PasskeyChallenge> {
+	return request<PasskeyChallenge>('/api/passkeys/register/begin', { method: 'POST', signal });
+}
+
+/** `POST /api/passkeys/register/finish` — store the new credential. */
+export function finishPasskeyRegistration(
+	ceremonyId: string,
+	credential: unknown,
+	name: string,
+	signal?: AbortSignal
+): Promise<PasskeyView> {
+	return request<PasskeyView>('/api/passkeys/register/finish', {
+		method: 'POST',
+		body: { ceremony_id: ceremonyId, credential, name },
+		signal
+	});
+}
+
+/** `PATCH /api/passkeys/:id` — rename a passkey. */
+export function renamePasskey(id: string, name: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/passkeys/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: { name },
+		signal
+	});
+}
+
+/** `DELETE /api/passkeys/:id` — revoke a passkey. */
+export function deletePasskey(id: string, signal?: AbortSignal): Promise<void> {
+	return request<void>(`/api/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE', signal });
+}
+
+/** `POST /api/passkeys/login/begin` — discoverable assertion challenge (no auth). */
+export function beginPasskeyLogin(signal?: AbortSignal): Promise<PasskeyChallenge> {
+	return request<PasskeyChallenge>('/api/passkeys/login/begin', { method: 'POST', signal });
+}
+
+/** `POST /api/passkeys/login/finish` — exchange an assertion for a session token. */
+export function finishPasskeyLogin(
+	ceremonyId: string,
+	credential: unknown,
+	signal?: AbortSignal
+): Promise<AuthResponse> {
+	return request<AuthResponse>('/api/passkeys/login/finish', {
+		method: 'POST',
+		body: { ceremony_id: ceremonyId, credential },
+		signal
+	});
 }
 
 /**

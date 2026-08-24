@@ -22,6 +22,7 @@ Sentence translation example:
 - **Offline-first reading** — articles are cached locally (PWA + IndexedDB); the reader renders from cache instantly and syncs in the background.
 - **Accessible reading** — the whole reader works from the keyboard, translations are language-tagged for screen readers, animation follows your OS "reduce motion" setting, and the font list includes Atkinson Hyperlegible for low vision. See [Accessibility](#accessibility).
 - **Single-user, self-hosted** — one built-in account, created on first launch; no external auth provider required.
+- **Passkeys** — sign in with Face ID, Touch ID, a device PIN or a security key instead of typing your password, on the web and on Android. No username is asked for: the authenticator offers the account itself. Your password keeps working, so losing a device can't lock you out. Register devices in Settings > Security; needs HTTPS and `PASSKEY_RP_ID` — see [DEV.md](DEV.md#passkeys-webauthn).
 - **iOS/Android apps** — the same SvelteKit frontend packaged with CapacitorJS for native offline reading on your own devices.
 
 ## Accessibility

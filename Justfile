@@ -121,8 +121,29 @@ ssh:
 # ============================================================
 
 # Rebuild the SPA and copy the bundle into the native iOS/Android projects.
-cap-sync:
-    cd frontend && npm run build && npx cap sync
+cap-sync: && _cap-sync-native
+    cd frontend && npm run build
+
+# Copy the built bundle into both native projects, one platform at a time.
+#
+# The two passes exist because of passkeys: the Capacitor passkey plugin turns
+# PASSKEY_RP_ID into an Associated Domains entitlement on iOS and an
+# asset_statements resource on Android, and the iOS entitlement is unavailable on
+# a free Apple Development team — adding it makes `just deploy-ios` fail to
+# provision. Android is wired unconditionally; iOS only once PASSKEY_IOS_ENABLED
+# says a paid Apple Developer Program membership is in place. Clearing
+# PASSKEY_RP_ID for the iOS pass makes the plugin strip the entitlement again,
+# so flipping the flag back off is not a one-way door.
+_cap-sync-native:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd frontend
+    npx cap sync android
+    if [ "${PASSKEY_IOS_ENABLED:-false}" = "true" ]; then
+        npx cap sync ios
+    else
+        PASSKEY_RP_ID= npx cap sync ios
+    fi
 
 # Regenerate native app icons + splash from frontend/assets/icon.png.
 # The PWA step errors (we ship hand-made web icons in static/) and is ignored;
@@ -144,7 +165,12 @@ cap-sync-versioned:
     trap 'mv -f .package.json.bak package.json' EXIT
     npm pkg set version="{{ mobileVersion }}"
     npm run build
-    npx cap sync
+    npx cap sync android
+    if [ "${PASSKEY_IOS_ENABLED:-false}" = "true" ]; then
+        npx cap sync ios
+    else
+        PASSKEY_RP_ID= npx cap sync ios
+    fi
 
 # Open the native IDEs for manual build / signing.
 ios-build: cap-sync
@@ -155,7 +181,18 @@ android-build: cap-sync
 
 # Run on a simulator / emulator from the CLI.
 ios-run:
-    cd frontend && npm run build && npx cap sync ios && npx cap run ios
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd frontend
+    npm run build
+    # Same iOS passkey gate as _cap-sync-native: without a paid Apple Developer
+    # Program membership the Associated Domains entitlement cannot be provisioned.
+    if [ "${PASSKEY_IOS_ENABLED:-false}" = "true" ]; then
+        npx cap sync ios
+    else
+        PASSKEY_RP_ID= npx cap sync ios
+    fi
+    npx cap run ios
 
 android-run:
     cd frontend && npm run build && npx cap sync android && npx cap run android

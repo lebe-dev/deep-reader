@@ -244,6 +244,84 @@ deleted article.
 Endpoints: `POST|GET|DELETE /api/articles/:id/publish` (authenticated) and
 `GET /p/:token` (public).
 
+## Passkeys (WebAuthn)
+
+Passkeys are an **additional** way to sign in — Face ID, Touch ID, a device PIN
+or a security key instead of typing the password. The password always keeps
+working, so losing every device cannot lock the account out.
+
+Sign-in is **discoverable** ("usernameless"): registration requires a resident
+key and user verification, and the sign-in challenge names no credentials, so
+the authenticator offers the account itself. Because of that the `/login` page
+shows a single *Sign in with a passkey* button and asks for nothing else.
+
+The credential is stored as the JSON the WebAuthn library produced
+(`webauthn_credentials.credential`) plus a stable, opaque 32-byte user handle on
+the account (`app_user.webauthn_user_handle`, minted with `randomblob(32)` when
+the account is created). The handle is what makes a discoverable login resolve
+to this account, so it is never rotated. Challenge state lives in memory for
+five minutes, is consumed on first use, and is capped at 64 live ceremonies —
+the sign-in "begin" endpoint is unauthenticated, so an unbounded cache would be
+a remote memory-growth vector.
+
+**The relying-party ID cannot be derived per request.** A credential registered
+under one RP ID is unusable under another, so it is deployment configuration,
+not something read off the `Host` header. Changing `PASSKEY_RP_ID` invalidates
+every registered passkey. Passkeys also need HTTPS (localhost is exempt).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PASSKEY_ENABLED` | `true` | Master switch. Still requires a resolvable RP ID. |
+| `PASSKEY_RP_ID` | host of `PUBLIC_BASE_URL` | Bare registrable domain credentials bind to (no scheme, no port). Empty **and** no `PUBLIC_BASE_URL` disables passkeys with a startup warning. |
+| `PASSKEY_RP_NAME` | `Deep Reader` | Name shown in the platform's passkey prompt. |
+| `PASSKEY_RP_ORIGINS` | `https://<PASSKEY_RP_ID>` + the `PUBLIC_BASE_URL` origin | Comma-separated allowlist of origins permitted to run a ceremony. Set explicitly for http development. |
+| `PASSKEY_IOS_APP_ID` | empty | `<TeamID>.<BundleID>` published in `/.well-known/apple-app-site-association`. Empty ⇒ that endpoint 404s. |
+| `PASSKEY_ANDROID_PACKAGE` | empty | Android application id published in `/.well-known/assetlinks.json`. |
+| `PASSKEY_ANDROID_FINGERPRINTS` | empty | Comma-separated SHA-256 signing-certificate fingerprints (keytool format). |
+| `PASSKEY_IOS_ENABLED` | `false` | **Build-time only** (read by the Justfile). Adds the iOS Associated Domains entitlement during `just cap-sync`; needs a paid Apple Developer Program membership. See [docs/MOBILE.md](docs/MOBILE.md). |
+
+Endpoints — management (authenticated): `GET /api/passkeys`,
+`POST /api/passkeys/register/begin`, `POST /api/passkeys/register/finish`,
+`PATCH /api/passkeys/:id`, `DELETE /api/passkeys/:id`. Sign-in (public,
+rate-limited to 30/min): `POST /api/passkeys/login/begin`,
+`POST /api/passkeys/login/finish`. `GET /api/config` reports
+`auth.passkey_enabled` so the client hides every passkey affordance on a server
+without an RP ID. Every passkey route answers **501** when none is configured.
+
+A rejected assertion deliberately does **not** feed the per-IP password lockout:
+a passkey is not a guessable credential, and counting it would let anyone lock
+the account out of its password by spamming bad assertions. The endpoint's own
+rate limiter is what bounds the cost.
+
+Manage passkeys in **Settings > Security**.
+
+### Local development
+
+Passkeys need the RP ID to match the origin the page is served from, so a dev
+run over http needs both values spelled out:
+
+```sh
+PASSKEY_RP_ID=localhost
+PASSKEY_RP_ORIGINS=http://localhost:4200,http://localhost:18080
+```
+
+### Native apps
+
+A native app is not a web origin, so the OS asks the server to vouch for it. The
+backend serves both association documents itself — nothing goes next to the
+reverse proxy:
+
+| Path | Source | Read by |
+|---|---|---|
+| `/.well-known/apple-app-site-association` | `PASSKEY_IOS_APP_ID` | iOS (webcredentials only; app links are deliberately not declared) |
+| `/.well-known/assetlinks.json` | `PASSKEY_ANDROID_PACKAGE` + `PASSKEY_ANDROID_FINGERPRINTS` | Android |
+
+Android's Credential Manager reports a native caller as
+`android:apk-key-hash:<base64url(sha256(signing cert))>` rather than as an
+https origin. Those facets are derived from `PASSKEY_ANDROID_FINGERPRINTS` and
+appended to the accepted-origin list automatically, so Android passkeys silently
+fail origin validation if the fingerprints are missing.
+
 ## Error tracking (Sentry)
 
 Sentry is optional and **off by default** — it reports errors and panics only

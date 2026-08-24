@@ -43,7 +43,11 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	// the client can route to /setup or /login; no library data leaks.
 	if !authed {
 		return c.JSON(model.ConfigResponse{
-			Auth:       model.AuthStatus{Initialized: initialized, Authenticated: false},
+			Auth: model.AuthStatus{
+				Initialized:    initialized,
+				Authenticated:  false,
+				PasskeyEnabled: s.passkey != nil,
+			},
 			Sentry:     sentryConfigFromConfig(s.cfg),
 			ServerTime: time.Now().UTC(),
 		})
@@ -87,7 +91,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	}
 
 	return c.JSON(model.ConfigResponse{
-		Auth:           model.AuthStatus{Initialized: true, Authenticated: true},
+		Auth:           model.AuthStatus{Initialized: true, Authenticated: true, PasskeyEnabled: s.passkey != nil},
 		Settings:       settings,
 		Articles:       metas,
 		Progress:       progress,

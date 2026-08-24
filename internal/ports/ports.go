@@ -135,6 +135,36 @@ type Store interface {
 	// a no-op if the session does not exist.
 	DeleteSession(ctx context.Context, tokenHash string) error
 
+	// CreatePasskey stores a newly registered WebAuthn credential and returns it
+	// with its generated id and timestamps. It returns ErrDuplicate when a
+	// credential with the same CredentialID is already registered, which is how
+	// a re-registration of the same authenticator is rejected.
+	CreatePasskey(ctx context.Context, p Passkey) (Passkey, error)
+
+	// ListPasskeys returns every registered passkey, newest first. It never
+	// returns nil on success, so the HTTP layer cannot serialize a null array.
+	ListPasskeys(ctx context.Context) ([]Passkey, error)
+
+	// GetPasskeyByCredentialID looks a passkey up by the raw WebAuthn credential
+	// ID the authenticator asserted, or ErrNotFound. This is the discoverable
+	// login path: the client sends no username, only the credential.
+	GetPasskeyByCredentialID(ctx context.Context, credentialID []byte) (Passkey, error)
+
+	// TouchPasskey persists the post-login credential state (the library updates
+	// the signature counter and backup flags on every assertion) and stamps
+	// last_used_at. Skipping it would leave the clone-detection counter frozen at
+	// its registration value. Returns ErrNotFound for an unknown id.
+	TouchPasskey(ctx context.Context, id string, credential []byte, usedAt time.Time) error
+
+	// RenamePasskey sets the display label of a passkey. Returns ErrNotFound for
+	// an unknown id.
+	RenamePasskey(ctx context.Context, id, name string) error
+
+	// DeletePasskey removes a passkey. Returns ErrNotFound for an unknown id.
+	// The account keeps its password, so removing the last passkey can never
+	// lock the user out.
+	DeletePasskey(ctx context.Context, id string) error
+
 	// GetSettings returns the singleton settings row, seeding defaults if it
 	// was never written.
 	GetSettings(ctx context.Context) (model.Settings, error)
@@ -490,6 +520,29 @@ type ExtractResult struct {
 	Lang         string
 	HTML         string
 	Text         string
+}
+
+// Passkey is one stored WebAuthn credential registered against the single
+// built-in account.
+//
+// Credential holds the JSON-marshalled webauthn.Credential exactly as the
+// WebAuthn library produced it — public key, transports, flags and signature
+// counter. Storing the library's own struct rather than re-modelling its fields
+// means a library upgrade that adds a field needs no migration here, and the
+// store never has to understand WebAuthn semantics.
+type Passkey struct {
+	// ID is a ULID used in the REST paths, so a raw credential ID never has to
+	// appear in a URL.
+	ID string
+	// Name is the user-facing label ("MacBook", "iPhone").
+	Name string
+	// CredentialID is the raw WebAuthn credential ID, unique across passkeys.
+	CredentialID []byte
+	// Credential is the JSON-marshalled webauthn.Credential.
+	Credential []byte
+	CreatedAt  time.Time
+	// LastUsedAt is nil until the passkey completes its first login.
+	LastUsedAt *time.Time
 }
 
 // ContentUpdate carries the extracted content the worker writes back to an

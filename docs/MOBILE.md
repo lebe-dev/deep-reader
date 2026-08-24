@@ -11,7 +11,8 @@ does not run a backend on the device.
 ## Prerequisites
 
 - **iOS**: a Mac with Xcode installed, and an Apple ID signed into Xcode
-  (free Apple Development provisioning is enough — no paid account required).
+  (free Apple Development provisioning is enough — no paid account required,
+  except for passkeys; see [Passkeys on device](#passkeys-on-device)).
   Capacitor 8 uses Swift Package Manager, so CocoaPods is not needed.
 - **Android**: Android Studio (for the SDK/build tools) or a standalone
   Android SDK with `ANDROID_SDK_ROOT`/`ANDROID_HOME` set.
@@ -125,6 +126,66 @@ It validates the URL against `GET /api/config` before proceeding, then hands
 off to the normal login/setup flow. The URL and auth token are mirrored into
 `@capacitor/preferences` so they survive a WebView storage eviction; see
 [MOBILE-ARCH.md §6.5](../MOBILE-ARCH.md) for details.
+
+## Passkeys on device
+
+The native app can sign in with a passkey, but the OS has to be told that this
+app speaks for the server's domain — and that association is baked into the
+build, not read from the server URL the user types on `/connect`.
+
+Set `PASSKEY_RP_ID` in `.env` before syncing. `just cap-sync` passes it to
+`frontend/capacitor.config.ts`, which hands it to the Capacitor passkey plugin;
+the plugin then writes the platform wiring into `frontend/android/**` and
+`frontend/ios/**` during `npx cap sync`. Both trees are generated, so the edits
+are expected and must not be hand-maintained.
+
+The server side is the matching half — the app is only trusted if the domain
+publishes an association document, which the backend serves from
+`PASSKEY_ANDROID_PACKAGE` / `PASSKEY_ANDROID_FINGERPRINTS` / `PASSKEY_IOS_APP_ID`
+(see [DEV.md](../DEV.md#passkeys-webauthn)). It must be reachable over real
+HTTPS on the RP ID's own domain.
+
+### Android
+
+Works with the debug keystore `deploy-android` already uses. Take its
+fingerprint and put it in the **server's** `.env`:
+
+```sh
+keytool -list -v -keystore ~/.android/debug.keystore \
+    -alias androiddebugkey -storepass android -keypass android | grep SHA256
+```
+
+```
+PASSKEY_ANDROID_PACKAGE=ru.tinyops.deepreader
+PASSKEY_ANDROID_FINGERPRINTS=48:BC:5A:…
+```
+
+Restart the server, re-run `just cap-sync`, reinstall the app. Android caches
+`assetlinks.json`; if the passkey prompt does not appear, clear the Google Play
+Services storage or reinstall.
+
+### iOS — needs a paid Apple Developer account
+
+Passkeys on iOS require the **Associated Domains** entitlement
+(`webcredentials:<domain>`), which a free Apple Development personal team cannot
+provision. Adding it without a paid Apple Developer Program membership makes
+`just deploy-ios` fail to find a matching provisioning profile.
+
+The iOS wiring is therefore behind its own flag, and **off by default** — every
+`cap sync` clears `PASSKEY_RP_ID` for the iOS pass so the entitlement is stripped
+and iOS keeps building on a free account. When you do have a paid membership:
+
+1. Enable the Associated Domains capability for the app id in the Apple
+   Developer portal.
+2. Set `PASSKEY_IOS_ENABLED=true` and `PASSKEY_IOS_APP_ID=<TeamID>.ru.tinyops.deepreader`
+   in `.env`.
+3. `just cap-sync && just deploy-ios`.
+
+Setting the flag back to `false` removes the entitlement again on the next sync,
+so this is not a one-way door.
+
+Until then the iOS app signs in with the password, and passkeys work on the web
+PWA and on Android.
 
 ## What's out of scope
 

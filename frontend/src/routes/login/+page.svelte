@@ -8,10 +8,14 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, OfflineError } from '$lib/api';
-	import { login } from '$lib/auth/store.svelte';
+	import { login, authState } from '$lib/auth/store.svelte';
+	import { loginWithPasskey, PasskeyAbortedError } from '$lib/auth/passkey';
+	import { initPasskeys, isPasskeyCancellation } from '$lib/platform/passkey';
+	import { captureError } from '$lib/sentry';
 	import { toggleMode, mode } from 'mode-watcher';
 	import SunIcon from '@lucide/svelte/icons/sun';
 	import MoonIcon from '@lucide/svelte/icons/moon';
+	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 
 	const STORAGE_KEY = 'login:username';
@@ -20,10 +24,16 @@
 	let password = $state('');
 	let error = $state('');
 	let submitting = $state(false);
+	let passkeySubmitting = $state(false);
+	// Both the server (a configured relying party) and the device (a credential
+	// API) have to agree before the button is worth showing.
+	let passkeySupported = $state(false);
 
 	let usernameEl = $state<HTMLInputElement | null>(null);
 	let passwordEl = $state<HTMLInputElement | null>(null);
 
+	const showPasskey = $derived(authState.passkeyEnabled && passkeySupported);
+	const busy = $derived(submitting || passkeySubmitting);
 	const canSubmit = $derived(username.trim().length > 0 && password.length > 0);
 
 	onMount(() => {
@@ -35,7 +45,33 @@
 		} else {
 			usernameEl?.focus();
 		}
+
+		// Installs the native shim on iOS/Android; a no-op in the browser.
+		void initPasskeys().then((ok) => (passkeySupported = ok));
 	});
+
+	async function handlePasskey() {
+		error = '';
+		passkeySubmitting = true;
+		try {
+			await loginWithPasskey();
+			await goto('/');
+		} catch (err) {
+			// Dismissing the platform prompt is a decision, not a failure.
+			if (err instanceof PasskeyAbortedError || isPasskeyCancellation(err)) return;
+
+			if (err instanceof ApiError && err.status === 401) {
+				error = 'That passkey was not accepted. Try your password instead.';
+			} else if (err instanceof OfflineError) {
+				error = 'Could not reach the server. Check your connection.';
+			} else {
+				error = 'Passkey sign-in failed. Try your password instead.';
+				captureError(err, { area: 'auth', extra: { action: 'passkey-login' } });
+			}
+		} finally {
+			passkeySubmitting = false;
+		}
+	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -96,7 +132,7 @@
 						bind:value={username}
 						bind:ref={usernameEl}
 						autocomplete="username"
-						disabled={submitting}
+						disabled={busy}
 						required
 					/>
 				</div>
@@ -109,7 +145,7 @@
 						bind:value={password}
 						bind:ref={passwordEl}
 						autocomplete="current-password"
-						disabled={submitting}
+						disabled={busy}
 						required
 					/>
 				</div>
@@ -118,7 +154,7 @@
 					<p class="text-destructive text-sm">{error}</p>
 				{/if}
 
-				<Button type="submit" class="w-full" disabled={!canSubmit || submitting}>
+				<Button type="submit" class="w-full" disabled={!canSubmit || busy}>
 					{#if submitting}
 						<LoaderCircleIcon class="mr-2 size-4 animate-spin" />
 						Signing in…
@@ -127,6 +163,24 @@
 					{/if}
 				</Button>
 			</form>
+
+			{#if showPasskey}
+				<div class="my-4 flex items-center gap-3">
+					<span class="bg-border h-px flex-1"></span>
+					<span class="text-muted-foreground text-xs uppercase">or</span>
+					<span class="bg-border h-px flex-1"></span>
+				</div>
+
+				<Button variant="outline" class="w-full" disabled={busy} onclick={handlePasskey}>
+					{#if passkeySubmitting}
+						<LoaderCircleIcon class="mr-2 size-4 animate-spin" />
+						Waiting for your passkey…
+					{:else}
+						<KeyRoundIcon class="mr-2 size-4" />
+						Sign in with a passkey
+					{/if}
+				</Button>
+			{/if}
 		</Card.Content>
 	</Card.Root>
 </div>
