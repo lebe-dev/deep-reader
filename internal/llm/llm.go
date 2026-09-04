@@ -185,6 +185,15 @@ type chatResponse struct {
 // enrichment for a big article — is far under this cap.
 const maxResponseBytes = 16 * 1024 * 1024
 
+// maxErrorBodyBytes caps how much of a non-2xx provider body we keep in the
+// APIError. The body is the only place the actionable reason lives — an
+// OpenRouter guardrail/data-policy rejection, for one, lists every removed
+// endpoint and why — and it is surfaced verbatim in the reader's "Raw LLM
+// response" dialog. The previous 256-byte cut sliced that explanation off
+// mid-sentence; 8 KiB holds a full provider error while still bounding a
+// hostile endpoint's output.
+const maxErrorBodyBytes = 8 * 1024
+
 // ---------------------------------------------------------------------------
 // Prompt construction.
 // ---------------------------------------------------------------------------
@@ -936,8 +945,8 @@ func (c *Client) postChat(ctx context.Context, cn conn, req chatRequest) (string
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := string(respBody)
-		if len(snippet) > 256 {
-			snippet = snippet[:256] + "..."
+		if len(snippet) > maxErrorBodyBytes {
+			snippet = snippet[:maxErrorBodyBytes] + "..."
 		}
 		return "", ports.Usage{}, &APIError{StatusCode: resp.StatusCode, Body: snippet}
 	}

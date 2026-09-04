@@ -309,6 +309,59 @@ func TestEnrich_Non2xxReturnsAPIError(t *testing.T) {
 	}
 }
 
+// TestEnrich_APIErrorBodyPreservesProviderMessage asserts that a non-2xx
+// provider body is kept in the APIError up to the 8 KiB cap, so the actionable
+// reason (e.g. an OpenRouter guardrail rejection listing every removed endpoint)
+// reaches the reader's "Raw LLM response" dialog instead of being sliced off
+// after 256 bytes. An over-cap body is still truncated with a trailing marker.
+func TestEnrich_APIErrorBodyPreservesProviderMessage(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		wantFullBody  bool
+		wantTruncated bool
+	}{
+		{
+			name:         "long body under cap is kept verbatim",
+			body:         `{"error":{"message":"` + strings.Repeat("guardrail removed endpoint; ", 60) + `"}}`,
+			wantFullBody: true,
+		},
+		{
+			name:          "body over cap is truncated with marker",
+			body:          strings.Repeat("x", 9*1024),
+			wantTruncated: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			client := llm.New(testConfig(srv.URL))
+			_, _, err := client.Enrich(context.Background(), testArticle(), testSettings(), ports.EnrichOptions{EnrichmentVersion: 1})
+			var apiErr *llm.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected *llm.APIError, got %T: %v", err, err)
+			}
+			if tc.wantFullBody && apiErr.Body != tc.body {
+				t.Errorf("Body was altered:\n got %q\nwant %q", apiErr.Body, tc.body)
+			}
+			if tc.wantTruncated {
+				if !strings.HasSuffix(apiErr.Body, "...") {
+					t.Errorf("over-cap Body should end with a truncation marker, got %q", apiErr.Body)
+				}
+				if len(apiErr.Body) > 8*1024+len("...") {
+					t.Errorf("over-cap Body should be bounded near 8 KiB, got %d bytes", len(apiErr.Body))
+				}
+			}
+		})
+	}
+}
+
 // TestEnrich_DecodeErrorCarriesRaw asserts that when a 2xx response carries
 // malformed enrichment content, Enrich returns a *llm.DecodeError whose
 // RawResponse() is the verbatim (undecodable) model output and that is not

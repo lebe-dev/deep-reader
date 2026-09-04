@@ -50,11 +50,15 @@
 	});
 
 	const hasRaw = $derived(loadState === 'ready' && !!data?.raw);
+	// Copy the raw response when there is one, otherwise the error text — the
+	// error carries the actionable provider message when no raw body was captured.
+	const copyText = $derived(data?.raw || data?.error || '');
+	const canCopy = $derived(loadState === 'ready' && !!copyText);
 
 	async function handleCopy() {
-		if (!data?.raw) return;
+		if (!copyText) return;
 		try {
-			await navigator.clipboard.writeText(data.raw);
+			await navigator.clipboard.writeText(copyText);
 			toast('Copied to clipboard.');
 		} catch {
 			toast.error('Failed to copy.');
@@ -80,9 +84,8 @@
 			<p class="text-destructive py-8 text-sm">{errorMessage}</p>
 		{:else if data}
 			{#if data.error}
-				<div class="bg-destructive/10 text-destructive shrink-0 rounded-md px-3 py-2 text-xs">
-					{data.error}
-				</div>
+				<pre
+					class="bg-destructive/10 text-destructive max-h-48 shrink-0 overflow-auto rounded-md px-3 py-2 font-mono text-xs whitespace-pre-wrap break-words">{data.error}</pre>
 			{/if}
 			{#if hasRaw}
 				<pre
@@ -95,7 +98,7 @@
 		{/if}
 
 		<Dialog.Footer class="mt-2 flex shrink-0 justify-end gap-2">
-			{#if hasRaw}
+			{#if canCopy}
 				<Button variant="outline" onclick={handleCopy}>
 					<CopyIcon class="size-4" />
 					Copy
