@@ -6,7 +6,13 @@
 	import { sync } from '$lib/sync/engine';
 	import { syncStatus } from '$lib/sync/store.svelte';
 	import { ArticleCard, AddArticleDialog } from '$lib/components/library';
-	import { sortLibrary, readingProgressPercent } from '$lib/components/library/library-utils';
+	import {
+		sortLibrary,
+		readingProgressPercent,
+		isDiscussion,
+		filterLibrary,
+		type LibraryFilter
+	} from '$lib/components/library/library-utils';
 	import { Button } from '$lib/components/ui/button';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import { toast } from 'svelte-sonner';
@@ -60,6 +66,23 @@
 			articlesSub.unsubscribe();
 		};
 	});
+
+	// ---------------------------------------------------------------------------
+	// Filter: articles vs. comment threads
+	// ---------------------------------------------------------------------------
+
+	let filter = $state<LibraryFilter>('all');
+
+	// The switch only appears once the library actually holds a discussion —
+	// until then it would be three buttons that all show the same list.
+	const hasDiscussions = $derived(articles.some(isDiscussion));
+	const visibleArticles = $derived(filterLibrary(articles, filter));
+
+	const filters: Array<{ value: LibraryFilter; label: string }> = [
+		{ value: 'all', label: 'All' },
+		{ value: 'articles', label: 'Articles' },
+		{ value: 'discussions', label: 'Discussions' }
+	];
 
 	// ---------------------------------------------------------------------------
 	// Sync
@@ -119,6 +142,22 @@
 		</div>
 	</div>
 
+	{#if hasDiscussions && !initialLoading}
+		<div class="flex items-center gap-1" role="group" aria-label="Filter the library">
+			{#each filters as option (option.value)}
+				<Button
+					size="sm"
+					variant={filter === option.value ? 'secondary' : 'ghost'}
+					class="h-7 text-xs"
+					aria-pressed={filter === option.value}
+					onclick={() => (filter = option.value)}
+				>
+					{option.label}
+				</Button>
+			{/each}
+		</div>
+	{/if}
+
 	{#if initialLoading}
 		<div class="space-y-2">
 			{#each { length: 4 } as _, i (i)}
@@ -142,9 +181,13 @@
 			</div>
 			<AddArticleDialog />
 		</div>
+	{:else if visibleArticles.length === 0}
+		<div class="text-muted-foreground py-12 text-center text-sm">
+			Nothing here yet — try another filter.
+		</div>
 	{:else}
 		<div class="space-y-2">
-			{#each articles as article (article.id)}
+			{#each visibleArticles as article (article.id)}
 				<ArticleCard
 					{article}
 					articleHref="/article/{article.id}"

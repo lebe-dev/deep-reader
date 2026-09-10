@@ -19,6 +19,7 @@ import (
 	"github.com/getsentry/sentry-go"
 
 	"deep-reader/internal/api"
+	"deep-reader/internal/comments"
 	"deep-reader/internal/config"
 	"deep-reader/internal/enrich"
 	"deep-reader/internal/extract"
@@ -115,6 +116,11 @@ func run() error {
 			slog.Int("cost_per_article", cfg.MarkdownCostPerArticle),
 		)
 	}
+
+	// Comment sources sit in front of the article extractors: a discussion-thread
+	// URL is read through the site's own API and rendered as Markdown, everything
+	// else falls through to the article path unchanged.
+	extractor = comments.NewRouter(extractor, comments.NewHackerNews(cfg))
 
 	// The lemmatizer annotates tokens with dictionary lemmas in the fetch stage,
 	// which is what lets the vocabulary cache match a collected word in any

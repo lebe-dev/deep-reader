@@ -211,6 +211,19 @@ const (
 	ContentFormatMarkdown = "markdown"
 )
 
+// Source type values for Article.SourceType / ArticleMeta.SourceType. They tell
+// the library what kind of content the record holds, which drives the card icon
+// and the "articles / discussions" filter. An empty value is treated as
+// SourceTypeArticle (every record predating the column).
+const (
+	// SourceTypeArticle is an ordinary page fetched and extracted as prose, and
+	// pasted text. This is the default.
+	SourceTypeArticle = "article"
+	// SourceTypeComments is a discussion thread pulled from a comment source
+	// (Hacker News today; see internal/comments) and rendered as Markdown.
+	SourceTypeComments = "comments"
+)
+
 // Token is a single deterministic token produced by the tokenizer. Start and
 // End are byte offsets into Article.OriginalText such that
 // OriginalText[Start:End] == Text. Index is the token's position in the token
@@ -246,6 +259,10 @@ type Article struct {
 	// structure in the reader). URL articles are always plain (the extractor strips
 	// Markdown); pasted text is classified at ingest. Empty is treated as plain.
 	ContentFormat string `json:"content_format,omitempty"`
+	// SourceType is the kind of content OriginalText holds: SourceTypeArticle
+	// (the default) or SourceTypeComments for a discussion thread. It is stamped
+	// by the fetch stage from the extractor that produced the content.
+	SourceType string `json:"source_type,omitempty"`
 	// Summary is a short LLM-produced abstract of the article, generated as the
 	// first step of the step-wise enrichment. Empty until summarized.
 	Summary           string `json:"summary,omitempty"`
@@ -558,7 +575,10 @@ type ArticleMeta struct {
 	Title        string `json:"title"`
 	Author       string `json:"author"`
 	SourceDomain string `json:"source_domain"`
-	Status       string `json:"status"`
+	// SourceType is the content kind (see Article.SourceType): "article" or
+	// "comments". The library shows a discussion icon and filters on it.
+	SourceType string `json:"source_type,omitempty"`
+	Status     string `json:"status"`
 	// Pinned keeps the article at the top of the library (see Article.Pinned).
 	Pinned            bool      `json:"pinned"`
 	CreatedAt         time.Time `json:"created_at"`

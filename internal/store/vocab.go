@@ -372,7 +372,7 @@ func (s *SQLite) PruneVocabTombstones(ctx context.Context) (int, error) {
 func (s *SQLite) ListArticlesForLemmaBackfill(ctx context.Context, version, limit int) ([]model.Article, error) {
 	// Same column list and order as ListWork, so scanArticleRow applies.
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, content_format, tokens, summary, status, enrichment_version, error,
+                      original_text, content_format, source_type, tokens, summary, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles
                WHERE lemma_version < ? AND tokens != '' AND tokens != 'null'

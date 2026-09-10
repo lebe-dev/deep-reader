@@ -29,14 +29,31 @@ type Page struct {
 	SourceLang string
 	// PublishedAt stamps the page's article:published_time.
 	PublishedAt time.Time
-	Blocks      []Block
+	// Nodes is the rendered content tree (see Nodes): a flat list of paragraphs
+	// for an article, a nested one for a comment thread.
+	Nodes []Node
+}
+
+// nodeScope is what the recursive content template is executed with: the nodes
+// of one level plus the source language, which the untranslated runs need for
+// their lang attribute and which a nested template cannot reach on its own.
+type nodeScope struct {
+	Nodes      []Node
+	SourceLang string
+}
+
+// pageFuncs lets the template build the scope for the next level down.
+var pageFuncs = template.FuncMap{
+	"scope": func(nodes []Node, sourceLang string) nodeScope {
+		return nodeScope{Nodes: nodes, SourceLang: sourceLang}
+	},
 }
 
 // pageTemplate is the whole public page: metadata, styles and content in one
 // self-contained file with no external requests. It follows the reader's own
 // look — a single narrow measure of serif text, light and dark via
 // prefers-color-scheme.
-var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
+var pageTemplate = template.Must(template.New("page").Funcs(pageFuncs).Parse(`<!doctype html>
 <html lang="{{ .Lang }}">
 <head>
 <meta charset="utf-8">
@@ -93,6 +110,20 @@ h1 { font-size: 1.85rem; line-height: 1.25; margin: 0 0 .75rem; }
 .byline a { color: inherit; }
 p { margin: 0 0 1.35rem; }
 .orig { color: var(--muted); font-style: italic; }
+/* One level of quote nesting. In a comment thread this is one reply level, so
+   the rail is the thread line the reader draws too. */
+.q { margin: 0 0 1.35rem; padding-left: .9rem; border-left: 2px solid var(--rule); }
+.q > *:last-child { margin-bottom: 0; }
+/* A quote level that is not a comment is someone quoting something. */
+.q.quotation { color: var(--muted); font-style: italic; }
+h1, h2, h3 { line-height: 1.3; margin: 2rem 0 .75rem; }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 1.2rem; }
+/* h4-h6 are the author lines of a thread: a label, not a section heading. */
+h4, h5, h6 { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: .85rem; font-weight: 600; color: var(--muted); margin: 0 0 .4rem; }
+pre { margin: 0 0 1.35rem; padding: .75rem .9rem; overflow-x: auto; border-radius: .4rem; background: color-mix(in srgb, var(--rule) 45%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; line-height: 1.5; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
+@media (max-width: 480px) { .q { padding-left: .6rem; } }
 footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .8rem; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
 footer a { color: var(--accent); }
 </style>
@@ -111,17 +142,34 @@ footer a { color: var(--accent); }
 </p>
 {{- end }}
 </header>
-{{- range .Blocks }}
-<p>
-{{- range $i, $s := .Segments }}{{ if $i }} {{ end }}
-{{- if $s.Translated }}{{ $s.Text }}{{ else }}<span class="orig" lang="{{ $.SourceLang }}">{{ $s.Text }}</span>{{ end }}
-{{- end }}
-</p>
-{{- end }}
+{{- template "nodes" (scope .Nodes .SourceLang) }}
 <footer>Translated with <a href="https://github.com/tiny-ops/deep-reader" rel="noopener">Deep Reader</a>.</footer>
 </main>
 </body>
 </html>
+{{- define "nodes" }}
+{{- $lang := .SourceLang }}
+{{- range .Nodes }}
+{{- if eq .Kind "quote" }}
+<div class="q{{ if not .Comment }} quotation{{ end }}">
+{{- template "nodes" (scope .Children $lang) }}
+</div>
+{{- else if eq .Kind "heading" }}
+<h{{ .Level }}>{{ range $i, $s := .Segments }}{{ if $i }} {{ end }}{{ if $s.Translated }}{{ $s.Text }}{{ else }}<span class="orig" lang="{{ $lang }}">{{ $s.Text }}</span>{{ end }}{{ end }}</h{{ .Level }}>
+{{- else if eq .Kind "code" }}
+<pre><code>{{ range $i, $s := .Segments }}{{ if $i }}
+{{ end }}{{ $s.Text }}{{ end }}</code></pre>
+{{- else if eq .Kind "rule" }}
+<hr>
+{{- else }}
+<p>
+{{- range $i, $s := .Segments }}{{ if $i }} {{ end }}
+{{- if $s.Translated }}{{ $s.Text }}{{ else }}<span class="orig" lang="{{ $lang }}">{{ $s.Text }}</span>{{ end }}
+{{- end }}
+</p>
+{{- end }}
+{{- end }}
+{{- end }}
 `))
 
 // notFoundPage is what a reader gets for a link that is unknown, revoked, or

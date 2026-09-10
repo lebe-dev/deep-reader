@@ -86,7 +86,7 @@ func (s *Server) publishArticle(c fiber.Ctx) error {
 		Lang:         settings.TargetLanguage,
 		SourceLang:   article.Lang,
 		PublishedAt:  pub.PublishedAt,
-		Blocks:       publish.Blocks(payload),
+		Nodes:        publish.Nodes(payload),
 	})
 	if err != nil {
 		return s.serverError(c, "publish: render page", err)

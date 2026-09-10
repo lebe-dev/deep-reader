@@ -129,7 +129,7 @@ func TestRenderPageEmbedsOpenGraphMetadata(t *testing.T) {
 		SourceDomain: "example.com",
 		Lang:         "ru",
 		PublishedAt:  time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC),
-		Blocks: []Block{{Segments: []Segment{
+		Nodes: []Node{{Kind: "paragraph", Segments: []Segment{
 			{Text: "Переведённое предложение.", Translated: true},
 			{Text: "Untranslated tail.", Translated: false},
 		}}},
@@ -162,7 +162,7 @@ func TestRenderPageEscapesUserSuppliedMetadata(t *testing.T) {
 	html, err := RenderPage(Page{
 		Title:       `Break"><script>alert(1)</script>`,
 		Description: `desc"><img src=x onerror=alert(1)>`,
-		Blocks: []Block{{Segments: []Segment{
+		Nodes: []Node{{Kind: "paragraph", Segments: []Segment{
 			{Text: "<script>alert(2)</script>", Translated: true},
 		}}},
 	})

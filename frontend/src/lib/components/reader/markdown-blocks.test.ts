@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildMarkdownBlocks, type Block, type InlineSegment } from './markdown-blocks';
+import {
+	buildMarkdownBlocks,
+	nestBlocks,
+	type Block,
+	type BlockNode,
+	type InlineSegment
+} from './markdown-blocks';
 import type { Token } from '$lib/types';
 
 // Minimal word tokenizer mirroring the backend contract: word tokens only
@@ -97,12 +103,33 @@ describe('buildMarkdownBlocks', () => {
 		expect(list.items).toHaveLength(2);
 	});
 
-	it('parses a blockquote and strips the marker', () => {
+	it('strips the blockquote marker and records the nesting depth', () => {
 		const blocks = build('> quoted wisdom');
-		const bq = blocks[0] as Extract<Block, { kind: 'blockquote' }>;
-		expect(bq.kind).toBe('blockquote');
-		expect(inlineText(bq.inline).trim()).toBe('quoted wisdom');
-		expect(words(bq.inline).map((w) => w.text)).toEqual(['quoted', 'wisdom']);
+		const quoted = blocks[0] as Extract<Block, { kind: 'paragraph' }>;
+		expect(quoted.kind).toBe('paragraph');
+		expect(quoted.depth).toBe(1);
+		expect(inlineText(quoted.inline).trim()).toBe('quoted wisdom');
+		expect(words(quoted.inline).map((w) => w.text)).toEqual(['quoted', 'wisdom']);
+	});
+
+	it('parses constructs inside a quote the same as outside it', () => {
+		// The shape a comment thread has: an author heading and a body, one quote
+		// level per reply (see internal/comments).
+		const blocks = build('#### alice\n\nRoot.\n\n> #### bob\n>\n> Reply.');
+		expect(blocks.map((b) => [b.kind, b.depth])).toEqual([
+			['heading', 0],
+			['paragraph', 0],
+			['heading', 1],
+			['paragraph', 1]
+		]);
+		const author = blocks[2] as Extract<Block, { kind: 'heading' }>;
+		expect(author.level).toBe(4);
+		expect(inlineText(author.inline).trim()).toBe('bob');
+	});
+
+	it('counts every marker of a nested quote', () => {
+		const blocks = build('> > > deep reply');
+		expect(blocks[0].depth).toBe(3);
 	});
 
 	it('parses a fenced code block as non-interactive raw text', () => {
@@ -149,5 +176,63 @@ describe('buildMarkdownBlocks', () => {
 		// Indices are strictly increasing and unique across the document.
 		expect(headingIdx).toEqual([0]);
 		expect(paraIdx).toEqual([1, 2]);
+	});
+});
+
+describe('nestBlocks', () => {
+	function tree(text: string): BlockNode[] {
+		return nestBlocks(build(text));
+	}
+
+	/** Compact shape of a tree: a block is its kind, a quote its children. */
+	function shape(nodes: BlockNode[]): unknown[] {
+		return nodes.map((n) => (n.kind === 'quote' ? [`quote${n.depth}`, shape(n.children)] : n.kind));
+	}
+
+	it('wraps each quote level in a container', () => {
+		expect(tree('#### alice\n\nRoot.\n\n> #### bob\n>\n> Reply.')).toBeDefined();
+		expect(shape(tree('#### alice\n\nRoot.\n\n> #### bob\n>\n> Reply.'))).toEqual([
+			'heading',
+			'paragraph',
+			['quote1', ['heading', 'paragraph']]
+		]);
+	});
+
+	it('nests a reply to a reply inside its parent', () => {
+		expect(shape(tree('> #### bob\n>\n> Reply.\n>\n> > #### carol\n> >\n> > Deeper.'))).toEqual([
+			['quote1', ['heading', 'paragraph', ['quote2', ['heading', 'paragraph']]]]
+		]);
+	});
+
+	it('keeps two replies to the same parent on one rail', () => {
+		// The separator between siblings stays quoted at the depth they share, so
+		// they belong to the same quote level rather than to two stacked ones.
+		expect(shape(tree('> #### bob\n>\n> First.\n>\n> #### carol\n>\n> Second.'))).toEqual([
+			['quote1', ['heading', 'paragraph', 'heading', 'paragraph']]
+		]);
+	});
+
+	it('closes the quote at an unquoted blank line', () => {
+		// A top-level comment following a reply must not end up inside it.
+		expect(shape(tree('> #### bob\n>\n> Reply.\n\n#### dave\n\nRoot again.'))).toEqual([
+			['quote1', ['heading', 'paragraph']],
+			'heading',
+			'paragraph'
+		]);
+	});
+
+	it('returns to the shallower level after a deep chain', () => {
+		const text = '> #### bob\n>\n> > #### carol\n> >\n> > Deep.\n>\n> #### bob again\n>\n> Back.';
+		expect(shape(tree(text))).toEqual([
+			['quote1', ['heading', ['quote2', ['heading', 'paragraph']], 'heading', 'paragraph']]
+		]);
+	});
+
+	it('leaves unquoted blocks at the root', () => {
+		expect(shape(tree('Plain paragraph.\n\n---\n\nAnother one.'))).toEqual([
+			'paragraph',
+			'hr',
+			'paragraph'
+		]);
 	});
 });

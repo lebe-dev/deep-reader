@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import type { ArticleMeta } from '$lib/types';
-import { readingProgressPercent, compareLibrary, sortLibrary } from './library-utils';
+import {
+	readingProgressPercent,
+	compareLibrary,
+	sortLibrary,
+	isDiscussion,
+	filterLibrary,
+	type LibraryFilter
+} from './library-utils';
 
 // Minimal ArticleMeta factory — only the fields the helpers read matter; the
 // rest are filled with sane defaults.
@@ -127,5 +134,43 @@ describe('sortLibrary', () => {
 		const copy = [...input];
 		sortLibrary(input, new Set());
 		expect(input).toEqual(copy);
+	});
+});
+
+describe('isDiscussion', () => {
+	it('is true only for a comment thread', () => {
+		expect(isDiscussion(meta({ id: 'thread', source_type: 'comments' }))).toBe(true);
+		expect(isDiscussion(meta({ id: 'article', source_type: 'article' }))).toBe(false);
+	});
+
+	it('treats a record without the field as an article', () => {
+		// Everything ingested before comment sources existed has no source_type.
+		expect(isDiscussion(meta({ id: 'legacy' }))).toBe(false);
+	});
+});
+
+describe('filterLibrary', () => {
+	const items = [
+		meta({ id: 'legacy' }),
+		meta({ id: 'article', source_type: 'article' }),
+		meta({ id: 'thread', source_type: 'comments' })
+	];
+
+	const cases: Array<{ filter: LibraryFilter; want: string[] }> = [
+		{ filter: 'all', want: ['legacy', 'article', 'thread'] },
+		{ filter: 'articles', want: ['legacy', 'article'] },
+		{ filter: 'discussions', want: ['thread'] }
+	];
+
+	for (const { filter, want } of cases) {
+		it(`keeps ${want.length} item(s) for the "${filter}" filter`, () => {
+			expect(filterLibrary(items, filter).map((a) => a.id)).toEqual(want);
+		});
+	}
+
+	it('returns the same array instance for the "all" filter', () => {
+		// The library re-renders on every sync; not copying keeps the keyed each
+		// block from rebuilding when nothing was filtered out.
+		expect(filterLibrary(items, 'all')).toBe(items);
 	});
 });

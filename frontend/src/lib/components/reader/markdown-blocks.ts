@@ -42,14 +42,37 @@ export type InlineSegment =
 	| { kind: 'link'; text: string; url: string; marks: InlineMark[] };
 
 /** A structural block parsed from the Markdown. */
-export type Block =
+export type BlockBody =
 	| { kind: 'heading'; level: number; inline: InlineSegment[] }
 	| { kind: 'paragraph'; inline: InlineSegment[] }
-	| { kind: 'blockquote'; inline: InlineSegment[] }
 	| { kind: 'list'; ordered: boolean; items: InlineSegment[][] }
 	| { kind: 'code'; text: string }
 	| { kind: 'table'; header: InlineSegment[][]; rows: InlineSegment[][][] }
 	| { kind: 'hr' };
+
+/**
+ * A block plus its blockquote nesting.
+ *
+ * `depth` is how many `>` markers the block sits behind — 0 for ordinary body
+ * text, and for a comment thread (`internal/comments`) the reply depth of the
+ * comment it belongs to. `breakDepth` is the shallowest blank line seen since
+ * the previous block: a blank line ends every quote level deeper than itself,
+ * which is what separates two quotes at the same depth from one quote that
+ * simply continues. Both are consumed by `nestBlocks`.
+ */
+export type Block = BlockBody & { depth: number; breakDepth: number };
+
+/** A quote level in the nested tree: the container `nestBlocks` wraps a run of
+ *  deeper blocks in. For a comment thread this is one reply level — the reader
+ *  draws it as an indented column with a rail. */
+export interface QuoteNode {
+	kind: 'quote';
+	depth: number;
+	children: BlockNode[];
+}
+
+/** A node of the nested block tree: either a block or a quote level. */
+export type BlockNode = Block | QuoteNode;
 
 // ---------------------------------------------------------------------------
 // Block-level patterns (mirroring internal/markdown/text.go)
@@ -97,6 +120,25 @@ interface Line {
 	text: string;
 	start: number;
 	end: number;
+}
+
+/**
+ * Strip the blockquote markers from a line, returning the remaining content
+ * (with its offsets shifted past the markers) and how many markers there were.
+ * Nesting depth is read here once, so every construct below — headings, lists,
+ * code fences — parses the same inside a quote as outside it.
+ */
+function stripQuoteMarkers(line: Line): { line: Line; depth: number } {
+	let { text, start } = line;
+	let depth = 0;
+	for (;;) {
+		const m = blockquoteRe.exec(text);
+		if (!m) break;
+		depth++;
+		start += m[0].length;
+		text = text.slice(m[0].length);
+	}
+	return { line: { text, start, end: line.end }, depth };
 }
 
 function splitLines(text: string): Line[] {
@@ -362,19 +404,31 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 		end: strIdx(t.end)
 	}));
 	const spans = findMarkdownSpans(text);
-	const lines = splitLines(text);
+	const stripped = splitLines(text).map(stripQuoteMarkers);
+	const lines = stripped.map((s) => s.line);
+	const depths = stripped.map((s) => s.depth);
 
 	const inline = (ranges: Range[]): InlineSegment[] => buildInline(stokens, text, ranges, spans);
 
 	const blocks: Block[] = [];
 	let i = 0;
 
+	// The shallowest blank line seen since the last block was pushed. A blank
+	// line closes every quote level deeper than itself, so this is what tells
+	// two sibling quotes apart from one quote that continues (see Block).
+	let breakDepth = Number.POSITIVE_INFINITY;
+
+	/** Push a block, stamping the nesting it was parsed at. */
+	const push = (body: BlockBody, depth: number): void => {
+		blocks.push({ ...body, depth, breakDepth });
+		breakDepth = Number.POSITIVE_INFINITY;
+	};
+
 	const isBlockStart = (idx: number): boolean => {
 		const ln = lines[idx];
 		const trimmed = ln.text.trim();
 		if (trimmed === '') return true;
-		if (headingRe.test(ln.text) || blockquoteRe.test(ln.text) || listItemRe.test(ln.text))
-			return true;
+		if (headingRe.test(ln.text) || listItemRe.test(ln.text)) return true;
 		if (isHorizontalRule(trimmed) || fenceMarker(trimmed)) return true;
 		if (
 			ln.text.includes('|') &&
@@ -388,8 +442,10 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 	while (i < lines.length) {
 		const line = lines[i];
 		const trimmed = line.text.trim();
+		const depth = depths[i];
 
 		if (trimmed === '') {
+			breakDepth = Math.min(breakDepth, depth);
 			i++;
 			continue;
 		}
@@ -404,7 +460,7 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 				i++;
 			}
 			if (i < lines.length) i++; // consume closing fence
-			blocks.push({ kind: 'code', text: codeLines.join('\n') });
+			push({ kind: 'code', text: codeLines.join('\n') }, depth);
 			continue;
 		}
 
@@ -413,18 +469,17 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 		if (h) {
 			const level = h[2].length;
 			const contentStart = line.start + h[1].length + h[2].length + h[3].length;
-			blocks.push({
-				kind: 'heading',
-				level,
-				inline: inline([{ start: contentStart, end: line.end }])
-			});
+			push(
+				{ kind: 'heading', level, inline: inline([{ start: contentStart, end: line.end }]) },
+				depth
+			);
 			i++;
 			continue;
 		}
 
 		// Thematic break.
 		if (isHorizontalRule(trimmed)) {
-			blocks.push({ kind: 'hr' });
+			push({ kind: 'hr' }, depth);
 			i++;
 			continue;
 		}
@@ -438,23 +493,16 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 			const header = splitCells(line).map((c) => inline([c]));
 			i += 2; // header + delimiter
 			const rows: InlineSegment[][][] = [];
-			while (i < lines.length && lines[i].text.includes('|') && lines[i].text.trim() !== '') {
+			while (
+				i < lines.length &&
+				depths[i] === depth &&
+				lines[i].text.includes('|') &&
+				lines[i].text.trim() !== ''
+			) {
 				rows.push(splitCells(lines[i]).map((c) => inline([c])));
 				i++;
 			}
-			blocks.push({ kind: 'table', header, rows });
-			continue;
-		}
-
-		// Blockquote — consecutive `>` lines, marker stripped.
-		if (blockquoteRe.test(line.text)) {
-			const ranges: Range[] = [];
-			while (i < lines.length && blockquoteRe.test(lines[i].text)) {
-				const m = blockquoteRe.exec(lines[i].text)!;
-				ranges.push({ start: lines[i].start + m[0].length, end: lines[i].end });
-				i++;
-			}
-			blocks.push({ kind: 'blockquote', inline: inline(ranges) });
+			push({ kind: 'table', header, rows }, depth);
 			continue;
 		}
 
@@ -463,7 +511,7 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 		if (li) {
 			const ordered = /\d/.test(li[2]);
 			const items: InlineSegment[][] = [];
-			while (i < lines.length) {
+			while (i < lines.length && depths[i] === depth) {
 				const cur = lines[i];
 				if (cur.text.trim() === '') break;
 				const m = listItemRe.exec(cur.text);
@@ -483,22 +531,57 @@ export function buildMarkdownBlocks(tokens: Token[], text: string): Block[] {
 					break;
 				}
 			}
-			blocks.push({ kind: 'list', ordered, items });
+			push({ kind: 'list', ordered, items }, depth);
 			continue;
 		}
 
 		// Paragraph — accumulate soft-wrapped lines up to the next block boundary.
 		const ranges: Range[] = [];
-		while (i < lines.length && lines[i].text.trim() !== '' && !isBlockStart(i)) {
+		while (
+			i < lines.length &&
+			depths[i] === depth &&
+			lines[i].text.trim() !== '' &&
+			!isBlockStart(i)
+		) {
 			ranges.push({ start: lines[i].start, end: lines[i].end });
 			i++;
 		}
 		if (ranges.length > 0) {
-			blocks.push({ kind: 'paragraph', inline: inline(ranges) });
+			push({ kind: 'paragraph', inline: inline(ranges) }, depth);
 		} else {
 			i++; // safety: never stall
 		}
 	}
 
 	return blocks;
+}
+
+/**
+ * Group a flat block list into the quote tree the reader renders: each level of
+ * blockquote nesting becomes a QuoteNode wrapping the blocks inside it.
+ *
+ * A block opens as many levels as its `depth` requires and closes every level
+ * deeper than the blank line that preceded it (`breakDepth`), so two comments
+ * replying to the same parent share one level — the indentation rail they share
+ * in the thread — while a comment that returns to a shallower level starts a
+ * new one.
+ */
+export function nestBlocks(blocks: Block[]): BlockNode[] {
+	const root: BlockNode[] = [];
+	const stack: QuoteNode[] = [];
+
+	const container = (): BlockNode[] => (stack.length ? stack[stack.length - 1].children : root);
+
+	for (const block of blocks) {
+		const keep = Math.min(block.depth, block.breakDepth);
+		while (stack.length > keep) stack.pop();
+		while (stack.length < block.depth) {
+			const node: QuoteNode = { kind: 'quote', depth: stack.length + 1, children: [] };
+			container().push(node);
+			stack.push(node);
+		}
+		container().push(block);
+	}
+
+	return root;
 }

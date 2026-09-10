@@ -512,33 +512,53 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		// article blocked rather than spending tokens annotating a captcha. Not
 		// retried automatically (the wall won't clear on its own); a manual retry
 		// re-runs the fetch.
-		if reason := detectBotWall(result, signatures); reason != "" {
-			log.Warn("enrich: bot-wall/captcha detected, aborting before LLM", "reason", reason)
-			p.setFailed(ctx, a, model.StatusBlocked, fmt.Errorf("%w: %s", ErrBotWall, reason))
-			return false
+		// A comment thread comes from a site API, not from a scraped page, so
+		// there is no interstitial to detect — and a short thread discussing
+		// captchas would otherwise trip the signature match.
+		isComments := result.SourceType == model.SourceTypeComments
+		if !isComments {
+			if reason := detectBotWall(result, signatures); reason != "" {
+				log.Warn("enrich: bot-wall/captcha detected, aborting before LLM", "reason", reason)
+				p.setFailed(ctx, a, model.StatusBlocked, fmt.Errorf("%w: %s", ErrBotWall, reason))
+				return false
+			}
 		}
 
 		// Decode HTML entities before tokenizing so token byte offsets stay
-		// consistent with the stored OriginalText.
-		text := html.UnescapeString(result.Text)
-		title := html.UnescapeString(result.Title)
+		// consistent with the stored OriginalText. A comment source hands over
+		// text it already decoded field by field, so decoding again here would
+		// eat the escapes a commenter typed on purpose ("&amp;" written to show
+		// an entity would collapse to "&").
+		text := result.Text
+		title := result.Title
+		if !isComments {
+			text = html.UnescapeString(text)
+			title = html.UnescapeString(title)
+		}
 
 		// Normalize the extracted body — strip leftover navigation / chrome /
 		// boilerplate — BEFORE tokenizing, so tokens (and every downstream
 		// enrichment span) align with the cleaned text. Best-effort: a normalize
-		// failure leaves the original text in place.
-		p.setStage(ctx, log, a.ID, stageNormalizing)
-		text = p.runNormalize(ctx, log, title, text, settings)
+		// failure leaves the original text in place. A comment thread skips the
+		// pass entirely: it was assembled field by field from an API, so there is
+		// no chrome to strip, and the LLM would flatten the Markdown structure
+		// (the author headings and reply nesting) that IS the content there.
+		if !isComments {
+			p.setStage(ctx, log, a.ID, stageNormalizing)
+			text = p.runNormalize(ctx, log, title, text, settings)
+		}
 		tokens := lemma.Apply(p.lem, tokenize.Tokenize(text))
 
 		update := ports.ContentUpdate{
-			SourceURL:    result.CanonicalURL,
-			Title:        title,
-			Author:       html.UnescapeString(result.Author),
-			SourceDomain: result.Domain,
-			Lang:         result.Lang,
-			Text:         text,
-			Tokens:       tokens,
+			SourceURL:     result.CanonicalURL,
+			Title:         title,
+			Author:        html.UnescapeString(result.Author),
+			SourceDomain:  result.Domain,
+			Lang:          result.Lang,
+			Text:          text,
+			Tokens:        tokens,
+			SourceType:    result.SourceType,
+			ContentFormat: result.ContentFormat,
 		}
 		if err := p.store.SaveContent(ctx, a.ID, update); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
@@ -566,6 +586,8 @@ func (p *Pool) runFetch(ctx context.Context, log *slog.Logger, a *model.Article)
 		a.Lang = update.Lang
 		a.OriginalText = update.Text
 		a.Tokens = update.Tokens
+		a.SourceType = update.SourceType
+		a.ContentFormat = update.ContentFormat
 		a.Status = model.StatusFetched
 
 		log.Info("enrich: content fetched", "domain", update.SourceDomain, "token_count", len(tokens))

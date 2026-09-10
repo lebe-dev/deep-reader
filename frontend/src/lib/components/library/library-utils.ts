@@ -53,3 +53,25 @@ export function compareLibrary(a: ArticleMeta, b: ArticleMeta, readSet: Set<stri
 export function sortLibrary(articles: ArticleMeta[], readSet: Set<string>): ArticleMeta[] {
 	return [...articles].sort((a, b) => compareLibrary(a, b, readSet));
 }
+
+/**
+ * Which slice of the library the user is looking at. `'all'` is the default;
+ * the switch is only offered once the library actually holds a discussion.
+ */
+export type LibraryFilter = 'all' | 'articles' | 'discussions';
+
+/**
+ * Whether the record is a comment thread rather than an article. The field is
+ * optional on the wire (and absent on everything ingested before comment
+ * sources existed), so anything that is not explicitly a thread is an article.
+ */
+export function isDiscussion(article: ArticleMeta): boolean {
+	return article.source_type === 'comments';
+}
+
+/** Apply the library filter. `'all'` returns the input array unchanged. */
+export function filterLibrary(articles: ArticleMeta[], filter: LibraryFilter): ArticleMeta[] {
+	if (filter === 'all') return articles;
+	if (filter === 'discussions') return articles.filter(isDiscussion);
+	return articles.filter((a) => !isDiscussion(a));
+}

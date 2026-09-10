@@ -7,12 +7,14 @@
 	import DeleteDialog from '$lib/components/library/DeleteDialog.svelte';
 	import RawResponseDialog from '$lib/components/library/RawResponseDialog.svelte';
 	import { enqueueRetry, enqueuePin, enqueueSetRead, enqueueResetProgress } from '$lib/sync/engine';
+	import { isDiscussion } from '$lib/components/library/library-utils';
 	import { toast } from 'svelte-sonner';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import FileTextIcon from '@lucide/svelte/icons/file-text';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import GlobeIcon from '@lucide/svelte/icons/globe';
+	import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
 	import PinIcon from '@lucide/svelte/icons/pin';
 	import EllipsisVerticalIcon from '@lucide/svelte/icons/ellipsis-vertical';
 	import AlignLeftIcon from '@lucide/svelte/icons/align-left';
@@ -150,6 +152,10 @@
 	// Show the reading-progress bar only for partially-read, not-yet-finished
 	// articles (an unread article the user has started). Read articles show none.
 	const showProgress = $derived(!isRead && progressPercent > 0 && progressPercent < 100);
+
+	// A comment thread reads very differently from an article, so the card says
+	// so at a glance instead of leaving the domain as the only hint.
+	const discussion = $derived(isDiscussion(article));
 </script>
 
 <div
@@ -287,6 +293,15 @@
 			>
 				<GlobeIcon class="size-3.5" />
 			</a>
+		{/if}
+		{#if discussion}
+			<span
+				class="text-muted-foreground/80 shrink-0"
+				title="Comment thread"
+				aria-label="Comment thread"
+			>
+				<MessagesSquareIcon class="size-3.5" />
+			</span>
 		{/if}
 		{#if article.source_domain && safeSourceUrl}
 			<a

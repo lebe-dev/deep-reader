@@ -216,6 +216,8 @@ func (f *fakeStore) SaveContent(_ context.Context, id string, c ports.ContentUpd
 	a.Lang = c.Lang
 	a.OriginalText = c.Text
 	a.Tokens = c.Tokens
+	a.SourceType = c.SourceType
+	a.ContentFormat = c.ContentFormat
 	a.Status = model.StatusFetched
 	a.Error = ""
 	return nil
@@ -460,6 +462,17 @@ func (f *fakeStore) originalText(id string) string {
 		return a.OriginalText
 	}
 	return ""
+}
+
+// contentKind is a helper for tests to read the stored source type and content
+// format the fetch stage stamped on an article.
+func (f *fakeStore) contentKind(id string) (sourceType, format string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.articles[id]; ok {
+		return a.SourceType, a.ContentFormat
+	}
+	return "", ""
 }
 
 // ---------------------------------------------------------------------------
@@ -1907,5 +1920,73 @@ func TestClaimLifecycle(t *testing.T) {
 	pool.ReleaseClaimForTest("a1")
 	if !pool.TryClaimForTest("a1") {
 		t.Error("claim after release must succeed")
+	}
+}
+
+// TestFetchCommentThreadKeepsMarkdownVerbatim covers the comment-source path of
+// the fetch stage: a thread arrives already assembled as Markdown, so it must be
+// stored exactly as the source rendered it — no normalization pass (which would
+// flatten the author headings and reply nesting that carry the discussion
+// structure) and no second entity decode — and the article must be stamped as a
+// comment thread so the library can badge and filter it.
+func TestFetchCommentThreadKeepsMarkdownVerbatim(t *testing.T) {
+	const thread = "## alice\n\nUse the &amp; entity here.\n\n### bob\n\n> *Use the &amp; entity here.*\n\nAgreed."
+	st := newFakeStore(queuedArticle("article-thread", "https://news.ycombinator.com/item?id=1"))
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL:  "https://news.ycombinator.com/item?id=1",
+		Title:         "A thread",
+		Author:        "alice",
+		Domain:        "news.ycombinator.com",
+		Lang:          "en",
+		Text:          thread,
+		SourceType:    model.SourceTypeComments,
+		ContentFormat: model.ContentFormatMarkdown,
+	}}
+	llm := &fakeLLM{result: &model.Enrichment{}}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-thread") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-thread"))
+	}
+	if got := st.originalText("article-thread"); got != thread {
+		t.Errorf("stored thread text:\n got %q\nwant %q", got, thread)
+	}
+	if llm.normalizeCalls != 0 {
+		t.Errorf("normalize calls: got %d, want 0 (a thread has no chrome to strip)", llm.normalizeCalls)
+	}
+	sourceType, format := st.contentKind("article-thread")
+	if sourceType != model.SourceTypeComments {
+		t.Errorf("source type: got %q, want %q", sourceType, model.SourceTypeComments)
+	}
+	if format != model.ContentFormatMarkdown {
+		t.Errorf("content format: got %q, want %q", format, model.ContentFormatMarkdown)
+	}
+}
+
+// TestFetchCommentThreadSkipsBotWallDetection verifies the captcha guard does
+// not run for a comment thread: the text comes from a site API, so a short
+// thread that happens to discuss bot walls must not be marked blocked.
+func TestFetchCommentThreadSkipsBotWallDetection(t *testing.T) {
+	st := newFakeStore(queuedArticle("article-thread-wall", "https://news.ycombinator.com/item?id=2"))
+	ex := &fakeExtractor{result: &ports.ExtractResult{
+		CanonicalURL:  "https://news.ycombinator.com/item?id=2",
+		Title:         "Cloudflare again",
+		Domain:        "news.ycombinator.com",
+		Lang:          "en",
+		Text:          "## alice\n\nVercel Security Checkpoint keeps telling me we're verifying your browser.",
+		SourceType:    model.SourceTypeComments,
+		ContentFormat: model.ContentFormatMarkdown,
+	}}
+	llm := &fakeLLM{result: &model.Enrichment{}}
+	pool := enrich.NewPool(testCfg(1, 3), st, ex, llm, nil)
+
+	ok := runPool(t, pool, 3*time.Second, func() bool {
+		return st.status("article-thread-wall") == model.StatusEnriched
+	})
+	if !ok {
+		t.Fatalf("expected status=enriched, got %q", st.status("article-thread-wall"))
 	}
 }

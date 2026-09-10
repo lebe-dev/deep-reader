@@ -1301,6 +1301,80 @@ func TestSaveContent(t *testing.T) {
 	}
 }
 
+// TestSaveContentStampsSourceTypeAndFormat covers the comment-thread path: the
+// fetch stage classifies what it stored, and both the library (icon + filter)
+// and the reader (Markdown rendering) read that classification back.
+func TestSaveContentStampsSourceTypeAndFormat(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name           string
+		update         ports.ContentUpdate
+		wantSourceType string
+		wantFormat     string
+	}{
+		{
+			name: "a comment thread is stored as markdown",
+			update: ports.ContentUpdate{
+				Text:          "## alice\n\nA comment.",
+				SourceType:    model.SourceTypeComments,
+				ContentFormat: model.ContentFormatMarkdown,
+			},
+			wantSourceType: model.SourceTypeComments,
+			wantFormat:     model.ContentFormatMarkdown,
+		},
+		{
+			name:           "an unclassified update keeps the plain article defaults",
+			update:         ports.ContentUpdate{Text: "Ordinary prose."},
+			wantSourceType: model.SourceTypeArticle,
+			wantFormat:     model.ContentFormatPlain,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := makeArticle(fmt.Sprintf("https://example.com/kind-%d", i))
+			a.Status = model.StatusQueued
+			if err := s.CreateArticle(ctx, a); err != nil {
+				t.Fatalf("CreateArticle: %v", err)
+			}
+			if err := s.SaveContent(ctx, a.ID, tc.update); err != nil {
+				t.Fatalf("SaveContent: %v", err)
+			}
+
+			got, err := s.GetArticle(ctx, a.ID)
+			if err != nil {
+				t.Fatalf("GetArticle: %v", err)
+			}
+			if got.SourceType != tc.wantSourceType {
+				t.Errorf("source type: got %q, want %q", got.SourceType, tc.wantSourceType)
+			}
+			if got.ContentFormat != tc.wantFormat {
+				t.Errorf("content format: got %q, want %q", got.ContentFormat, tc.wantFormat)
+			}
+
+			metas, err := s.ListArticleMeta(ctx, time.Time{})
+			if err != nil {
+				t.Fatalf("ListArticleMeta: %v", err)
+			}
+			var found bool
+			for _, m := range metas {
+				if m.ID != a.ID {
+					continue
+				}
+				found = true
+				if m.SourceType != tc.wantSourceType {
+					t.Errorf("meta source type: got %q, want %q", m.SourceType, tc.wantSourceType)
+				}
+			}
+			if !found {
+				t.Fatalf("article %s missing from the library listing", a.ID)
+			}
+		})
+	}
+}
+
 func TestSaveContent_NotFound(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

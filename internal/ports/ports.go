@@ -520,6 +520,16 @@ type ExtractResult struct {
 	Lang         string
 	HTML         string
 	Text         string
+	// SourceType is the kind of content Text holds: model.SourceTypeArticle (the
+	// default, also when empty) or model.SourceTypeComments for a discussion
+	// thread produced by a comment source. The fetch stage stamps it on the
+	// article and skips the boilerplate-normalization and bot-wall passes for a
+	// comment thread, whose text is assembled from an API and is already clean.
+	SourceType string
+	// ContentFormat is the structural format of Text: model.ContentFormatPlain
+	// (the default, also when empty) or model.ContentFormatMarkdown when the
+	// extractor produced Markdown the reader should render as structure.
+	ContentFormat string
 }
 
 // Passkey is one stored WebAuthn credential registered against the single
@@ -555,6 +565,11 @@ type ContentUpdate struct {
 	Lang         string
 	Text         string
 	Tokens       []model.Token
+	// SourceType and ContentFormat carry the extractor's classification of the
+	// content (see ExtractResult). Empty values are persisted as the plain
+	// article defaults.
+	SourceType    string
+	ContentFormat string
 }
 
 // Ingestor orchestrates the ingestion pipeline. Concrete constructor:

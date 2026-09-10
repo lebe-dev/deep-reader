@@ -293,12 +293,13 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 
 	const q = `INSERT INTO articles
                (id, source_url, url_hash, title, author, source_domain, lang,
-                original_text, content_format, tokens, status, enrichment_version, error,
+                original_text, content_format, source_type, tokens, status, enrichment_version, error,
                 pinned, created_at, enriched_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err = s.write.ExecContext(ctx, q,
 		a.ID, a.SourceURL, a.URLHash, a.Title, a.Author, a.SourceDomain, a.Lang,
-		a.OriginalText, contentFormatOrDefault(a.ContentFormat), string(tokJSON), a.Status, a.EnrichmentVersion, a.Error,
+		a.OriginalText, contentFormatOrDefault(a.ContentFormat), sourceTypeOrDefault(a.SourceType),
+		string(tokJSON), a.Status, a.EnrichmentVersion, a.Error,
 		pinned, fmtTime(a.CreatedAt), fmtTime(a.EnrichedAt), fmtTime(a.UpdatedAt),
 	)
 	if err != nil {
@@ -315,7 +316,7 @@ func (s *SQLite) CreateArticle(ctx context.Context, a *model.Article) error {
 // [ports.ErrNotFound] if it does not exist.
 func (s *SQLite) GetArticleByHash(ctx context.Context, urlHash string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, content_format, tokens, status, enrichment_version, error,
+                      original_text, content_format, source_type, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE url_hash = ?`
 	row := s.db.QueryRowContext(ctx, q, urlHash)
@@ -344,14 +345,14 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		err  error
 	)
 	if since.IsZero() {
-		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
+		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.source_type, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
                           json_array_length(a.tokens), a.enrichment_coverage, COALESCE(a.summary, ''), a.progress_stage, a.llm_model, COALESCE(p.token, '')
                    FROM articles a LEFT JOIN publications p
                           ON p.article_id = a.id AND (p.expires_at = '' OR p.expires_at > ?)
                    ORDER BY a.created_at DESC`
 		rows, err = s.db.QueryContext(ctx, q, fmtTime(now()))
 	} else {
-		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
+		const q = `SELECT a.id, a.source_url, a.title, a.author, a.source_domain, a.source_type, a.status, a.pinned, a.created_at, a.enriched_at, a.enrichment_version,
                           json_array_length(a.tokens), a.enrichment_coverage, COALESCE(a.summary, ''), a.progress_stage, a.llm_model, COALESCE(p.token, '')
                    FROM articles a LEFT JOIN publications p
                           ON p.article_id = a.id AND (p.expires_at = '' OR p.expires_at > ?)
@@ -368,7 +369,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 		var m model.ArticleMeta
 		var createdAtStr, enrichedAtStr string
 		var pinned int
-		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain,
+		if err := rows.Scan(&m.ID, &m.SourceURL, &m.Title, &m.Author, &m.SourceDomain, &m.SourceType,
 			&m.Status, &pinned, &createdAtStr, &enrichedAtStr, &m.EnrichmentVersion, &m.TokenCount,
 			&m.EnrichmentCoverage, &m.Summary, &m.ProgressStage, &m.LLMModel, &m.PublicToken); err != nil {
 			return nil, fmt.Errorf("store: ListArticleMeta scan: %w", err)
@@ -394,7 +395,7 @@ func (s *SQLite) ListArticleMeta(ctx context.Context, since time.Time) ([]model.
 // GetArticle returns the full server-side article record, or [ports.ErrNotFound].
 func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, content_format, tokens, status, enrichment_version, error,
+                      original_text, content_format, source_type, tokens, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, q, id)
@@ -689,7 +690,7 @@ func (s *SQLite) SaveEnrichmentProgress(ctx context.Context, id string, e model.
 // stuck by a crash mid-stage is re-selected and re-processed.
 func (s *SQLite) ListWork(ctx context.Context, limit int) ([]model.Article, error) {
 	const q = `SELECT id, source_url, url_hash, title, author, source_domain, lang,
-                      original_text, content_format, tokens, summary, status, enrichment_version, error,
+                      original_text, content_format, source_type, tokens, summary, status, enrichment_version, error,
                       created_at, enriched_at, updated_at, pinned, llm_model
                FROM articles
                WHERE status IN ('queued','fetching','fetched','enriching','topup_queued')
@@ -729,12 +730,13 @@ func (s *SQLite) SaveContent(ctx context.Context, id string, c ports.ContentUpda
 
 	const q = `UPDATE articles
 	           SET source_url=?, title=?, author=?, source_domain=?, lang=?,
-	               original_text=?, tokens=?, status='fetched', error='',
-	               raw_llm_response='', updated_at=?
+	               original_text=?, content_format=?, source_type=?, tokens=?,
+	               status='fetched', error='', raw_llm_response='', updated_at=?
 	           WHERE id=?`
 	res, err := s.write.ExecContext(ctx, q,
 		c.SourceURL, c.Title, c.Author, c.SourceDomain, c.Lang,
-		c.Text, string(tokJSON), fmtTime(now()), id,
+		c.Text, contentFormatOrDefault(c.ContentFormat), sourceTypeOrDefault(c.SourceType),
+		string(tokJSON), fmtTime(now()), id,
 	)
 	if err != nil {
 		return fmt.Errorf("store: SaveContent: %w", err)
@@ -1131,7 +1133,7 @@ func scanArticle(row *sql.Row) (*model.Article, error) {
 	var pinned int
 	if err := row.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
-		&a.OriginalText, &a.ContentFormat, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
+		&a.OriginalText, &a.ContentFormat, &a.SourceType, &tokJSON, &a.Status, &a.EnrichmentVersion, &a.Error,
 		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, err // let caller handle sql.ErrNoRows
@@ -1147,7 +1149,7 @@ func scanArticleRow(rows *sql.Rows) (*model.Article, error) {
 	var pinned int
 	if err := rows.Scan(
 		&a.ID, &a.SourceURL, &a.URLHash, &a.Title, &a.Author, &a.SourceDomain, &a.Lang,
-		&a.OriginalText, &a.ContentFormat, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
+		&a.OriginalText, &a.ContentFormat, &a.SourceType, &tokJSON, &a.Summary, &a.Status, &a.EnrichmentVersion, &a.Error,
 		&createdAtStr, &enrichedAtStr, &updatedAtStr, &pinned, &a.LLMModel,
 	); err != nil {
 		return nil, fmt.Errorf("store: scanArticleRow: %w", err)
@@ -1164,6 +1166,16 @@ func contentFormatOrDefault(format string) string {
 		return model.ContentFormatPlain
 	}
 	return format
+}
+
+// sourceTypeOrDefault normalises an Article.SourceType for persistence: an
+// empty value is stored as model.SourceTypeArticle so the column always holds an
+// explicit kind (matching the schema default).
+func sourceTypeOrDefault(sourceType string) string {
+	if sourceType == "" {
+		return model.SourceTypeArticle
+	}
+	return sourceType
 }
 
 // finishArticle parses JSON and timestamps into the Article struct.

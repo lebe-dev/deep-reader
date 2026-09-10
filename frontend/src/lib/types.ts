@@ -147,6 +147,13 @@ export interface ArticleMeta {
 	title: string;
 	author: string;
 	source_domain: string;
+	/**
+	 * What kind of content the record holds: `'comments'` for a discussion
+	 * thread pulled from a comment source (Hacker News), `'article'` (the
+	 * default, also when absent — every record that predates the field) for an
+	 * ordinary article or pasted text. Drives the library icon and filter.
+	 */
+	source_type?: 'article' | 'comments';
 	lang: string;
 	status: Status;
 	/** User flag keeping the article at the top of the library. Synced as metadata. */

@@ -1,0 +1,106 @@
+{
+  "id": 49505014,
+  "type": "story",
+  "author": "hanstyle",
+  "title": "Why do I lose my passion?",
+  "url": "https://example.com/passion",
+  "text": "When AI makes results readily available, why do I lose my passion?",
+  "points": 101,
+  "created_at": "2026-08-31T02:40:37.000Z",
+  "children": [
+    {
+      "id": 1,
+      "type": "comment",
+      "author": "alice",
+      "text": "First thought.<p>Second thought with <i>emphasis</i> and a <a href=\"https://example.org/paper\" rel=\"nofollow\">paper</a>.",
+      "children": [
+        {
+          "id": 2,
+          "type": "comment",
+          "author": "bob",
+          "text": "&gt; <i>First thought.</i><p>I don&#x27;t agree &amp; here is why:<pre><code>  if x &lt; 3 {\n    return x\n  }\n</code></pre>",
+          "children": [
+            {
+              "id": 3,
+              "type": "comment",
+              "author": null,
+              "text": null,
+              "children": [
+                {
+                  "id": 4,
+                  "type": "comment",
+                  "author": "carol",
+                  "text": "Orphaned reply kept at its parent's depth.",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "comment",
+      "author": "dave",
+      "text": "Deep chain root.",
+      "children": [
+        {
+          "id": 6,
+          "type": "comment",
+          "author": "d1",
+          "text": "L1",
+          "children": [
+            {
+              "id": 7,
+              "type": "comment",
+              "author": "d2",
+              "text": "L2",
+              "children": [
+                {
+                  "id": 8,
+                  "type": "comment",
+                  "author": "d3",
+                  "text": "L3",
+                  "children": [
+                    {
+                      "id": 9,
+                      "type": "comment",
+                      "author": "d4",
+                      "text": "L4",
+                      "children": [
+                        {
+                          "id": 10,
+                          "type": "comment",
+                          "author": "d5",
+                          "text": "L5",
+                          "children": [
+                            {
+                              "id": 11,
+                              "type": "comment",
+                              "author": "d6",
+                              "text": "L6",
+                              "children": [
+                                {
+                                  "id": 12,
+                                  "type": "comment",
+                                  "author": "d7",
+                                  "text": "L7",
+                                  "children": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -47,6 +47,7 @@ internal/
   ingest/           article URL fetching pipeline
   extract/          content extraction (readability)
   markdown/         markdown.new client + daily budget tracking
+  comments/         discussion-thread sources (Hacker News) + extractor routing
   enrich/           LLM-driven CEFR-tuned enrichment
   llm/              OpenAI-compatible client, worker pool
   normalize/        text normalization
@@ -178,6 +179,47 @@ readability until the next reset. The remaining daily budget is shown in the
 | `MARKDOWN_DAILY_LIMIT` | `500` | Request-unit budget per UTC day (`0` = unlimited). |
 | `MARKDOWN_COST_PER_ARTICLE` | `50` | Request units charged per article conversion. |
 
+### Comment threads
+
+A discussion-thread URL is not extracted as a page. `internal/comments` sits in
+front of the article extractors and routes a URL a comment source recognises to
+that site's own API; everything else falls through to the markdown.new →
+readability chain unchanged. Threads therefore cost no markdown.new budget, and
+a thread fetch never falls back to scraping the page (readability would store
+the navigation chrome of a thread page as if it were the discussion) — a failure
+is a normal `fetch_failed` the enrichment pool retries.
+
+Supported today:
+
+| Source | URLs | API |
+|---|---|---|
+| Hacker News | `https://news.ycombinator.com/item?id=<id>` — a story or a single comment permalink | `https://hn.algolia.com/api/v1/items/<id>`, one request per thread |
+
+The whole thread is ingested, at any depth. It is stored as Markdown
+(`content_format=markdown`) with the reply structure encoded as blockquote
+nesting: a top-level comment is unquoted, a reply carries one `>` marker, its
+reply two. Each comment opens with an `h4` author line whatever its depth —
+heading level is not used for nesting, because it stops at `h6` and only changes
+the size of a name, which is what made a thread read as a flat list. The reader
+(`markdown-blocks.ts` → `nestBlocks`) turns each level into an indented column
+with a rail, so who answers whom is visible while every word stays tappable.
+Nesting is capped at 6 levels — deeper and a phone has no width left for the
+text — and past the cap the author line carries a chevron per extra level.
+Comment bodies are converted from HN's HTML subset
+— quotes, emphasis, code blocks and links survive; a bare link is labelled with
+its host so the URL is not tokenized into junk words. A deleted comment is
+skipped while its replies are kept. The story's linked page is offered as a
+link, never fetched: one card is one text.
+
+An ingested thread is stamped `source_type=comments` (articles and pasted text
+are `article`), which is what the library uses for the discussion icon and the
+articles/discussions filter. There are no environment variables: the thread
+fetch reuses `READABILITY_TIMEOUT`. A brand-new thread the search API has not
+indexed yet answers 404, which is retried with the pipeline's usual back-off.
+
+Adding another site (Reddit, Lobsters, …) means implementing `comments.Source`
+and registering it in `cmd/server`; nothing else in the pipeline changes.
+
 ## Vocabulary and saved words
 
 Every word or phrase you tap for a translation is recorded automatically and fed
@@ -224,6 +266,16 @@ carries only the **sentence translations** — no tapping, no word overlay, no
 offline cache — plus the title, description and source attribution. Stretches
 the LLM never covered are carried over in the original language rather than
 dropped.
+
+A published page reproduces the structure of the source. For a Markdown article
+— which is what a comment thread is (see [Comment threads](#comment-threads)) —
+`internal/publish` parses the original text into blocks before laying out the
+translations, so the page nests each reply level in an indented column with a
+rail, prints the author line of every comment as a label, and keeps code blocks
+monospaced. Markers never reach the page as text: only the visible range of each
+line is read, and inline emphasis / link syntax in untranslated stretches is
+stripped (a link keeps its label, not its URL). Lists and tables are the
+exception — they are laid out as paragraphs, markers included.
 
 The page is rendered **once, at publish time**, into a standalone HTML file with
 its Open Graph metadata inlined, so link previews work without any server-side

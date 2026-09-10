@@ -198,6 +198,16 @@ func stripBlockPrefix(line string) string {
 	return line
 }
 
+// CleanInline strips inline Markdown syntax from a single line — emphasis,
+// inline code, image syntax, and link syntax (the label survives, the URL does
+// not) — leaving the words behind. It is exported for the published page, which
+// prints untranslated stretches of a Markdown article verbatim and must not
+// show their markers as text; the rules live here so both callers strip exactly
+// the same things.
+func CleanInline(line string) string {
+	return inlineClean(line)
+}
+
 // inlineClean removes inline Markdown: images, links (keeping their text),
 // autolinks, and emphasis/code markers.
 func inlineClean(line string) string {

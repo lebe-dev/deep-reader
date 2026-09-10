@@ -14,11 +14,11 @@
 package publish
 
 import (
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
+	"deep-reader/internal/markdown"
 	"deep-reader/internal/model"
 )
 
@@ -32,45 +32,183 @@ type Segment struct {
 	Translated bool
 }
 
-// Block is a paragraph of the rendered page.
-type Block struct {
+// Node is one element of the rendered page: a block of text, or a quote level
+// holding the nodes nested inside it.
+//
+// A comment thread is a tree — each reply one quote level deeper than the
+// comment it answers — so the page is one too. An ordinary article yields a
+// flat list of paragraph nodes, exactly what published pages have always been.
+type Node struct {
+	// Kind is one of the unit kinds (paragraph, heading, code, rule) or "quote"
+	// for a nesting level. The page template switches on it.
+	Kind string
+	// Level is the heading level for a heading node, 0 otherwise.
+	Level int
+	// Segments is the node's text, in source order.
 	Segments []Segment
+	// Comment marks a quote level that opens with a heading — in a thread that
+	// heading is the author of the comment, so the level renders as an indented
+	// column of ordinary text rather than as a quotation.
+	Comment bool
+	// Children are the nodes of a quote level.
+	Children []Node
 }
 
-// paragraphSep matches a blank line in the source text — the only paragraph
-// signal available, since the token stream carries no structure of its own.
-var paragraphSep = regexp.MustCompile(`\n[ \t\r]*\n`)
+// Quote is the Kind of a nesting level; the other kinds come from the source
+// structure (see structure.go).
+const nodeQuote = "quote"
 
-// Blocks renders the payload into paragraphs of translated text.
+// Nodes renders the payload into the tree the public page prints.
 //
-// Sentence translations are laid out in source order, and the source text
-// between two consecutive translated spans is emitted untranslated. Paragraph
-// breaks come from blank lines in the original text, so the published page
-// keeps the article's shape.
-func Blocks(p *model.ArticlePayload) []Block {
+// Sentence translations are laid out in source order and the source text
+// between two consecutive translated spans is emitted untranslated, so a page
+// never silently loses a paragraph. Each piece is placed in the block of the
+// source it came from, which is what keeps a thread's structure — and the
+// Markdown markers that encode it stay out of the page, since only the visible
+// ranges of each line are ever read.
+func Nodes(p *model.ArticlePayload) []Node {
 	if p == nil {
 		return nil
 	}
 
-	b := &builder{}
-	cursor := 0
+	isMarkdown := p.ContentFormat == model.ContentFormatMarkdown
+	units := parseUnits(p.OriginalText, isMarkdown)
+	if len(units) == 0 {
+		return nil
+	}
+	segments := make([][]Segment, len(units))
 
+	cursor := 0
 	for _, s := range orderedSentences(p) {
 		start, end := p.Tokens[s.StartIndex].Start, absorbTrailingPunct(p.OriginalText, p.Tokens[s.EndIndex].End)
 		if end <= cursor {
 			continue
 		}
 		if start > cursor {
-			b.gap(p.OriginalText[cursor:start])
+			emitGap(segments, units, p.OriginalText, cursor, start, isMarkdown)
 		}
-		b.add(s.Translation, true)
+		if idx := unitAt(units, start); idx >= 0 {
+			if text := strings.TrimSpace(s.Translation); text != "" {
+				segments[idx] = append(segments[idx], Segment{Text: text, Translated: true})
+			}
+		}
 		cursor = end
 	}
 	if cursor < len(p.OriginalText) {
-		b.gap(p.OriginalText[cursor:])
+		emitGap(segments, units, p.OriginalText, cursor, len(p.OriginalText), isMarkdown)
 	}
 
-	return b.done()
+	return nest(units, segments)
+}
+
+// emitGap distributes a stretch of untranslated source over the units it spans,
+// reading only the visible range of each line so quote markers and heading
+// hashes never reach the page.
+func emitGap(segments [][]Segment, units []unit, text string, from, to int, isMarkdown bool) {
+	for i, u := range units {
+		if u.end <= from || u.start >= to {
+			continue
+		}
+		parts := make([]string, 0, len(u.lines))
+		for _, line := range u.lines {
+			start, end := max(line.start, from), min(line.end, to)
+			if start >= end {
+				continue
+			}
+			parts = append(parts, text[start:end])
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		sep := " "
+		if u.kind == unitCode {
+			// Code is the one place where the line breaks are the content.
+			sep = "\n"
+		}
+		joined := strings.TrimSpace(strings.Join(parts, sep))
+		// Inline markers are structure too: printed as text they are the same
+		// defect as a visible quote marker. Code is the exception — there the
+		// asterisks and backticks are the content.
+		if isMarkdown && u.kind != unitCode {
+			joined = markdown.CleanInline(joined)
+		}
+		if joined == "" {
+			continue
+		}
+		segments[i] = append(segments[i], Segment{Text: joined})
+	}
+}
+
+// unitAt returns the index of the unit containing the source offset, or the
+// first unit that starts after it. It returns -1 only for an empty list.
+func unitAt(units []unit, offset int) int {
+	for i, u := range units {
+		if offset < u.end {
+			return i
+		}
+	}
+	if len(units) == 0 {
+		return -1
+	}
+	return len(units) - 1
+}
+
+// nest turns the flat unit list into the quote tree, dropping units that ended
+// up with nothing to show (a heading whose text was swallowed by a translation
+// span, say).
+func nest(units []unit, segments [][]Segment) []Node {
+	var root []Node
+	// stack[i] is the quote level i+1 currently open; the parent chain is walked
+	// on the way back to append a finished level.
+	var stack []*Node
+
+	appendNode := func(n Node) {
+		if len(stack) == 0 {
+			root = append(root, n)
+			return
+		}
+		top := stack[len(stack)-1]
+		top.Children = append(top.Children, n)
+	}
+
+	for i, u := range units {
+		if u.kind != unitRule && len(segments[i]) == 0 {
+			continue
+		}
+
+		keep := min(u.depth, u.breakDepth)
+		for len(stack) > keep {
+			closed := *stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			closed.Comment = hasHeading(closed.Children)
+			appendNode(closed)
+		}
+		for len(stack) < u.depth {
+			stack = append(stack, &Node{Kind: nodeQuote})
+		}
+
+		appendNode(Node{Kind: u.kind, Level: u.level, Segments: segments[i]})
+	}
+
+	for len(stack) > 0 {
+		closed := *stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		closed.Comment = hasHeading(closed.Children)
+		appendNode(closed)
+	}
+
+	return root
+}
+
+// hasHeading reports whether a quote level opens a comment rather than a
+// quotation: a comment carries the author line the thread renderer wrote.
+func hasHeading(nodes []Node) bool {
+	for _, n := range nodes {
+		if n.Kind == unitHeading {
+			return true
+		}
+	}
+	return false
 }
 
 // closingPunct is the punctuation that belongs to the sentence it follows. The
@@ -124,44 +262,4 @@ func orderedSentences(p *model.ArticlePayload) []model.Sentence {
 		prevEnd = s.EndIndex
 	}
 	return deduped
-}
-
-// builder accumulates segments into paragraphs.
-type builder struct {
-	out []Block
-	cur []Segment
-}
-
-func (b *builder) add(text string, translated bool) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	b.cur = append(b.cur, Segment{Text: text, Translated: translated})
-}
-
-// br closes the current paragraph. Closing an empty one is a no-op, so runs of
-// blank lines do not produce empty blocks.
-func (b *builder) br() {
-	if len(b.cur) == 0 {
-		return
-	}
-	b.out = append(b.out, Block{Segments: b.cur})
-	b.cur = nil
-}
-
-// gap emits a stretch of untranslated source text, honouring the paragraph
-// breaks inside it.
-func (b *builder) gap(raw string) {
-	for i, part := range paragraphSep.Split(raw, -1) {
-		if i > 0 {
-			b.br()
-		}
-		b.add(part, false)
-	}
-}
-
-func (b *builder) done() []Block {
-	b.br()
-	return b.out
 }

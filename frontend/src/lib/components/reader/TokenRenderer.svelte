@@ -41,7 +41,13 @@
 		type PopoverContent,
 		type SentenceMenuContent
 	} from './reader-utils';
-	import { buildMarkdownBlocks, type InlineMark, type InlineSegment } from './markdown-blocks';
+	import {
+		buildMarkdownBlocks,
+		nestBlocks,
+		type BlockNode,
+		type InlineMark,
+		type InlineSegment
+	} from './markdown-blocks';
 	import {
 		buildOverlayIndices,
 		emptyVocabIndex,
@@ -182,9 +188,20 @@
 
 	// Markdown rendering: when the article is Markdown, parse it into structural
 	// blocks (headings, lists, blockquotes, code, tables) whose inline runs keep
-	// the same interactive word tokens. Plain articles use the flat `segments`.
+	// the same interactive word tokens, then nest them by blockquote depth.
+	// Plain articles use the flat `segments`.
 	const isMarkdown = $derived(format === 'markdown');
-	const blocks = $derived(isMarkdown ? buildMarkdownBlocks(tokens, originalText) : []);
+	const blockTree = $derived(
+		isMarkdown ? nestBlocks(buildMarkdownBlocks(tokens, originalText)) : []
+	);
+
+	// A quote level that opens with a heading is a comment in a discussion
+	// thread (the heading is its author), so it renders as an indented column of
+	// ordinary text. A quote level without one is someone quoting something —
+	// the muted italic block quotes have always been.
+	function isCommentLevel(node: Extract<BlockNode, { kind: 'quote' }>): boolean {
+		return node.children.some((c) => c.kind === 'heading');
+	}
 
 	/** Map inline emphasis marks to the CSS classes that render them. */
 	function marksClass(marks: InlineMark[]): string {
@@ -614,53 +631,62 @@
 	{/each}
 {/snippet}
 
+{#snippet blockNodes(nodes: BlockNode[])}
+	{#each nodes as node, bi (bi)}
+		{#if node.kind === 'quote'}
+			<!-- One reply level of a discussion thread (or one level of an ordinary
+			     nested quote): an indented column with a rail, so who answers whom
+			     is visible instead of implied by a heading size. -->
+			<div class="reader-quote {isCommentLevel(node) ? 'is-comment' : 'is-quotation'}">
+				{@render blockNodes(node.children)}
+			</div>
+		{:else if node.kind === 'heading'}
+			<svelte:element this={`h${node.level}`} class="reader-heading"
+				>{@render inline(node.inline)}</svelte:element
+			>
+		{:else if node.kind === 'paragraph'}
+			<p>{@render inline(node.inline)}</p>
+		{:else if node.kind === 'list'}
+			{#if node.ordered}
+				<ol class="reader-list reader-list-ordered">
+					{#each node.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
+				</ol>
+			{:else}
+				<ul class="reader-list reader-list-unordered">
+					{#each node.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
+				</ul>
+			{/if}
+		{:else if node.kind === 'code'}
+			<pre class="reader-pre"><code>{node.text}</code></pre>
+		{:else if node.kind === 'table'}
+			<div class="reader-table-wrap">
+				<table class="reader-table">
+					<thead>
+						<tr
+							>{#each node.header as cell, ci (ci)}<th>{@render inline(cell)}</th>{/each}</tr
+						>
+					</thead>
+					<tbody>
+						{#each node.rows as row, ri (ri)}
+							<tr
+								>{#each row as cell, ci (ci)}<td>{@render inline(cell)}</td>{/each}</tr
+							>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{:else if node.kind === 'hr'}
+			<hr class="reader-hr" />
+		{/if}
+	{/each}
+{/snippet}
+
 {#if isMarkdown}
 	<!-- No role="document" here: that role only means anything inside a
 		 role="application" subtree, and on a plain container some screen readers
 		 announce a nesting the reader does not have. -->
 	<div class="reader-content reader-markdown">
-		{#each blocks as block, bi (bi)}
-			{#if block.kind === 'heading'}
-				<svelte:element this={`h${block.level}`} class="reader-heading"
-					>{@render inline(block.inline)}</svelte:element
-				>
-			{:else if block.kind === 'paragraph'}
-				<p>{@render inline(block.inline)}</p>
-			{:else if block.kind === 'blockquote'}
-				<blockquote class="reader-blockquote">{@render inline(block.inline)}</blockquote>
-			{:else if block.kind === 'list'}
-				{#if block.ordered}
-					<ol class="reader-list reader-list-ordered">
-						{#each block.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
-					</ol>
-				{:else}
-					<ul class="reader-list reader-list-unordered">
-						{#each block.items as item, ii (ii)}<li>{@render inline(item)}</li>{/each}
-					</ul>
-				{/if}
-			{:else if block.kind === 'code'}
-				<pre class="reader-pre"><code>{block.text}</code></pre>
-			{:else if block.kind === 'table'}
-				<div class="reader-table-wrap">
-					<table class="reader-table">
-						<thead>
-							<tr
-								>{#each block.header as cell, ci (ci)}<th>{@render inline(cell)}</th>{/each}</tr
-							>
-						</thead>
-						<tbody>
-							{#each block.rows as row, ri (ri)}
-								<tr
-									>{#each row as cell, ci (ci)}<td>{@render inline(cell)}</td>{/each}</tr
-								>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{:else if block.kind === 'hr'}
-				<hr class="reader-hr" />
-			{/if}
-		{/each}
+		{@render blockNodes(blockTree)}
 	</div>
 {:else}
 	<div class="reader-content">
@@ -808,12 +834,36 @@
 		margin: 0.2em 0;
 	}
 
-	.reader-blockquote {
+	/* One level of quote nesting. In a comment thread this is one reply level,
+	   so the rail is the thread line; the indentation is deliberately small
+	   because a deep chain multiplies it (the backend caps the depth at 6). */
+	.reader-quote {
 		margin: 0 0 1em;
-		padding: 0.2em 0 0.2em 1em;
-		border-left: 3px solid var(--color-border, #d4d4d8);
+		padding: 0.1em 0 0.1em 0.9em;
+		border-left: 2px solid var(--color-border, #d4d4d8);
+	}
+	.reader-quote > :global(*:last-child) {
+		margin-bottom: 0;
+	}
+	/* A quote that is not a comment is someone quoting: keep the muted italic
+	   look block quotes have always had in the reader. */
+	.reader-quote.is-quotation {
 		color: var(--color-muted-foreground, #6b7280);
 		font-style: italic;
+	}
+	/* The author line of a comment reads as a label, not as a section heading. */
+	.reader-quote.is-comment :global(h4.reader-heading),
+	.reader-markdown > :global(h4.reader-heading) {
+		margin-bottom: 0.35em;
+		color: var(--color-muted-foreground, #6b7280);
+		font-size: 1em;
+		font-weight: 600;
+	}
+
+	@media (max-width: 480px) {
+		.reader-quote {
+			padding-left: 0.6em;
+		}
 	}
 
 	.reader-pre {
