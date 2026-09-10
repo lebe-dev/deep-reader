@@ -16,6 +16,7 @@
 	import {
 		enqueueProgress,
 		enqueueReEnrich,
+		enqueueThreadCollapse,
 		enqueueSetRead,
 		enqueueResetProgress,
 		isReEnrichPending
@@ -115,6 +116,10 @@
 	let meta: ArticleMeta | undefined = $state();
 	let payload: ArticlePayload | undefined = $state();
 	let progress: Progress | undefined = $state();
+	// Folded comment branches of this thread, by author-line token index. Held
+	// here rather than in the renderer because the state is persisted locally and
+	// synced to the server, which is this page's job (as it is for progress).
+	let collapsed: Set<number> = $state(new Set());
 
 	// Live processing info for the "not ready yet" screen, refreshed by the poll
 	// loop while an article is still being processed: the current pipeline stage
@@ -216,6 +221,7 @@
 		if (cached) {
 			payload = cached;
 			progress = await db.progress.get(id);
+			collapsed = await loadCollapsed(id);
 			loadState = 'ready';
 			return;
 		}
@@ -236,6 +242,7 @@
 
 			payload = fetched;
 			progress = await db.progress.get(id);
+			collapsed = await loadCollapsed(id);
 			loadState = 'ready';
 		} catch (err) {
 			if (err instanceof OfflineError) {
@@ -403,6 +410,34 @@
 			progress = updated;
 			enqueueProgress(updated).catch(console.warn);
 		}, PROGRESS_DEBOUNCE_MS);
+	}
+
+	// Whether this article is a comment thread, and so gets foldable branches.
+	// The library metadata is consulted as well as the payload: a payload cached
+	// before source_type existed carries no such field, and it is only refetched
+	// when the article's updated_at changes — so reading the meta (which every
+	// sync refreshes) is what makes the folds appear without re-adding the
+	// article.
+	const threaded = $derived((payload?.source_type ?? meta?.source_type) === 'comments');
+
+	/** Read the folded branches of an article from the local cache. */
+	async function loadCollapsed(id: string): Promise<Set<number>> {
+		const row = await db.thread_collapse.get(id);
+		return new Set(row?.collapsed ?? []);
+	}
+
+	/**
+	 * Fold or unfold one branch. The whole set is persisted — locally at once and
+	 * through the outbox to the server — so a fold made offline survives and
+	 * reaches the other devices on the next sync.
+	 */
+	function handleToggleCollapse(key: number) {
+		const id = articleId;
+		if (!id) return;
+		const next = new Set(collapsed);
+		if (!next.delete(key)) next.add(key);
+		collapsed = next;
+		enqueueThreadCollapse(id, [...next]).catch(console.warn);
 	}
 
 	async function handleToggleRead() {
@@ -946,6 +981,9 @@
 				onSentenceMenu={handleSentenceMenu}
 				{phraseAnchor}
 				onPhraseSelect={handlePhraseSelect}
+				{threaded}
+				{collapsed}
+				onToggleCollapse={handleToggleCollapse}
 			/>
 		</div>
 

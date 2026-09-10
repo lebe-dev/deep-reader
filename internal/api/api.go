@@ -25,6 +25,7 @@
 //	POST   /api/articles/:id/retry          resume failed article from its stage
 //	POST   /api/articles/:id/reenrich       {mode:full|topup} -> re-run enrichment
 //	PUT    /api/articles/:id/progress       LWW progress upsert -> {applied}
+//	PUT    /api/articles/:id/collapse       LWW folded-branch upsert -> {applied}
 //	PUT    /api/articles/:id/pin            {pinned} -> 204; toggle library pin
 //	GET    /api/articles/:id/publish        current public-page link, 404 when none
 //	POST   /api/articles/:id/publish        {title,description} -> 201 {token,url,expires_at}
@@ -253,6 +254,7 @@ func (s *Server) buildApp(siteFS fs.FS) *fiber.App {
 	api.Post("/articles/:id/retry", s.retryArticle)
 	api.Post("/articles/:id/reenrich", s.reEnrichArticle)
 	api.Put("/articles/:id/progress", s.putProgress)
+	api.Put("/articles/:id/collapse", s.putThreadCollapse)
 	api.Put("/articles/:id/pin", s.setPinned)
 	api.Get("/articles/:id/publish", s.getPublication)
 	api.Post("/articles/:id/publish", s.publishArticle)

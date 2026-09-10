@@ -19,6 +19,8 @@ import type {
 	ConfigResponse,
 	Progress,
 	ProgressUpdate,
+	ThreadCollapse,
+	ThreadCollapseUpdate,
 	ReEnrichMode,
 	Settings,
 	SettingsPatch,
@@ -367,6 +369,19 @@ export function reEnrichArticle(
 	return request<AddArticleResponse>(`/api/articles/${encodeURIComponent(id)}/reenrich`, {
 		method: 'POST',
 		body: { mode },
+		signal
+	});
+}
+
+/** `PUT /api/articles/:id/collapse` — replace the folded comment branches (LWW). */
+export function putThreadCollapse(tc: ThreadCollapse, signal?: AbortSignal): Promise<void> {
+	const body: ThreadCollapseUpdate = {
+		collapsed: tc.collapsed,
+		updated_at: tc.updated_at
+	};
+	return request<void>(`/api/articles/${encodeURIComponent(tc.article_id)}/collapse`, {
+		method: 'PUT',
+		body,
 		signal
 	});
 }

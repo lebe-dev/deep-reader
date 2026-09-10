@@ -9,7 +9,14 @@
 // `$lib/auth/store.svelte` — plus `$lib/sentry` to assert telemetry.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ArticleMeta, ArticlePayload, Progress, Settings, VocabEntry } from '$lib/types';
+import type {
+	ArticleMeta,
+	ArticlePayload,
+	Progress,
+	Settings,
+	ThreadCollapse,
+	VocabEntry
+} from '$lib/types';
 import type { OutboxEntry, OutboxKind, SyncState } from '$lib/db';
 
 // ---------------------------------------------------------------------------
@@ -65,6 +72,7 @@ const h = vi.hoisted(() => {
 		articles_meta: new FakeTable<ArticleMeta>('id'),
 		articles_payload: new FakeTable<ArticlePayload>('id'),
 		progress: new FakeTable<Progress>('article_id'),
+		thread_collapse: new FakeTable<ThreadCollapse>('article_id'),
 		outbox: new FakeTable<OutboxEntry>('id'),
 		sync_state: new FakeTable<SyncState>('id'),
 		vocab_entries: new FakeTable<VocabEntry>('entry_key'),
@@ -75,6 +83,7 @@ const h = vi.hoisted(() => {
 		state.articles_meta = new FakeTable<ArticleMeta>('id');
 		state.articles_payload = new FakeTable<ArticlePayload>('id');
 		state.progress = new FakeTable<Progress>('article_id');
+		state.thread_collapse = new FakeTable<ThreadCollapse>('article_id');
 		state.outbox = new FakeTable<OutboxEntry>('id');
 		state.sync_state = new FakeTable<SyncState>('id');
 		state.vocab_entries = new FakeTable<VocabEntry>('entry_key');
@@ -91,6 +100,9 @@ const h = vi.hoisted(() => {
 		},
 		get progress() {
 			return state.progress;
+		},
+		get thread_collapse() {
+			return state.thread_collapse;
 		},
 		get outbox() {
 			return state.outbox;
@@ -136,6 +148,7 @@ const { state, makeDb, updateSyncState } = h;
 let articles_meta: (typeof state)['articles_meta'];
 let articles_payload: (typeof state)['articles_payload'];
 let progress: (typeof state)['progress'];
+let thread_collapse: (typeof state)['thread_collapse'];
 let outbox: (typeof state)['outbox'];
 let sync_state: (typeof state)['sync_state'];
 let vocab_entries: (typeof state)['vocab_entries'];
@@ -183,6 +196,7 @@ const m = vi.hoisted(() => {
 		apiReEnrichArticle: vi.fn(),
 		apiPinArticle: vi.fn(),
 		putProgress: vi.fn(),
+		putThreadCollapse: vi.fn(),
 		patchSettings: vi.fn(),
 		saveLookups: vi.fn(),
 		deleteVocabEntry: vi.fn(),
@@ -206,6 +220,7 @@ const {
 	apiReEnrichArticle,
 	apiPinArticle,
 	putProgress,
+	putThreadCollapse,
 	patchSettings,
 	saveLookups,
 	deleteVocabEntry,
@@ -228,6 +243,7 @@ vi.mock('$lib/api', () => ({
 	reEnrichArticle: m.apiReEnrichArticle,
 	pinArticle: m.apiPinArticle,
 	putProgress: m.putProgress,
+	putThreadCollapse: m.putThreadCollapse,
 	patchSettings: m.patchSettings,
 	saveLookups: m.saveLookups,
 	deleteVocabEntry: m.deleteVocabEntry,
@@ -248,6 +264,7 @@ import {
 	pull,
 	flushOutbox,
 	enqueueProgress,
+	enqueueThreadCollapse,
 	enqueueDelete,
 	enqueueRetry,
 	enqueueReEnrich,
@@ -311,6 +328,7 @@ beforeEach(() => {
 	articles_meta = state.articles_meta;
 	articles_payload = state.articles_payload;
 	progress = state.progress;
+	thread_collapse = state.thread_collapse;
 	outbox = state.outbox;
 	sync_state = state.sync_state;
 	vocab_entries = state.vocab_entries;
@@ -786,20 +804,123 @@ describe('enqueueProgress', () => {
 });
 
 describe('enqueueDelete', () => {
-	it('optimistically removes meta/payload/progress and queues a delete', async () => {
+	it('optimistically removes every row keyed by the article and queues a delete', async () => {
 		await articles_meta.put(meta({ id: 'a' }));
 		await articles_payload.put(payload('a'));
 		await progress.put({ article_id: 'a', position: 1, is_read: false, updated_at: 'x' });
+		await thread_collapse.put({ article_id: 'a', collapsed: [2], updated_at: 'x' });
 
 		await enqueueDelete('a');
 
 		expect(await articles_meta.get('a')).toBeUndefined();
 		expect(await articles_payload.get('a')).toBeUndefined();
 		expect(await progress.get('a')).toBeUndefined();
+		expect(await thread_collapse.get('a')).toBeUndefined();
 		expect((await outbox.toArray())[0]).toMatchObject({
 			kind: 'delete_article',
 			payload: { id: 'a' }
 		});
+	});
+});
+
+describe('pull — folded comment branches', () => {
+	it('takes the server set when it is newer', async () => {
+		await thread_collapse.put({
+			article_id: 'a',
+			collapsed: [1],
+			updated_at: '2026-06-10T10:00:00.000Z'
+		});
+		getConfig.mockResolvedValue(
+			configResponse({
+				collapsed: [{ article_id: 'a', collapsed: [1, 7], updated_at: '2026-06-10T11:00:00.000Z' }]
+			})
+		);
+
+		await pull();
+
+		expect((await thread_collapse.get('a'))!.collapsed).toEqual([1, 7]);
+	});
+
+	it('keeps a newer local set when the server row is older', async () => {
+		await thread_collapse.put({
+			article_id: 'a',
+			collapsed: [1],
+			updated_at: '2026-06-10T12:00:00.000Z'
+		});
+		getConfig.mockResolvedValue(
+			configResponse({
+				collapsed: [{ article_id: 'a', collapsed: [], updated_at: '2026-06-10T09:00:00.000Z' }]
+			})
+		);
+
+		await pull();
+
+		expect((await thread_collapse.get('a'))!.collapsed).toEqual([1]);
+	});
+
+	it('tolerates the field being absent (older server, or a nil slice)', async () => {
+		getConfig.mockResolvedValue(configResponse({ collapsed: null }));
+		await expect(pull()).resolves.toBeUndefined();
+	});
+
+	it('drops the folded branches of articles deleted server-side on a full sync', async () => {
+		await articles_meta.put(meta({ id: 'gone' }));
+		await progress.put({ article_id: 'gone', position: 3, is_read: false, updated_at: 'x' });
+		await thread_collapse.put({ article_id: 'gone', collapsed: [2], updated_at: 'x' });
+		getConfig.mockResolvedValue(configResponse());
+
+		await pull();
+
+		// Nothing can reach a row keyed by an article that no longer exists.
+		expect(await articles_meta.get('gone')).toBeUndefined();
+		expect(await progress.get('gone')).toBeUndefined();
+		expect(await thread_collapse.get('gone')).toBeUndefined();
+	});
+});
+
+describe('enqueueThreadCollapse', () => {
+	it('writes the set locally and queues it for the server', async () => {
+		await enqueueThreadCollapse('a', [4, 19]);
+
+		expect((await thread_collapse.get('a'))!.collapsed).toEqual([4, 19]);
+		expect((await outbox.toArray())[0]).toMatchObject({
+			kind: 'collapse',
+			payload: { article_id: 'a', collapsed: [4, 19] }
+		});
+	});
+
+	it('records unfolding everything as an empty set, not a missing row', async () => {
+		await enqueueThreadCollapse('a', [4]);
+		await enqueueThreadCollapse('a', []);
+
+		expect((await thread_collapse.get('a'))!.collapsed).toEqual([]);
+	});
+
+	it('sends the queued set and skips one a newer local set superseded', async () => {
+		await enqueueThreadCollapse('a', [4]);
+		// A later fold replaced the set before the outbox drained.
+		await thread_collapse.put({
+			article_id: 'a',
+			collapsed: [4, 9],
+			updated_at: '2099-01-01T00:00:00.000Z'
+		});
+
+		vi.stubGlobal('navigator', { onLine: true });
+		await flushOutbox();
+
+		expect(putThreadCollapse).not.toHaveBeenCalled();
+		expect(await outbox.toArray()).toHaveLength(0);
+	});
+
+	it('dispatches a current entry to the API', async () => {
+		await enqueueThreadCollapse('a', [4]);
+
+		vi.stubGlobal('navigator', { onLine: true });
+		await flushOutbox();
+
+		expect(putThreadCollapse).toHaveBeenCalledWith(
+			expect.objectContaining({ article_id: 'a', collapsed: [4] })
+		);
 	});
 });
 

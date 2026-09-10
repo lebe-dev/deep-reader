@@ -16,6 +16,7 @@ import {
 	patchSettings,
 	pinArticle as apiPinArticle,
 	putProgress,
+	putThreadCollapse,
 	reEnrichArticle as apiReEnrichArticle,
 	retryArticle as apiRetryArticle,
 	saveLookups,
@@ -30,6 +31,7 @@ import type {
 	ConfigResponse,
 	Progress,
 	ProgressUpdate,
+	ThreadCollapse,
 	ReEnrichMode,
 	SettingsPatch,
 	LookupEvent
@@ -142,6 +144,7 @@ export async function pull(): Promise<void> {
 	// as null. Coerce to arrays so the filter/map/iteration below never throws.
 	const serverArticles = response.articles ?? [];
 	const serverProgress = response.progress ?? [];
+	const serverCollapsed = response.collapsed ?? [];
 	const serverVocab = response.vocab ?? [];
 
 	// Set inside the transaction, announced after it commits: the in-memory
@@ -154,6 +157,7 @@ export async function pull(): Promise<void> {
 			db.articles_meta,
 			db.articles_payload,
 			db.progress,
+			db.thread_collapse,
 			db.sync_state,
 			db.outbox,
 			db.vocab_entries
@@ -184,6 +188,12 @@ export async function pull(): Promise<void> {
 				if (toDelete.length > 0) {
 					await db.articles_meta.bulkDelete(toDelete);
 					await db.articles_payload.bulkDelete(toDelete);
+					// Per-article reading state goes with the article. Without this the
+					// rows outlive every way of reaching them: an article deleted on
+					// another device leaves its progress and folded branches behind
+					// forever, since nothing else is keyed by a dead article id.
+					await db.progress.bulkDelete(toDelete);
+					await db.thread_collapse.bulkDelete(toDelete);
 				}
 			}
 
@@ -192,6 +202,14 @@ export async function pull(): Promise<void> {
 				const local = await db.progress.get(serverProg.article_id);
 				if (!local || isNewer(serverProg.updated_at, local.updated_at)) {
 					await db.progress.put(serverProg);
+				}
+			}
+
+			// --- folded comment branches (LWW, same rule as progress) ---
+			for (const serverFold of serverCollapsed) {
+				const local = await db.thread_collapse.get(serverFold.article_id);
+				if (!local || isNewer(serverFold.updated_at, local.updated_at)) {
+					await db.thread_collapse.put(serverFold);
 				}
 			}
 
@@ -455,6 +473,15 @@ async function dispatchEntry(entry: OutboxEntry): Promise<void> {
 			await putProgress(p);
 			return;
 		}
+		case 'collapse': {
+			const tc = entry.payload as ThreadCollapse;
+			// LWW against the local row: a fold made after this entry was queued
+			// already carries the whole set, so the older entry is superseded.
+			const local = await db.thread_collapse.get(tc.article_id);
+			if (local && isNewer(local.updated_at, tc.updated_at)) return; // superseded
+			await putThreadCollapse(tc);
+			return;
+		}
 		case 'settings': {
 			const patch = entry.payload as SettingsPatch;
 			const updated = await patchSettings(patch);
@@ -640,12 +667,41 @@ export async function enqueueAddArticleText(text: string, title = '', url = ''):
 	if (isOnline()) sync().catch(console.warn);
 }
 
+/**
+ * Enqueue the folded comment branches of an article and update the local row
+ * optimistically. `collapsed` is the complete set, so an empty array means the
+ * reader is fully unfolded.
+ */
+export async function enqueueThreadCollapse(articleId: string, collapsed: number[]): Promise<void> {
+	const record: ThreadCollapse = {
+		article_id: articleId,
+		collapsed,
+		updated_at: new Date().toISOString()
+	};
+
+	const local = await db.thread_collapse.get(articleId);
+	if (!local || !isNewer(local.updated_at, record.updated_at)) {
+		await db.thread_collapse.put(record);
+	}
+
+	await enqueueOutbox('collapse', {
+		article_id: record.article_id,
+		collapsed: record.collapsed,
+		updated_at: record.updated_at
+	});
+
+	if (isOnline()) sync().catch(console.warn);
+}
+
 /** Enqueue deleting an article and optimistically remove it locally. */
 export async function enqueueDelete(id: string): Promise<void> {
-	// Optimistic delete.
+	// Optimistic delete. Everything keyed by the article id goes with it —
+	// nothing can reach these rows once the article is gone, and the server
+	// drops its own copies through the FK cascade.
 	await db.articles_meta.delete(id);
 	await db.articles_payload.delete(id);
 	await db.progress.delete(id);
+	await db.thread_collapse.delete(id);
 
 	await enqueueOutbox('delete_article', { id });
 

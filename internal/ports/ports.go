@@ -288,6 +288,18 @@ type Store interface {
 	// the zero time for everything.
 	ListProgress(ctx context.Context, since time.Time) ([]model.Progress, error)
 
+	// UpsertThreadCollapse stores the folded comment branches of one article with
+	// the same LWW-on-UpdatedAt rule as UpsertProgress: applied=true when the
+	// incoming record won. It returns ErrNotFound when the article does not
+	// exist, so a fold for an article deleted on another device is rejected
+	// rather than resurrected as an orphan row.
+	UpsertThreadCollapse(ctx context.Context, tc model.ThreadCollapse) (applied bool, err error)
+
+	// ListThreadCollapse returns the folded-branch records updated at or after
+	// `since`. Pass the zero time for everything. It never returns nil on
+	// success, so the HTTP layer cannot serialize a null array.
+	ListThreadCollapse(ctx context.Context, since time.Time) ([]model.ThreadCollapse, error)
+
 	// RetryArticle resets a failed article to the queue state for the stage that
 	// still has to run so the worker resumes from there, clearing error. An
 	// article whose content is already stored goes back to fetched (re-enrich

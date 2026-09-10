@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -82,6 +83,11 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 	if err != nil {
 		return s.serverError(c, "markdown budget", err)
 	}
+	collapsed, err := s.store.ListThreadCollapse(ctx, since)
+	if err != nil {
+		return s.serverError(c, "list thread collapse", err)
+	}
+
 	// The vocabulary rides this delta rather than owning a second sync loop.
 	// Tombstones are included: a removal must never be inferred from absence
 	// (WORD-CACHE-ARCH.md §7.2).
@@ -95,6 +101,7 @@ func (s *Server) getConfig(c fiber.Ctx) error {
 		Settings:       settings,
 		Articles:       metas,
 		Progress:       progress,
+		Collapsed:      collapsed,
 		MarkdownBudget: budget,
 		Vocab:          vocabulary,
 		ServerInfo:     serverInfoFromConfig(s.cfg),
@@ -333,6 +340,44 @@ func (s *Server) putProgress(c fiber.Ctx) error {
 	return c.JSON(progressResponse{Applied: applied})
 }
 
+// putThreadCollapse handles PUT /api/articles/:id/collapse. Body:
+// {collapsed,updated_at}, where collapsed is the whole set of folded comment
+// branches (token indices of the author lines). The store applies LWW on
+// UpdatedAt and the response reports whether the incoming record won.
+//
+// The set is sent whole rather than as add/remove operations: a thread carries
+// a handful of folds, so shipping the state makes the merge one timestamp
+// comparison and leaves nothing to reconcile per branch.
+func (s *Server) putThreadCollapse(c fiber.Ctx) error {
+	id := c.Params("id")
+
+	var body threadCollapseRequest
+	if err := c.Bind().Body(&body); err != nil {
+		return sendError(c, fiber.StatusBadRequest, "invalid JSON body")
+	}
+	if body.UpdatedAt.IsZero() {
+		return sendError(c, fiber.StatusBadRequest, "updated_at is required")
+	}
+	if len(body.Collapsed) > model.MaxCollapsedBranches {
+		return sendError(c, fiber.StatusRequestEntityTooLarge,
+			fmt.Sprintf("at most %d collapsed branches are accepted", model.MaxCollapsedBranches))
+	}
+
+	applied, err := s.store.UpsertThreadCollapse(c.Context(), model.ThreadCollapse{
+		ArticleID: id,
+		Collapsed: body.Collapsed,
+		UpdatedAt: body.UpdatedAt.UTC(),
+	})
+	if err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return sendError(c, fiber.StatusNotFound, "article not found")
+		}
+		return s.serverError(c, "upsert thread collapse", err)
+	}
+
+	return c.JSON(progressResponse{Applied: applied})
+}
+
 // setPinned handles PUT /api/articles/:id/pin. Body: {pinned}. It flips the
 // article's library pin flag (bumping updated_at so the change syncs) and
 // returns 204. Unknown ids return 404.
@@ -495,6 +540,14 @@ type progressRequest struct {
 // progressResponse reports the LWW outcome of a progress upsert.
 type progressResponse struct {
 	Applied bool `json:"applied"`
+}
+
+// threadCollapseRequest is the PUT /api/articles/:id/collapse body. The id comes
+// from the path. Collapsed is the complete folded-branch set, so an empty array
+// means "nothing is folded" — not "no change".
+type threadCollapseRequest struct {
+	Collapsed []int     `json:"collapsed"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // pinRequest is the PUT /api/articles/:id/pin body. The id comes from the path.

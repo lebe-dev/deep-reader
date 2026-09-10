@@ -721,6 +721,12 @@ func TestDeleteArticle_Cascade(t *testing.T) {
 		t.Fatalf("UpsertProgress: %v", err)
 	}
 
+	// Insert folded comment branches.
+	fold := model.ThreadCollapse{ArticleID: a.ID, Collapsed: []int{3, 17}, UpdatedAt: time.Now().UTC().Truncate(time.Second)}
+	if _, err := s.UpsertThreadCollapse(ctx, fold); err != nil {
+		t.Fatalf("UpsertThreadCollapse: %v", err)
+	}
+
 	// Delete article.
 	if err := s.DeleteArticle(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteArticle: %v", err)
@@ -738,6 +744,16 @@ func TestDeleteArticle_Cascade(t *testing.T) {
 	}
 	if len(progs) != 0 {
 		t.Errorf("expected 0 progress after delete, got %d", len(progs))
+	}
+
+	// So should the folded comment branches: deleting an article must not leave
+	// reading state behind for an id nothing can reach any more.
+	folds, err := s.ListThreadCollapse(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListThreadCollapse after delete: %v", err)
+	}
+	if len(folds) != 0 {
+		t.Errorf("expected 0 collapsed-branch rows after delete, got %d", len(folds))
 	}
 
 	// Payload should be gone.
@@ -1930,5 +1946,124 @@ func TestForeignKeyErrorTextContract(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "FOREIGN KEY") {
 		t.Errorf("driver FK error text changed — isSQLiteForeignKey would stop mapping 404s.\n got: %v", err)
+	}
+}
+
+// ── Thread collapse ──────────────────────────────────────────────────────────
+
+func TestUpsertThreadCollapse_LWW(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	a := makeArticle("https://news.ycombinator.com/item?id=1")
+	if err := s.CreateArticle(ctx, a); err != nil {
+		t.Fatalf("CreateArticle: %v", err)
+	}
+	base := time.Now().UTC().Truncate(time.Second)
+
+	cases := []struct {
+		name      string
+		record    model.ThreadCollapse
+		wantApply bool
+	}{
+		{
+			name:      "the first record is stored",
+			record:    model.ThreadCollapse{ArticleID: a.ID, Collapsed: []int{4}, UpdatedAt: base},
+			wantApply: true,
+		},
+		{
+			name:      "a newer record wins",
+			record:    model.ThreadCollapse{ArticleID: a.ID, Collapsed: []int{4, 19}, UpdatedAt: base.Add(time.Second)},
+			wantApply: true,
+		},
+		{
+			name:      "an older record is rejected",
+			record:    model.ThreadCollapse{ArticleID: a.ID, Collapsed: []int{}, UpdatedAt: base.Add(-time.Second)},
+			wantApply: false,
+		},
+		{
+			name:      "an equal timestamp is rejected",
+			record:    model.ThreadCollapse{ArticleID: a.ID, Collapsed: []int{99}, UpdatedAt: base.Add(time.Second)},
+			wantApply: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			applied, err := s.UpsertThreadCollapse(ctx, tc.record)
+			if err != nil {
+				t.Fatalf("UpsertThreadCollapse: %v", err)
+			}
+			if applied != tc.wantApply {
+				t.Fatalf("applied = %v, want %v", applied, tc.wantApply)
+			}
+		})
+	}
+
+	folds, err := s.ListThreadCollapse(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListThreadCollapse: %v", err)
+	}
+	if len(folds) != 1 {
+		t.Fatalf("collapsed rows = %d, want 1", len(folds))
+	}
+	if got := folds[0].Collapsed; len(got) != 2 || got[0] != 4 || got[1] != 19 {
+		t.Errorf("stored branches = %v, want the winning record [4 19]", got)
+	}
+}
+
+func TestUpsertThreadCollapse_UnknownArticle(t *testing.T) {
+	s := openStore(t)
+
+	// A fold arriving for an article deleted on another device must be rejected,
+	// not stored as an orphan the article delete already cleaned up.
+	_, err := s.UpsertThreadCollapse(context.Background(), model.ThreadCollapse{
+		ArticleID: "no-such-id",
+		Collapsed: []int{1},
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
+	})
+	if !isErr(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestListThreadCollapseSince(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+
+	older := makeArticle("https://news.ycombinator.com/item?id=2")
+	newer := makeArticle("https://news.ycombinator.com/item?id=3")
+	for _, a := range []*model.Article{older, newer} {
+		if err := s.CreateArticle(ctx, a); err != nil {
+			t.Fatalf("CreateArticle: %v", err)
+		}
+	}
+
+	base := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.UpsertThreadCollapse(ctx, model.ThreadCollapse{ArticleID: older.ID, Collapsed: []int{1}, UpdatedAt: base.Add(-time.Hour)}); err != nil {
+		t.Fatalf("UpsertThreadCollapse older: %v", err)
+	}
+	if _, err := s.UpsertThreadCollapse(ctx, model.ThreadCollapse{ArticleID: newer.ID, Collapsed: []int{2}, UpdatedAt: base}); err != nil {
+		t.Fatalf("UpsertThreadCollapse newer: %v", err)
+	}
+
+	folds, err := s.ListThreadCollapse(ctx, base)
+	if err != nil {
+		t.Fatalf("ListThreadCollapse: %v", err)
+	}
+	if len(folds) != 1 || folds[0].ArticleID != newer.ID {
+		t.Fatalf("delta = %v, want only the record at or after the cursor", folds)
+	}
+
+	// An empty set is a real state ("nothing is folded"), not a missing row.
+	if _, err := s.UpsertThreadCollapse(ctx, model.ThreadCollapse{ArticleID: newer.ID, Collapsed: nil, UpdatedAt: base.Add(time.Second)}); err != nil {
+		t.Fatalf("UpsertThreadCollapse unfold: %v", err)
+	}
+	folds, err = s.ListThreadCollapse(ctx, base)
+	if err != nil {
+		t.Fatalf("ListThreadCollapse after unfold: %v", err)
+	}
+	if len(folds) != 1 || folds[0].Collapsed == nil || len(folds[0].Collapsed) != 0 {
+		t.Fatalf("unfolded record = %v, want an empty (non-nil) set", folds)
 	}
 }

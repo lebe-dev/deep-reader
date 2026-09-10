@@ -52,23 +52,29 @@ type fakeStore struct {
 	settings       model.Settings
 	updateSettings func(model.SettingsPatch) (model.Settings, error)
 	metas          []model.ArticleMeta
-	progress       []model.Progress
-	payload        *model.ArticlePayload
-	getPayloadErr  error
-	rawResult      *model.ArticleRaw
-	rawErr         error
-	deleteErr      error
-	retryErr       error
-	reEnrichErr    error
-	upsertApplied  bool
-	upsertErr      error
-	lastUpsert     model.Progress
-	lastSinceMeta  time.Time
-	markdownUsed   int
-	markdownErr    error
-	setPinnedErr   error
-	lastPinID      string
-	lastPinned     bool
+	// Folded comment branches: what ListThreadCollapse returns, what the last
+	// upsert carried, and the outcome it reports.
+	collapsed       []model.ThreadCollapse
+	lastCollapse    model.ThreadCollapse
+	collapseApplied bool
+	collapseErr     error
+	progress        []model.Progress
+	payload         *model.ArticlePayload
+	getPayloadErr   error
+	rawResult       *model.ArticleRaw
+	rawErr          error
+	deleteErr       error
+	retryErr        error
+	reEnrichErr     error
+	upsertApplied   bool
+	upsertErr       error
+	lastUpsert      model.Progress
+	lastSinceMeta   time.Time
+	markdownUsed    int
+	markdownErr     error
+	setPinnedErr    error
+	lastPinID       string
+	lastPinned      bool
 
 	// article backs GetArticle; nil means the library has no such article.
 	article *model.Article
@@ -235,6 +241,15 @@ func (f *fakeStore) UpsertProgress(_ context.Context, p model.Progress) (bool, e
 
 func (f *fakeStore) ListProgress(context.Context, time.Time) ([]model.Progress, error) {
 	return f.progress, nil
+}
+
+func (f *fakeStore) UpsertThreadCollapse(_ context.Context, tc model.ThreadCollapse) (bool, error) {
+	f.lastCollapse = tc
+	return f.collapseApplied, f.collapseErr
+}
+
+func (f *fakeStore) ListThreadCollapse(context.Context, time.Time) ([]model.ThreadCollapse, error) {
+	return f.collapsed, nil
 }
 func (f *fakeStore) RetryArticle(context.Context, string) error { return f.retryErr }
 
@@ -934,7 +949,8 @@ func TestConfigReturnsSettingsAndArticles(t *testing.T) {
 			{ID: "a1", Title: "One", Status: model.StatusEnriched},
 			{ID: "a2", Title: "Two", Status: model.StatusQueued},
 		},
-		progress: []model.Progress{{ArticleID: "a1", Position: 5}},
+		progress:  []model.Progress{{ArticleID: "a1", Position: 5}},
+		collapsed: []model.ThreadCollapse{{ArticleID: "a1", Collapsed: []int{4}}},
 	}
 	s := newTestServer(t, st, &fakeIngestor{})
 
@@ -951,6 +967,9 @@ func TestConfigReturnsSettingsAndArticles(t *testing.T) {
 	}
 	if len(got.Progress) != 1 {
 		t.Errorf("progress = %d, want 1", len(got.Progress))
+	}
+	if len(got.Collapsed) != 1 || len(got.Collapsed[0].Collapsed) != 1 {
+		t.Errorf("collapsed = %v, want the folded branches of a1", got.Collapsed)
 	}
 	if got.ServerTime.IsZero() {
 		t.Error("server_time should be set")
@@ -1094,6 +1113,68 @@ func TestProgressLWW(t *testing.T) {
 		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/progress", body, testToken)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+}
+
+func TestThreadCollapseLWW(t *testing.T) {
+	now := time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+
+	t.Run("applied", func(t *testing.T) {
+		st := &fakeStore{collapseApplied: true}
+		s := newTestServer(t, st, &fakeIngestor{})
+		body := threadCollapseRequest{Collapsed: []int{4, 19}, UpdatedAt: now}
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/collapse", body, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := decode[progressResponse](t, resp); !got.Applied {
+			t.Error("applied = false, want true")
+		}
+		if st.lastCollapse.ArticleID != "a1" || len(st.lastCollapse.Collapsed) != 2 {
+			t.Errorf("store got %+v", st.lastCollapse)
+		}
+	})
+
+	t.Run("unfolding everything is a state, not a no-op", func(t *testing.T) {
+		st := &fakeStore{collapseApplied: true}
+		s := newTestServer(t, st, &fakeIngestor{})
+		body := threadCollapseRequest{Collapsed: []int{}, UpdatedAt: now}
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/collapse", body, testToken)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if len(st.lastCollapse.Collapsed) != 0 {
+			t.Errorf("store got %+v, want an empty set", st.lastCollapse)
+		}
+	})
+
+	t.Run("missing updated_at", func(t *testing.T) {
+		s := newTestServer(t, &fakeStore{}, &fakeIngestor{})
+		body := threadCollapseRequest{Collapsed: []int{1}}
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/collapse", body, testToken)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("unknown article", func(t *testing.T) {
+		st := &fakeStore{collapseErr: ports.ErrNotFound}
+		s := newTestServer(t, st, &fakeIngestor{})
+		body := threadCollapseRequest{Collapsed: []int{1}, UpdatedAt: now}
+		resp := doReq(t, s, http.MethodPut, "/api/articles/gone/collapse", body, testToken)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+
+	t.Run("an oversized set is refused", func(t *testing.T) {
+		st := &fakeStore{collapseApplied: true}
+		s := newTestServer(t, st, &fakeIngestor{})
+		body := threadCollapseRequest{Collapsed: make([]int, model.MaxCollapsedBranches+1), UpdatedAt: now}
+		resp := doReq(t, s, http.MethodPut, "/api/articles/a1/collapse", body, testToken)
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", resp.StatusCode)
 		}
 	})
 }

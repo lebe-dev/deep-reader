@@ -566,6 +566,25 @@ type Progress struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ThreadCollapse is the set of comment branches the user folded in one article,
+// synced with the same LWW-on-UpdatedAt rules as Progress. Collapsed holds the
+// token index of the first word of each folded author line — the identity the
+// reader already uses for a position inside an article.
+//
+// It is a whole-set record, not a per-branch one: a thread has a handful of
+// folds at most, and shipping the set as a unit keeps the merge a single
+// timestamp comparison instead of a per-branch tombstone protocol.
+type ThreadCollapse struct {
+	ArticleID string    `json:"article_id"`
+	Collapsed []int     `json:"collapsed"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MaxCollapsedBranches caps the folded-branch set accepted by the API. The
+// deepest threads run to a few thousand comments, so a set larger than this is
+// not a reading state but a client bug or an abusive payload.
+const MaxCollapsedBranches = 5000
+
 // ArticleMeta is the library-listing projection of an Article returned by
 // GET /api/config. It deliberately omits the heavy original_text / tokens /
 // enrichment payload.
@@ -627,6 +646,10 @@ type ArticlePayload struct {
 	// ContentFormat mirrors Article.ContentFormat so the reader knows whether to
 	// render OriginalText as Markdown. Empty is treated as plain.
 	ContentFormat string `json:"content_format,omitempty"`
+	// SourceType mirrors Article.SourceType. The reader needs it to tell a
+	// comment thread from an ordinary Markdown article: only a thread gets the
+	// foldable branches (a heading in an article is a section, not a comment).
+	SourceType string `json:"source_type,omitempty"`
 	// Summary is the article abstract produced by the first enrichment step,
 	// shown in the reader. Empty until summarized.
 	Summary           string      `json:"summary,omitempty"`
@@ -759,8 +782,11 @@ type ConfigResponse struct {
 	// cursor, tombstones included (DeletedAt set). Unlike Articles, absence from
 	// the response NEVER means deletion — removals travel as explicit tombstones
 	// (WORD-CACHE-ARCH.md §7.2).
-	Vocab      []VocabEntry `json:"vocab"`
-	ServerInfo ServerInfo   `json:"server_info"`
+	Vocab []VocabEntry `json:"vocab"`
+	// Collapsed carries the folded comment branches per article, changed at or
+	// after the sync cursor. Like Progress it merges by LWW on UpdatedAt.
+	Collapsed  []ThreadCollapse `json:"collapsed"`
+	ServerInfo ServerInfo       `json:"server_info"`
 	// Sentry carries the non-secret browser Sentry configuration. It is present
 	// even for unauthenticated callers so error reporting works on the /login and
 	// /setup pages; DSN is empty when frontend reporting is disabled.

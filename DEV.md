@@ -211,6 +211,20 @@ its host so the URL is not tokenized into junk words. A deleted comment is
 skipped while its replies are kept. The story's linked page is offered as a
 link, never fetched: one card is one text.
 
+In the reader each comment is a foldable branch: the author line carries a
+chevron, and folding hides the comment's body together with every reply under it
+(the count is shown so a folded branch says how much it hides). The fold set is
+persisted per article — locally in IndexedDB (`thread_collapse`) and on the
+server (`PUT /api/articles/:id/collapse`, delivered back in the `collapsed` list
+of `GET /api/config`), merged Last-Write-Wins on `updated_at` exactly like
+reading progress, so a branch folded offline on a phone survives and reaches the
+desktop on the next sync. A branch is identified by the token index of the first
+word of its author line, which is stable across devices and byte encodings.
+Deleting an article removes its folds: through the FK cascade on the server, in
+`enqueueDelete` locally, and in the full-sync reconciliation for an article
+deleted on another device. A published page always shows the whole thread —
+folding is a reading state, not part of the document.
+
 An ingested thread is stamped `source_type=comments` (articles and pasted text
 are `article`), which is what the library uses for the discussion icon and the
 articles/discussions filter. There are no environment variables: the thread

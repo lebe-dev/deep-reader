@@ -205,6 +205,12 @@ export interface ArticlePayload {
 	 * the token stream is rendered as prose.
 	 */
 	content_format?: 'plain' | 'markdown';
+	/**
+	 * What kind of content this is (see ArticleMeta.source_type). Only
+	 * `'comments'` gets foldable branches in the reader: a heading in an
+	 * ordinary article is a section, not a comment with replies under it.
+	 */
+	source_type?: 'article' | 'comments';
 	tokens: Token[];
 	/** Short LLM-produced abstract shown in the reader. Empty until summarized. */
 	summary?: string;
@@ -238,6 +244,25 @@ export interface Progress {
 	is_read: boolean;
 	updated_at: string;
 }
+
+/**
+ * The comment branches folded in one article, LWW-merged on `updated_at` just
+ * like Progress.
+ *
+ * `collapsed` holds the token index of the first word of each folded author
+ * line — the same identity the reader uses for a reading position. The set is
+ * carried whole rather than as per-branch operations: a thread has a handful of
+ * folds, so the merge stays one timestamp comparison, and an empty array is a
+ * real state ("nothing is folded"), never "no change".
+ */
+export interface ThreadCollapse {
+	article_id: string;
+	collapsed: number[];
+	updated_at: string;
+}
+
+/** Body of `PUT /api/articles/:id/collapse` (the id travels in the path). */
+export type ThreadCollapseUpdate = Omit<ThreadCollapse, 'article_id'>;
 
 // ---------------------------------------------------------------------------
 // Settings (spec §8 `settings`)
@@ -513,6 +538,11 @@ export interface ConfigResponse {
 	settings: Settings;
 	articles: ArticleMeta[];
 	progress: Progress[];
+	/**
+	 * Folded comment branches per article, changed at or after the cursor. Like
+	 * `progress` it merges by LWW on `updated_at`.
+	 */
+	collapsed?: ThreadCollapse[];
 	/** markdown.new daily request-unit budget. */
 	markdown_budget: MarkdownBudget;
 	/**

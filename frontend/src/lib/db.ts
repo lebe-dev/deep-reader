@@ -16,6 +16,8 @@ import type {
 	Settings,
 	SettingsPatch,
 	ProgressUpdate,
+	ThreadCollapse,
+	ThreadCollapseUpdate,
 	ReEnrichMode,
 	LookupEvent,
 	VocabEntry
@@ -28,6 +30,7 @@ import type {
 /** Discriminator for a queued offline write. */
 export type OutboxKind =
 	| 'progress'
+	| 'collapse'
 	| 'settings'
 	| 'add_article'
 	| 'add_text'
@@ -42,6 +45,11 @@ export type OutboxKind =
 /** Payload shapes keyed by outbox kind. */
 export interface OutboxPayloadMap {
 	progress: { article_id: string } & ProgressUpdate;
+	/**
+	 * The whole folded-branch set of one article. Replayed as a state, so a
+	 * duplicate delivery is a no-op and the newest write wins by timestamp.
+	 */
+	collapse: { article_id: string } & ThreadCollapseUpdate;
 	settings: SettingsPatch;
 	add_article: { url: string };
 	add_text: { text: string; title: string; url?: string };
@@ -103,7 +111,7 @@ export interface SyncState {
 // ---------------------------------------------------------------------------
 
 /** Current schema version. Bump this whenever {@link STORES} changes. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * Store/index definitions for {@link SCHEMA_VERSION}. Frozen and exported so a
@@ -119,6 +127,8 @@ export const STORES = Object.freeze({
 	articles_payload: 'id',
 	// Reading progress, keyed by article id.
 	progress: 'article_id, updated_at',
+	// Folded comment branches of a thread, keyed by article id.
+	thread_collapse: 'article_id, updated_at',
 	// Auto-increment id preserves FIFO insertion order; index by kind.
 	outbox: '++id, kind, created_at',
 	// Singleton config / cursor row.
@@ -132,6 +142,7 @@ export class DeepReaderDB extends Dexie {
 	articles_meta!: Table<ArticleMeta, string>;
 	articles_payload!: Table<ArticlePayload, string>;
 	progress!: Table<Progress, string>;
+	thread_collapse!: Table<ThreadCollapse, string>;
 	outbox!: Table<OutboxEntry, number>;
 	sync_state!: Table<SyncState, string>;
 	vocab_entries!: Table<VocabEntry, string>;

@@ -71,8 +71,38 @@ export interface QuoteNode {
 	children: BlockNode[];
 }
 
+/** A heading block — in a thread, the author line of a comment. */
+export type HeadingBlock = Extract<Block, { kind: 'heading' }>;
+
 /** A node of the nested block tree: either a block or a quote level. */
 export type BlockNode = Block | QuoteNode;
+
+/**
+ * One comment of a discussion thread: its author line, everything it said, and
+ * the replies nested under it — the unit the reader folds.
+ *
+ * `key` is the token index of the first word of the author line. It is the fold
+ * identity persisted locally and on the server: a token index is stable across
+ * devices (unlike a byte offset, which differs between Go's UTF-8 and the
+ * browser's UTF-16) and is what the reader already uses to name a position
+ * inside an article. A comment whose author line carries no word token gets
+ * key -1 and simply cannot be folded.
+ */
+export interface CommentNode {
+	kind: 'comment';
+	key: number;
+	/** Nesting level: 0 for a top-level comment, +1 per reply. */
+	depth: number;
+	/** The author line. */
+	heading: HeadingBlock;
+	/** The comment body and the replies to it. */
+	children: RenderNode[];
+	/** How many comments are nested inside, at any depth ("N replies" when folded). */
+	replies: number;
+}
+
+/** A node of the tree the reader renders: a thread groups blocks into comments. */
+export type RenderNode = BlockNode | CommentNode;
 
 // ---------------------------------------------------------------------------
 // Block-level patterns (mirroring internal/markdown/text.go)
@@ -584,4 +614,85 @@ export function nestBlocks(blocks: Block[]): BlockNode[] {
 	}
 
 	return root;
+}
+
+/**
+ * Regroup a nested block tree into comments: each author line takes the blocks
+ * that follow it, and the quote level after it holds its replies, which become
+ * its children.
+ *
+ * This is what makes a branch foldable — the blocks of one comment and its whole
+ * sub-thread become a single node — and it is why the reader nests comments
+ * directly instead of rendering the raw quote levels: a quote level holds every
+ * reply to the same parent, so folding one of them would fold its siblings too.
+ *
+ * A quote level with no author line in it is someone quoting rather than
+ * replying, so it stays a QuoteNode inside the body it belongs to.
+ */
+export function groupComments(nodes: BlockNode[], depth = 0): RenderNode[] {
+	const out: RenderNode[] = [];
+	let current: CommentNode | null = null;
+
+	const add = (node: RenderNode): void => {
+		if (current) {
+			current.children.push(node);
+			return;
+		}
+		out.push(node);
+	};
+
+	for (const node of nodes) {
+		if (node.kind === 'heading') {
+			current = {
+				kind: 'comment',
+				key: headingKey(node),
+				depth,
+				heading: node,
+				children: [],
+				replies: 0
+			};
+			out.push(current);
+			continue;
+		}
+
+		if (node.kind === 'quote') {
+			// Replies live one level deeper than the comment they answer; a
+			// quotation stays at the depth of the body that contains it.
+			const inner = groupComments(node.children, current ? depth + 1 : depth);
+			if (inner.some((n) => n.kind === 'comment')) {
+				for (const child of inner) add(child);
+			} else {
+				add({ ...node, children: inner as BlockNode[] });
+			}
+			continue;
+		}
+
+		add(node);
+	}
+
+	for (const node of out) {
+		if (node.kind === 'comment') node.replies = countComments(node.children);
+	}
+	return out;
+}
+
+/** Token index of the first word of an author line, or -1 when it has none. */
+function headingKey(heading: HeadingBlock): number {
+	for (const segment of heading.inline) {
+		if (segment.kind === 'word') return segment.index;
+	}
+	return -1;
+}
+
+/** Number of comments nested in a subtree, at any depth. */
+function countComments(nodes: RenderNode[]): number {
+	let total = 0;
+	for (const node of nodes) {
+		if (node.kind === 'comment') {
+			total += 1 + countComments(node.children);
+			continue;
+		}
+		if (node.kind === 'quote') total += countComments(node.children);
+	}
+	return total;
 }

@@ -43,11 +43,16 @@
 	} from './reader-utils';
 	import {
 		buildMarkdownBlocks,
+		groupComments,
 		nestBlocks,
 		type BlockNode,
+		type CommentNode,
 		type InlineMark,
-		type InlineSegment
+		type InlineSegment,
+		type RenderNode
 	} from './markdown-blocks';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import {
 		buildOverlayIndices,
 		emptyVocabIndex,
@@ -93,6 +98,20 @@
 		 * when the selection was cancelled (Escape).
 		 */
 		onPhraseSelect?: (tokenIndex: number | null) => void;
+		/**
+		 * True for a comment thread, where each author line opens a branch the
+		 * reader can fold. An ordinary Markdown article keeps its headings as
+		 * headings: a section is not a comment with replies under it.
+		 */
+		threaded?: boolean;
+		/**
+		 * Keys (author-line token indices) of the branches currently folded. The
+		 * page owns this state because it is persisted and synced; the renderer
+		 * only reads it and reports toggles.
+		 */
+		collapsed?: Set<number>;
+		/** Called with a branch key when the user folds or unfolds it. */
+		onToggleCollapse?: (key: number) => void;
 	}
 
 	let {
@@ -106,7 +125,10 @@
 		onWordClick,
 		onSentenceMenu,
 		phraseAnchor = null,
-		onPhraseSelect
+		onPhraseSelect,
+		threaded = false,
+		collapsed,
+		onToggleCollapse
 	}: Props = $props();
 
 	/** True while the user is picking the second end of a phrase. */
@@ -191,9 +213,26 @@
 	// the same interactive word tokens, then nest them by blockquote depth.
 	// Plain articles use the flat `segments`.
 	const isMarkdown = $derived(format === 'markdown');
-	const blockTree = $derived(
-		isMarkdown ? nestBlocks(buildMarkdownBlocks(tokens, originalText)) : []
-	);
+	const blockTree = $derived.by((): RenderNode[] => {
+		if (!isMarkdown) return [];
+		const nested = nestBlocks(buildMarkdownBlocks(tokens, originalText));
+		// In a thread the quote levels are regrouped into comments so a branch —
+		// a comment plus everything under it — can be folded as one unit.
+		return threaded ? groupComments(nested) : nested;
+	});
+
+	/** Whether a branch is folded. A comment with no key cannot be folded. */
+	function isFolded(node: CommentNode): boolean {
+		return node.key >= 0 && (collapsed?.has(node.key) ?? false);
+	}
+
+	/** The visible text of an inline run — used for the fold button's label. */
+	function inlineText(segments: InlineSegment[]): string {
+		return segments
+			.map((s) => (s.kind === 'image' ? '' : s.text))
+			.join('')
+			.trim();
+	}
 
 	// A quote level that opens with a heading is a comment in a discussion
 	// thread (the heading is its author), so it renders as an indented column of
@@ -631,9 +670,51 @@
 	{/each}
 {/snippet}
 
-{#snippet blockNodes(nodes: BlockNode[])}
+{#snippet blockNodes(nodes: RenderNode[])}
 	{#each nodes as node, bi (bi)}
-		{#if node.kind === 'quote'}
+		{#if node.kind === 'comment'}
+			{@const folded = isFolded(node)}
+			<!-- One comment of a thread: the author line always stays visible so a
+			     folded branch can be found and reopened; the body and every reply
+			     under it live inside the fold. -->
+			<div class="reader-comment" class:is-reply={node.depth > 0}>
+				<div class="reader-comment-head">
+					{#if node.key >= 0}
+						<button
+							type="button"
+							class="reader-fold"
+							aria-expanded={!folded}
+							aria-label={folded
+								? `Expand the branch by ${inlineText(node.heading.inline)}`
+								: `Collapse the branch by ${inlineText(node.heading.inline)}`}
+							onclick={() => onToggleCollapse?.(node.key)}
+						>
+							{#if folded}
+								<ChevronRightIcon class="size-3.5" />
+							{:else}
+								<ChevronDownIcon class="size-3.5" />
+							{/if}
+						</button>
+					{/if}
+					<svelte:element this={`h${node.heading.level}`} class="reader-heading"
+						>{@render inline(node.heading.inline)}</svelte:element
+					>
+					{#if folded && node.replies > 0}
+						<button
+							type="button"
+							class="reader-fold-count"
+							onclick={() => onToggleCollapse?.(node.key)}
+						>
+							{node.replies}
+							{node.replies === 1 ? 'reply' : 'replies'}
+						</button>
+					{/if}
+				</div>
+				{#if !folded}
+					{@render blockNodes(node.children)}
+				{/if}
+			</div>
+		{:else if node.kind === 'quote'}
 			<!-- One reply level of a discussion thread (or one level of an ordinary
 			     nested quote): an indented column with a rail, so who answers whom
 			     is visible instead of implied by a heading size. -->
@@ -834,6 +915,61 @@
 		margin: 0.2em 0;
 	}
 
+	/* One comment of a thread. A reply carries the rail its parent's replies
+	   share, the same line quote nesting draws — the fold lives on the comment,
+	   so the rail is drawn per comment rather than per quote level. */
+	.reader-comment.is-reply {
+		margin: 0 0 1em;
+		padding-left: 0.9em;
+		border-left: 2px solid var(--color-border, #d4d4d8);
+	}
+	.reader-comment > :global(*:last-child) {
+		margin-bottom: 0;
+	}
+	.reader-comment-head {
+		display: flex;
+		align-items: baseline;
+		gap: 0.4em;
+	}
+	/* The fold control sits in the gutter of the author line, close enough to
+	   read as part of it and large enough to hit on a phone. */
+	.reader-fold {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.5em;
+		height: 1.5em;
+		margin-left: -0.35em;
+		border: 0;
+		border-radius: 0.35rem;
+		background: none;
+		color: var(--color-muted-foreground, #6b7280);
+		cursor: pointer;
+	}
+	.reader-fold:hover,
+	.reader-fold:focus-visible {
+		background: var(--color-muted, #f4f4f5);
+	}
+	.reader-fold-count {
+		border: 0;
+		background: none;
+		padding: 0;
+		color: var(--color-muted-foreground, #6b7280);
+		font-family: inherit;
+		font-size: 0.8em;
+		cursor: pointer;
+	}
+	.reader-fold-count:hover {
+		text-decoration: underline;
+	}
+
+	@media (max-width: 480px) {
+		.reader-comment.is-reply {
+			padding-left: 0.6em;
+		}
+	}
+
 	/* One level of quote nesting. In a comment thread this is one reply level,
 	   so the rail is the thread line; the indentation is deliberately small
 	   because a deep chain multiplies it (the backend caps the depth at 6). */
@@ -852,6 +988,7 @@
 		font-style: italic;
 	}
 	/* The author line of a comment reads as a label, not as a section heading. */
+	.reader-comment :global(h4.reader-heading),
 	.reader-quote.is-comment :global(h4.reader-heading),
 	.reader-markdown > :global(h4.reader-heading) {
 		margin-bottom: 0.35em;

@@ -412,7 +412,7 @@ func (s *SQLite) GetArticle(ctx context.Context, id string) (*model.Article, err
 // GetArticlePayload returns the client-facing payload (tokens + enrichment).
 // Enrichment is nil when the article has no enrichment row.
 func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.ArticlePayload, error) {
-	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.content_format, a.tokens,
+	const q = `SELECT a.id, a.title, a.author, a.lang, a.original_text, a.content_format, a.source_type, a.tokens,
                       a.summary, a.status, a.enrichment_version, a.enrichment_coverage, a.progress_stage, a.llm_model, e.enrichment
                FROM articles a
                LEFT JOIN enrichments e ON e.article_id = a.id
@@ -422,7 +422,7 @@ func (s *SQLite) GetArticlePayload(ctx context.Context, id string) (*model.Artic
 	var p model.ArticlePayload
 	var tokJSON string
 	var enrichJSON sql.NullString
-	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText, &p.ContentFormat,
+	if err := row.Scan(&p.ID, &p.Title, &p.Author, &p.Lang, &p.OriginalText, &p.ContentFormat, &p.SourceType,
 		&tokJSON, &p.Summary, &p.Status, &p.EnrichmentVersion, &p.EnrichmentCoverage, &p.ProgressStage, &p.LLMModel, &enrichJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ports.ErrNotFound
@@ -1122,6 +1122,107 @@ func (s *SQLite) ListProgress(ctx context.Context, since time.Time) ([]model.Pro
 		progs = []model.Progress{}
 	}
 	return progs, nil
+}
+
+// UpsertThreadCollapse stores the folded comment branches of an article with
+// Last-Write-Wins semantics on UpdatedAt, mirroring [SQLite.UpsertProgress].
+// Returns applied=true when the incoming record won, and [ports.ErrNotFound]
+// when the article does not exist — a fold arriving for an article deleted on
+// another device must not create an orphan row the delete already cleaned up.
+func (s *SQLite) UpsertThreadCollapse(ctx context.Context, tc model.ThreadCollapse) (bool, error) {
+	collapsed := tc.Collapsed
+	if collapsed == nil {
+		collapsed = []int{}
+	}
+	payload, err := json.Marshal(collapsed)
+	if err != nil {
+		return false, fmt.Errorf("store: UpsertThreadCollapse marshal: %w", err)
+	}
+
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	var existingUpdatedAt string
+	err = s.write.QueryRowContext(ctx,
+		`SELECT updated_at FROM thread_collapse WHERE article_id=?`, tc.ArticleID,
+	).Scan(&existingUpdatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("store: UpsertThreadCollapse read: %w", err)
+	}
+
+	if err == nil {
+		existing, parseErr := parseTime(existingUpdatedAt)
+		if parseErr != nil {
+			return false, parseErr
+		}
+		if !existing.IsZero() && !tc.UpdatedAt.After(existing) {
+			slog.Debug("store: thread collapse upsert rejected by LWW",
+				"article_id", tc.ArticleID,
+				"incoming_updated_at", tc.UpdatedAt,
+				"existing_updated_at", existing,
+			)
+			return false, nil
+		}
+	}
+
+	const q = `INSERT INTO thread_collapse (article_id, collapsed, updated_at)
+               VALUES (?,?,?)
+               ON CONFLICT(article_id) DO UPDATE SET
+                   collapsed=excluded.collapsed,
+                   updated_at=excluded.updated_at`
+	if _, err := s.write.ExecContext(ctx, q, tc.ArticleID, string(payload), fmtTime(tc.UpdatedAt)); err != nil {
+		if isSQLiteForeignKey(err) {
+			return false, ports.ErrNotFound
+		}
+		return false, fmt.Errorf("store: UpsertThreadCollapse write: %w", err)
+	}
+	return true, nil
+}
+
+// ListThreadCollapse returns the folded-branch records whose updated_at is >=
+// since. Pass the zero time for everything. The bound is inclusive for the same
+// reason as [SQLite.ListProgress]: a write landing in the second the cursor was
+// issued must still ride the next delta, and the client de-dups it by LWW.
+func (s *SQLite) ListThreadCollapse(ctx context.Context, since time.Time) ([]model.ThreadCollapse, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if since.IsZero() {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT article_id, collapsed, updated_at FROM thread_collapse`)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT article_id, collapsed, updated_at FROM thread_collapse WHERE updated_at >= ?`,
+			fmtTime(since))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: ListThreadCollapse: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]model.ThreadCollapse, 0, 8)
+	for rows.Next() {
+		var tc model.ThreadCollapse
+		var collapsedJSON, updatedAtStr string
+		if err := rows.Scan(&tc.ArticleID, &collapsedJSON, &updatedAtStr); err != nil {
+			return nil, fmt.Errorf("store: ListThreadCollapse scan: %w", err)
+		}
+		if err := json.Unmarshal([]byte(collapsedJSON), &tc.Collapsed); err != nil {
+			return nil, fmt.Errorf("store: ListThreadCollapse unmarshal %s: %w", tc.ArticleID, err)
+		}
+		if tc.Collapsed == nil {
+			tc.Collapsed = []int{}
+		}
+		if tc.UpdatedAt, err = parseTime(updatedAtStr); err != nil {
+			return nil, err
+		}
+		out = append(out, tc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: ListThreadCollapse rows: %w", err)
+	}
+	return out, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

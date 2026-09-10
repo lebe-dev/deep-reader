@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
 	buildMarkdownBlocks,
+	groupComments,
 	nestBlocks,
 	type Block,
 	type BlockNode,
+	type RenderNode,
 	type InlineSegment
 } from './markdown-blocks';
 import type { Token } from '$lib/types';
@@ -234,5 +236,75 @@ describe('nestBlocks', () => {
 			'hr',
 			'paragraph'
 		]);
+	});
+});
+
+describe('groupComments', () => {
+	function comments(text: string): RenderNode[] {
+		return groupComments(nestBlocks(build(text)));
+	}
+
+	/** Compact shape: a comment as "author(replies)" with its children nested. */
+	function shape(nodes: RenderNode[]): unknown[] {
+		return nodes.map((n) => {
+			if (n.kind === 'comment') {
+				const author = n.heading.kind === 'heading' ? inlineText(n.heading.inline).trim() : '?';
+				return [`${author}(${n.replies})@${n.depth}`, shape(n.children)];
+			}
+			if (n.kind === 'quote') return ['quote', shape(n.children)];
+			return n.kind;
+		});
+	}
+
+	const thread =
+		'#### alice\n\nRoot.\n\n' +
+		'> #### bob\n>\n> Reply.\n>\n' +
+		'> > #### carol\n> >\n> > Deeper.\n>\n' +
+		'> #### dave\n>\n> Other reply.\n\n' +
+		'#### erin\n\nSecond root.';
+
+	it('nests each reply under the comment it answers', () => {
+		expect(shape(comments(thread))).toEqual([
+			[
+				'alice(3)@0',
+				[
+					'paragraph',
+					['bob(1)@1', ['paragraph', ['carol(0)@2', ['paragraph']]]],
+					['dave(0)@1', ['paragraph']]
+				]
+			],
+			['erin(0)@0', ['paragraph']]
+		]);
+	});
+
+	it('separates siblings so folding one does not fold the other', () => {
+		// bob and dave share a quote level in the block tree; as comments they are
+		// two nodes, which is the whole point of the regrouping.
+		const [alice] = comments(thread) as [Extract<RenderNode, { kind: 'comment' }>];
+		const replies = alice.children.filter((n) => n.kind === 'comment');
+		expect(replies).toHaveLength(2);
+		expect(replies[0].key).not.toBe(replies[1].key);
+	});
+
+	it('keys a comment by the first word of its author line', () => {
+		const [alice] = comments('#### alice\n\nRoot.') as [Extract<RenderNode, { kind: 'comment' }>];
+		// "alice" is the first word token in the source, index 0.
+		expect(alice.key).toBe(0);
+	});
+
+	it('counts every nested comment as a reply', () => {
+		const [alice] = comments(thread) as [Extract<RenderNode, { kind: 'comment' }>];
+		expect(alice.replies).toBe(3);
+	});
+
+	it('keeps a quotation inside the body instead of making it a comment', () => {
+		const nodes = comments('#### bob\n\n> *what alice said*\n\nMy answer.');
+		const [bob] = nodes as [Extract<RenderNode, { kind: 'comment' }>];
+		expect(bob.replies).toBe(0);
+		expect(bob.children.map((n) => n.kind)).toEqual(['quote', 'paragraph']);
+	});
+
+	it('leaves an article without author lines untouched', () => {
+		expect(shape(comments('Just prose.\n\nMore prose.'))).toEqual(['paragraph', 'paragraph']);
 	});
 });

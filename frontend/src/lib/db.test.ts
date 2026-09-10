@@ -30,12 +30,12 @@ afterEach(() => {
 });
 
 describe('schema / version', () => {
-	it('declares version 2 with no upgrade path (guards a future bricking change)', async () => {
+	it('declares version 3 with no upgrade path (guards a future bricking change)', async () => {
 		const { SCHEMA_VERSION } = await freshDb();
 		// If this fails, a store/index change was made: add `.version(N).upgrade()`
 		// in db.ts and bump SCHEMA_VERSION here so existing DBs open instead of
 		// throwing VersionError for returning users.
-		expect(SCHEMA_VERSION).toBe(2);
+		expect(SCHEMA_VERSION).toBe(3);
 	});
 
 	it('pins the store/index definitions — any change must be paired with a version bump', async () => {
@@ -46,6 +46,7 @@ describe('schema / version', () => {
 			articles_meta: 'id, status, created_at, updated_at',
 			articles_payload: 'id',
 			progress: 'article_id, updated_at',
+			thread_collapse: 'article_id, updated_at',
 			outbox: '++id, kind, created_at',
 			sync_state: 'id',
 			vocab_entries: 'entry_key, kind, last_seen, count'
@@ -62,6 +63,7 @@ describe('schema / version', () => {
 			'outbox',
 			'progress',
 			'sync_state',
+			'thread_collapse',
 			'vocab_entries'
 		]);
 		db.close();

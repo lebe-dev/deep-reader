@@ -287,6 +287,12 @@ func (f *fakeStore) UpsertProgress(_ context.Context, _ model.Progress) (bool, e
 func (f *fakeStore) ListProgress(_ context.Context, _ time.Time) ([]model.Progress, error) {
 	return nil, nil
 }
+func (f *fakeStore) UpsertThreadCollapse(_ context.Context, _ model.ThreadCollapse) (bool, error) {
+	return false, nil
+}
+func (f *fakeStore) ListThreadCollapse(_ context.Context, _ time.Time) ([]model.ThreadCollapse, error) {
+	return nil, nil
+}
 
 func (f *fakeStore) RequeueForVersion(_ context.Context, id string, enrichmentVersion int) (string, error) {
 	f.mu.Lock()
